@@ -1,0 +1,33 @@
+{
+  "name": "@p2p/client-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint src",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@p2p/ui-shared": "workspace:*",
+    "axios": "^1.19.0",
+    "echarts": "^6.1.0",
+    "element-plus": "^2.14.4",
+    "pinia": "^4.0.3",
+    "vue": "^3.5.41",
+    "vue-router": "^5.2.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "eslint": "^10.8.1",
+    "eslint-plugin-vue": "^10.10.0",
+    "msw": "^2.15.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.67.0",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.11",
+    "vue-tsc": "^3.3.10"
+  }
+}

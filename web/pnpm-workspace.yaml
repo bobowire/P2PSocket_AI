@@ -1,0 +1,9 @@
+packages:
+  - ui-shared
+  - client-app
+  - server-app
+# pnpm 11 统一的依赖构建脚本审批（allowBuilds）：
+# esbuild 需要执行（原生二进制）；msw postinstall 仅打印信息，不执行
+allowBuilds:
+  esbuild: true
+  msw: false

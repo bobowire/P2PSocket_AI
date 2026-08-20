@@ -1,0 +1,10 @@
+{
+  "name": "p2p-web",
+  "private": true,
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r --no-bail test",
+    "lint": "pnpm -r lint",
+    "dev": "pnpm --filter @p2p/client-app dev"
+  }
+}

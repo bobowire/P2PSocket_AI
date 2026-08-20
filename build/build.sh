@@ -19,7 +19,7 @@ fi
 # 前端：pnpm workspace 构建产物直写两宿主 wwwroot（08 §2②，M1-03 起）
 if [ -f web/pnpm-workspace.yaml ] && [ "$1" != "quick" ]; then
   echo "==> [3/4] pnpm build"
-  pnpm --filter @p2p/ui-shared --filter @p2p/client-app --filter @p2p/server-app build
+  pnpm -C web --filter @p2p/client-app --filter @p2p/server-app build
 else
   echo "==> [3/4] pnpm build：workspace 未建（M1-03）或 quick 模式，跳过"
 fi
