@@ -26,4 +26,7 @@ public sealed class DeviceRegistry
     public ControlSession? TryGet(Guid deviceId) => _sessions.TryGetValue(deviceId, out var s) ? s : null;
 
     public IReadOnlyCollection<Guid> OnlineDeviceIds => [.. _sessions.Keys];
+
+    /// <summary>在线会话快照（PresenceMonitor 扫描用）。</summary>
+    public IReadOnlyCollection<ControlSession> Sessions() => [.. _sessions.Values];
 }

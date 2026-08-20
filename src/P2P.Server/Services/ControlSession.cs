@@ -63,6 +63,7 @@ public sealed class ControlSession : IAsyncDisposable
         _options = options ?? new ControlSessionOptions();
         _time = time ?? TimeProvider.System;
         _onHmacFailure = onHmacFailure;
+        LastSeen = _time.GetLocalNow();
         _runLoop = RunAsync(_cts.Token);
         _sendLoop = SendLoopAsync(_cts.Token);
     }
@@ -78,6 +79,15 @@ public sealed class ControlSession : IAsyncDisposable
 
     /// <summary>读循环完成 Task（含收尾注销；监听器据此回收跟踪）。</summary>
     public Task Completion => _runLoop;
+
+    /// <summary>最近一次心跳/握手时刻（PresenceMonitor 离线判定依据，FR-S-104）。</summary>
+    public DateTimeOffset LastSeen { get; private set; }
+
+    /// <summary>下一出站 seq（处理器构造回复消息头用）。</summary>
+    public uint NextSeq() => ++_selfSeq;
+
+    /// <summary>当前服务器时间戳（处理器构造回复消息头用）。</summary>
+    public ulong ServerTimestamp() => NowMs64;
 
     private long NowMs => _time.GetLocalNow().ToUnixTimeMilliseconds();
 
@@ -168,9 +178,10 @@ public sealed class ControlSession : IAsyncDisposable
             return;
         }
 
-        // 3) 心跳内联处理（高频，不走分发器）
+        // 3) 心跳内联处理（高频，不走分发器）；刷新在线时刻（FR-S-104）
         if (header.MsgType == MsgType.Heartbeat)
         {
+            LastSeen = _time.GetLocalNow();
             await SendAsync(new HeartbeatAck(NextSeq(), NowMs64, MsgType.Heartbeat, (ulong)NowMs), ct).ConfigureAwait(false);
             return;
         }
@@ -266,6 +277,7 @@ public sealed class ControlSession : IAsyncDisposable
         _connMacKey = Hkdf.Derive(_deviceSecret, input, "pcp-mac"u8, 32);
         _hmacEnabled = true;
         _state = SessionState.Established;
+        LastSeen = _time.GetLocalNow();
         _registry.Register(this);
         await SendAsync(new ProofAck(NextSeq(), NowMs64, MsgType.Proof, true), ct).ConfigureAwait(false);
     }
@@ -273,8 +285,6 @@ public sealed class ControlSession : IAsyncDisposable
     // ── 发送（写队列串行化；Established 后签名）──────────────────────────
 
     private ulong NowMs64 => (ulong)NowMs;
-
-    private uint NextSeq() => ++_selfSeq;
 
     public async Task SendAsync<T>(T message, CancellationToken ct = default) where T : class, IPcpMessage
     {
@@ -312,8 +322,9 @@ public sealed class ControlSession : IAsyncDisposable
         }
     }
 
-    private async Task SendErrorAsync(int code, string msg, CancellationToken ct)
-        => await SendAsync(new ErrorMessage(NextSeq(), NowMs64, MsgType.Error, code, msg), ct).ConfigureAwait(false);
+    /// <summary>回错误消息（处理器与会话内部共用；0x7E）。</summary>
+    public Task SendErrorAsync(int code, string msg, CancellationToken ct = default)
+        => SendAsync(new ErrorMessage(NextSeq(), NowMs64, MsgType.Error, code, msg), ct);
 
     // ── 分发与关闭 ─────────────────────────────────────────────────────
 
@@ -353,7 +364,11 @@ public sealed class ControlSession : IAsyncDisposable
         if (Interlocked.Exchange(ref _closed, 1) == 1) return;
         var wasEstablished = _state == SessionState.Established;
         _state = SessionState.Closed;
-        if (wasEstablished) _registry.Unregister(this);
+        if (wasEstablished)
+        {
+            _registry.Unregister(this);
+            await PersistLastSeenAsync().ConfigureAwait(false); // 05 §5：断连即 last_seen_at 落库
+        }
         try { _cts.Cancel(); } catch { }
         try { await _stream.DisposeAsync(); } catch { }
         _reader.Complete();
@@ -361,6 +376,23 @@ public sealed class ControlSession : IAsyncDisposable
         _sendQueue.Writer.TryComplete();
         CryptoUtil.Zero(_connMacKey);
         CryptoUtil.Zero(_deviceSecret);
+    }
+
+    /// <summary>断连落库（FR-S-104）：在线判定在内存，超时/断连时刻持久化。</summary>
+    private async Task PersistLastSeenAsync()
+    {
+        try
+        {
+            await using var db = await _dbFactory.CreateDbContextAsync().ConfigureAwait(false);
+            var stamp = _time.GetLocalNow().UtcDateTime;
+            await db.Devices.Where(d => d.Id == _deviceId)
+                .ExecuteUpdateAsync(s => s.SetProperty(x => x.LastSeenAt, stamp))
+                .ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // 断连路径不因落库失败抛出（AI-19：观测数据可丢，连接清理优先）
+        }
     }
 
     public async ValueTask DisposeAsync()
