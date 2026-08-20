@@ -71,6 +71,9 @@ public static class PcpCodec
         nameof(Hello) or nameof(HelloAck) => MsgType.Hello,
         nameof(Proof) or nameof(ProofAck) => MsgType.Proof,
         nameof(Heartbeat) or nameof(HeartbeatAck) => MsgType.Heartbeat,
+        nameof(Register) => MsgType.Register,
+        nameof(RegisterAck) => MsgType.RegisterAck,
+        nameof(UnbindMe) => MsgType.UnbindMe,
         nameof(ErrorMessage) => MsgType.Error,
         _ => null, // 后续消息族在各自文件登记（M1-07/08 起）
     };
