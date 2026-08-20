@@ -1,0 +1,31 @@
+# CI（08 §4）：M1 仅 test job；build/package matrix 随 M4 打包任务接入
+name: ci
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: corepack enable pnpm
+      - name: Build & Test（08 §2 全链）
+        run: sh build/build.sh
+      - name: Core 覆盖率采集（M1-36 门槛 ≥70%）
+        run: >
+          dotnet test tests/P2P.Core.Tests -c Release --no-build
+          --collect:"XPlat Code Coverage"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: tests/P2P.Core.Tests/TestResults
