@@ -39,7 +39,7 @@ public sealed class RemoteCodeGeneratorTests : IDisposable
         for (var i = 0; i < 100; i++)
         {
             var code = await gen.GenerateAsync();
-            Assert.All(code, char.IsDigit);
+            Assert.All(code, c => Assert.True(char.IsDigit(c)));
             _db.Devices.Add(NewDevice($"MAC{i:000}", code));
             await _db.SaveChangesAsync();
         }
