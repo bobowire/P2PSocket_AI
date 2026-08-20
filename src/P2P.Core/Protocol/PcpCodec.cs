@@ -1,0 +1,80 @@
+using MessagePack;
+using P2P.Core.Crypto;
+
+namespace P2P.Core.Protocol;
+
+/// <summary>
+/// PCP 消息编解码（02 §2：MessagePack 数组格式；帧内布局 = [msgpack][hmac32?]）。
+/// HMAC 规则（02 §2.2）：connMacKey 派生后每消息尾附 HMAC-SHA256(header||payload)；
+/// 未注册设备首个 Register 与握手前消息（Hello/Proof 阶段）不携带。
+/// </summary>
+public static class PcpCodec
+{
+    /// <summary>序列化 MessagePack（不含 hmac 尾）。</summary>
+    public static byte[] Encode<T>(T message) where T : class, IPcpMessage
+    {
+        ValidateType<T>(message.MsgType);
+        return MessagePackSerializer.Serialize(message);
+    }
+
+    /// <summary>反序列化为具体类型；msgType 与 T 期望值不符抛 <see cref="ProtocolException"/>。</summary>
+    public static T Decode<T>(ReadOnlyMemory<byte> msgpackBody) where T : class, IPcpMessage
+    {
+        var msg = MessagePackSerializer.Deserialize<T>(msgpackBody);
+        ValidateType<T>(msg.MsgType);
+        return msg;
+    }
+
+    /// <summary>探测头三字段；数组格式容忍尾部未知字段（02 §7 加法演进）。</summary>
+    public static PcpHeader Peek(ReadOnlyMemory<byte> msgpackBody)
+        => MessagePackSerializer.Deserialize<PcpHeader>(msgpackBody);
+
+    /// <summary>未知 msgType 的容忍解码：仅保留头三字段，不抛异常（M1-06：未知 msgType 容忍）。</summary>
+    public static IPcpMessage DecodeLoose(ReadOnlyMemory<byte> msgpackBody)
+        => Peek(msgpackBody) is { } h ? new UnknownMessage(h.Seq, h.TimestampMs, h.MsgType) : throw new ProtocolException("空消息体");
+
+    // ── 帧内签名布局：[msgpack][hmac 32B]（02 §2.2）──────────────────
+
+    /// <summary>组签名帧体：msgpack || HMAC-SHA256(connMacKey, msgpack)。</summary>
+    public static byte[] EncodeSigned<T>(T message, ReadOnlySpan<byte> connMacKey) where T : class, IPcpMessage
+    {
+        var body = Encode(message);
+        var mac = Mac.HmacSha256(connMacKey, body);
+        var wire = new byte[body.Length + mac.Length];
+        body.AsSpan().CopyTo(wire);
+        mac.AsSpan().CopyTo(wire.AsSpan(body.Length));
+        return wire;
+    }
+
+    /// <summary>拆签名帧体并验证 HMAC；失败抛 <see cref="ProtocolException"/>（调用方决定断连，07 §4）。</summary>
+    public static byte[] DecodeSigned(ReadOnlyMemory<byte> wire, ReadOnlySpan<byte> connMacKey)
+    {
+        if (wire.Length < Mac.HashLen)
+            throw new ProtocolException("签名帧体长度不足");
+        var msgpack = wire[..^Mac.HashLen].ToArray();
+        var mac = wire.Span[^Mac.HashLen..];
+        if (!Mac.Verify(mac, Mac.HmacSha256(connMacKey, msgpack)))
+            throw new ProtocolException("HMAC 校验失败");
+        return msgpack;
+    }
+
+    private static void ValidateType<T>(byte actual) where T : class, IPcpMessage
+    {
+        var expected = ExpectedMsgType(typeof(T))
+            ?? throw new ProtocolException($"类型 {typeof(T).Name} 未登记 msgType");
+        if (actual != expected)
+            throw new ProtocolException($"msgType 不匹配：期望 0x{expected:X2}，实得 0x{actual:X2}");
+    }
+
+    internal static byte? ExpectedMsgType(Type t) => t.Name switch
+    {
+        nameof(Hello) or nameof(HelloAck) => MsgType.Hello,
+        nameof(Proof) or nameof(ProofAck) => MsgType.Proof,
+        nameof(Heartbeat) or nameof(HeartbeatAck) => MsgType.Heartbeat,
+        nameof(ErrorMessage) => MsgType.Error,
+        _ => null, // 后续消息族在各自文件登记（M1-07/08 起）
+    };
+}
+
+/// <summary>协议层异常（编解码/校验失败；不承载任何秘密，AI-17）。</summary>
+public sealed class ProtocolException(string message) : Exception(message);
