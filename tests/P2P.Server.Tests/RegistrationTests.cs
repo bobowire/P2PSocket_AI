@@ -30,8 +30,9 @@ public sealed class RegistrationTests : IAsyncLifetime
         DbInitializer.Initialize(init);
         _time = new FakeTimeProvider(DateTimeOffset.UtcNow);
 
-        _registration = new RegistrationService(factory, _registry, new AuditLogger(factory, _time), _time);
-        var router = new ControlMessageRouter(_registration);
+        var audit = new AuditLogger(factory, _time);
+        _registration = new RegistrationService(factory, _registry, audit, _time);
+        var router = new ControlMessageRouter(_registration, new UserService(factory, audit, _time), audit);
         _server = new ControlServer(factory, _registry, router.DispatchAsync, time: _time);
         return _server.StartAsync(new IPEndPoint(IPAddress.Loopback, 0));
     }

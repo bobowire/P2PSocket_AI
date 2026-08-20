@@ -83,6 +83,12 @@ public sealed class ControlSession : IAsyncDisposable
     /// <summary>最近一次心跳/握手时刻（PresenceMonitor 离线判定依据，FR-S-104）。</summary>
     public DateTimeOffset LastSeen { get; private set; }
 
+    /// <summary>能力模式（02 §2.5）：会话级；登录→normal、登出→passive；初始 normal（未降级）。</summary>
+    public CapabilityMode Capability { get; set; } = CapabilityMode.Normal;
+
+    /// <summary>会话登录态用户（未登录/登出为 null；设备 owner 绑定持久在库）。</summary>
+    public Guid? OwnerUserId { get; set; }
+
     /// <summary>下一出站 seq（处理器构造回复消息头用）。</summary>
     public uint NextSeq() => ++_selfSeq;
 
