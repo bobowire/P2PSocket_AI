@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- MOD-6：Core 纯净——零宿主引用、无 IO 副作用；协议/算法纯函数库 -->
+  <PropertyGroup>
+    <RootNamespace>P2P.Core</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MessagePack" Version="3.1.8" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <!-- 02 §3：Client ← Core、Nic -->
+  <PropertyGroup>
+    <RootNamespace>P2P.Client</RootNamespace>
+    <AssemblyName>p2p-client</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\P2P.Core\P2P.Core.csproj" />
+    <ProjectReference Include="..\P2P.Nic\P2P.Nic.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Serilog.Extensions.Hosting" Version="10.0.0" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="6.1.1" />
+    <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
+  </ItemGroup>
+</Project>

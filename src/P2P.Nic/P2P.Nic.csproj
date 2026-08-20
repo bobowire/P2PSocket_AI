@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 02 §3：Nic ← Core（仅 Utils），平台细节 Windows/Linux 子目录 -->
+  <PropertyGroup>
+    <RootNamespace>P2P.Nic</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\P2P.Core\P2P.Core.csproj" />
+  </ItemGroup>
+</Project>

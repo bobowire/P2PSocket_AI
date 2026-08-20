@@ -1,0 +1,13 @@
+# DIR-5：全库 UTF-8（无 BOM）、LF 行尾
+* text=auto eol=lf
+
+# Windows 专属文件保留 CRLF（如有）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.ico binary
+*.dll binary
+*.exe binary

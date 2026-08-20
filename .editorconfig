@@ -1,0 +1,24 @@
+# DIR-5：全库 UTF-8（无 BOM）、LF
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{cs,csproj,props,targets,sln}]
+indent_style = space
+indent_size = 4
+
+[*.cs]
+csharp_style_namespace_declarations = file_scoped:suggestion
+dotnet_sort_system_directives_first = true
+
+# 前端缩进 2 空格
+[*.{ts,tsx,vue,json,jsonc,yaml,yml,html,css,js,mjs,cjs}]
+indent_style = space
+indent_size = 2
+
+[*.{sh,md}]
+indent_size = 2

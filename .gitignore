@@ -1,0 +1,28 @@
+# 构建产物（DIR-4：不入库）
+bin/
+obj/
+out/
+dist/
+node_modules/
+wwwroot/
+
+# 数据与日志
+data/
+logs/
+*.db
+*.db-wal
+*.db-shm
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+
+# 前端
+.pnpm-store/
+coverage/
+
+# 测试
+TestResults/
+*.trx
