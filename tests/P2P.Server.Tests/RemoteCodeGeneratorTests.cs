@@ -48,7 +48,7 @@ public sealed class RemoteCodeGeneratorTests : IDisposable
     [Fact]
     public async Task Generate_CollisionRetry_UsesExistingCodesNotRepeated()
     {
-        // 连续撞码重试：既有 500 个码时新生成码不与任何既有码重复
+        // 连续撞码重试：已分配码必须落库（生成器以库内查重为准），500 个码两两互异
         var gen = new RemoteCodeGenerator(_db);
         var existing = new HashSet<string>();
         for (var i = 0; i < 500; i++)
@@ -56,6 +56,8 @@ public sealed class RemoteCodeGeneratorTests : IDisposable
             var code = await gen.GenerateAsync();
             Assert.DoesNotContain(code, existing); // 查重确保唯一
             existing.Add(code);
+            _db.Devices.Add(NewDevice($"MAC{i:000}", code));
+            await _db.SaveChangesAsync();
         }
     }
 
