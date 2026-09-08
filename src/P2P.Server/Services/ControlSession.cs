@@ -42,7 +42,7 @@ public sealed class ControlSession : IAsyncDisposable
     private byte[] _nonceC = [];
     private byte[] _nonceS = [];
     private uint _lastPeerSeq;       // 对端 seq 严格递增
-    private uint _selfSeq;
+    private int _selfSeqInt;         // 出站 seq（原子递增）
     private Guid _deviceId;
     private bool _hmacEnabled;       // Established 后除 Register（NeedRegister 阶段）外全部签名
     private int _closed;
@@ -89,8 +89,8 @@ public sealed class ControlSession : IAsyncDisposable
     /// <summary>会话登录态用户（未登录/登出为 null；设备 owner 绑定持久在库）。</summary>
     public Guid? OwnerUserId { get; set; }
 
-    /// <summary>下一出站 seq（处理器构造回复消息头用）。</summary>
-    public uint NextSeq() => ++_selfSeq;
+    /// <summary>下一出站 seq（处理器构造回复消息头用；信令推送与读循环并发，原子递增）。</summary>
+    public uint NextSeq() => (uint)Interlocked.Increment(ref _selfSeqInt);
 
     /// <summary>当前服务器时间戳（处理器构造回复消息头用）。</summary>
     public ulong ServerTimestamp() => NowMs64;

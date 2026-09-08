@@ -20,6 +20,7 @@ public sealed class RegistrationTests : IAsyncLifetime
     private readonly List<TestPcpClient> _clients = [];
     private ControlServer _server = null!;
     private RegistrationService _registration = null!;
+    private SignalingCoordinator _signaling = null!;
     private FakeTimeProvider _time = null!;
 
     public Task InitializeAsync()
@@ -32,8 +33,9 @@ public sealed class RegistrationTests : IAsyncLifetime
 
         var audit = new AuditLogger(factory, _time);
         _registration = new RegistrationService(factory, _registry, audit, _time);
+        _signaling = new SignalingCoordinator(factory, _registry, new Authorizer(factory), audit, _time);
         var router = new ControlMessageRouter(_registration, new UserService(factory, audit, _time),
-            new GroupService(factory, _registry, _time), audit);
+            new GroupService(factory, _registry, _time), _signaling, audit);
         _server = new ControlServer(factory, _registry, router.DispatchAsync, time: _time);
         return _server.StartAsync(new IPEndPoint(IPAddress.Loopback, 0));
     }
@@ -42,6 +44,7 @@ public sealed class RegistrationTests : IAsyncLifetime
     {
         foreach (var c in _clients) await c.DisposeAsync();
         await _server.DisposeAsync();
+        await _signaling.DisposeAsync();
         _connection.Dispose();
     }
 

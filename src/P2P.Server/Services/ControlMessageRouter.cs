@@ -5,21 +5,23 @@ namespace P2P.Server.Services;
 /// <summary>
 /// 控制消息分发器（05 §5）：ControlSession 完成帧校验后按 msgType 路由到处理器。
 /// passive 主动类拦截（02 §2.5，SEC-51）在路由入口统一执行。
-/// M1-14/15 挂载注册/用户族；分组/映射/信令在 M1-16~17 逐任务挂载。
+/// M1-14~17 挂载注册/用户/分组/信令族；映射族 0x60~0x62 在 M1-28 挂载。
 /// </summary>
 public sealed class ControlMessageRouter
 {
     private readonly RegistrationService _registration;
     private readonly UserService _user;
     private readonly GroupService _group;
+    private readonly SignalingCoordinator _signaling;
     private readonly AuditLogger _audit;
 
     public ControlMessageRouter(RegistrationService registration, UserService user,
-        GroupService group, AuditLogger audit)
+        GroupService group, SignalingCoordinator signaling, AuditLogger audit)
     {
         _registration = registration;
         _user = user;
         _group = group;
+        _signaling = signaling;
         _audit = audit;
     }
 
@@ -64,6 +66,12 @@ public sealed class ControlMessageRouter
                 break;
             case DeviceListRequest deviceList:
                 await _group.HandleDeviceListAsync(session, deviceList);
+                break;
+            case PunchRequest punchRequest:
+                await _signaling.HandlePunchRequestAsync(session, punchRequest);
+                break;
+            case PunchEndpoint punchEndpoint:
+                await _signaling.HandlePunchEndpointAsync(session, punchEndpoint);
                 break;
             default:
                 // 已登记但处理器未挂载：诚实拒绝（避免客户端无限等待）
