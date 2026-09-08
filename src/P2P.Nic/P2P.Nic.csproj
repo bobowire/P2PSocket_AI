@@ -6,4 +6,8 @@
   <ItemGroup>
     <ProjectReference Include="..\P2P.Core\P2P.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- 互操作布局回归测试需触达 internal 封送结构 -->
+    <InternalsVisibleTo Include="P2P.Nic.Tests" />
+  </ItemGroup>
 </Project>
