@@ -1,7 +1,8 @@
-// M1-20 互操作结构布局回归测试（AI-03）：
-// 对照 netioapi.h/ws2ipdef.h 官方文档的自然对齐布局做封送断言——布局漂移会在真实配址时
-// 写错接口/越界，属高危回归点。仅托管封送计算，跨平台可跑（CI 常绿护栏）。
+// M1-20/M1-21 互操作结构布局回归测试（AI-03）：
+// 对照官方头文件（Windows: netioapi.h/ws2ipdef.h；Linux: 内核 UAPI）的自然对齐布局做封送断言——
+// 布局漂移会在真实配址时写错接口/越界，属高危回归点。仅托管封送计算，跨平台可跑（CI 常绿护栏）。
 using System.Runtime.InteropServices;
+using P2P.Nic.Linux;
 using P2P.Nic.Windows;
 using Xunit;
 
@@ -38,6 +39,12 @@ public sealed class InteropLayoutTests
         Assert.Equal(88, Marshal.SizeOf<IpHelperNative.MibUnicastIpAddressTable>());
         Assert.Equal(8, IpHelperNative.TableOffset);
     }
+
+    // ── Linux（M1-21，netlink.h 核对）────────────────────────────────
+
+    [Fact]
+    public void SockaddrNl_Is12Bytes()
+        => Assert.Equal(12, Marshal.SizeOf<LinuxNative.SockaddrNl>());
 
     private static int Offset(string field)
         => (int)Marshal.OffsetOf<IpHelperNative.MibUnicastIpAddressRow>(field);
