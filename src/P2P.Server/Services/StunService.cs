@@ -28,6 +28,7 @@ public sealed class StunService : IAsyncDisposable
     private UdpClient _udp = null!;
     private Task _loop = Task.CompletedTask;
     private int _port;
+    private int _disposed; // 宿主 StopAsync 与容器释放各调一次（幂等）
 
     public StunService(IDbContextFactory<AppDbContext> dbFactory, bool requireAuth = true, TimeProvider? time = null)
     {
@@ -140,6 +141,7 @@ public sealed class StunService : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
         await _cts.CancelAsync().ConfigureAwait(false);
         _udp?.Close();
         try { await _loop.ConfigureAwait(false); } catch { }

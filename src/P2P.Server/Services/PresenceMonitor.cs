@@ -15,6 +15,7 @@ public sealed class PresenceMonitor : IAsyncDisposable
     private readonly TimeProvider _time;
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _loop;
+    private int _disposed; // 宿主 StopAsync 与容器释放各调一次（幂等）
 
     public PresenceMonitor(DeviceRegistry registry, IDbContextFactory<AppDbContext> dbFactory,
         TimeSpan? timeout = null, TimeSpan? period = null, TimeProvider? time = null)
@@ -55,6 +56,7 @@ public sealed class PresenceMonitor : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
         await _cts.CancelAsync().ConfigureAwait(false);
         try { await _loop.ConfigureAwait(false); } catch { }
         _cts.Dispose();

@@ -22,20 +22,23 @@ public sealed class SignalingCoordinator : IAsyncDisposable
     private readonly Authorizer _authorizer;
     private readonly AuditLogger _audit;
     private readonly TimeProvider _time;
+    private readonly TimeSpan _sessionTimeout; // appsettings punch.timeoutSec（08 §5.1）
     private readonly object _gate = new();
     private readonly Dictionary<Guid, PunchSession> _sessions = [];   // sessionId → 活跃会话
     private readonly Queue<(ControlSession Session, PunchRequest Msg)> _pending = new(); // 排队申请
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _reaper;
+    private int _disposed; // 宿主 StopAsync 与容器释放各调一次（幂等）
 
     public SignalingCoordinator(IDbContextFactory<AppDbContext> dbFactory, DeviceRegistry registry,
-        Authorizer authorizer, AuditLogger audit, TimeProvider? time = null)
+        Authorizer authorizer, AuditLogger audit, TimeProvider? time = null, TimeSpan? sessionTimeout = null)
     {
         _dbFactory = dbFactory;
         _registry = registry;
         _authorizer = authorizer;
         _audit = audit;
         _time = time ?? TimeProvider.System;
+        _sessionTimeout = sessionTimeout ?? SessionTimeout;
         _reaper = ReaperAsync(_cts.Token);
     }
 
@@ -212,7 +215,7 @@ public sealed class SignalingCoordinator : IAsyncDisposable
                 List<PunchSession> expired = [];
                 lock (_gate)
                 {
-                    foreach (var s in _sessions.Values.Where(s => now - s.CreatedAt > SessionTimeout))
+                    foreach (var s in _sessions.Values.Where(s => now - s.CreatedAt > _sessionTimeout))
                         expired.Add(s);
                     foreach (var s in expired) _sessions.Remove(s.SessionId);
                 }
@@ -227,6 +230,7 @@ public sealed class SignalingCoordinator : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
         await _cts.CancelAsync().ConfigureAwait(false);
         try { await _reaper.ConfigureAwait(false); } catch { }
         _cts.Dispose();
