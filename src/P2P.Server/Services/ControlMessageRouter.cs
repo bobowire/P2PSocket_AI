@@ -11,12 +11,15 @@ public sealed class ControlMessageRouter
 {
     private readonly RegistrationService _registration;
     private readonly UserService _user;
+    private readonly GroupService _group;
     private readonly AuditLogger _audit;
 
-    public ControlMessageRouter(RegistrationService registration, UserService user, AuditLogger audit)
+    public ControlMessageRouter(RegistrationService registration, UserService user,
+        GroupService group, AuditLogger audit)
     {
         _registration = registration;
         _user = user;
+        _group = group;
         _audit = audit;
     }
 
@@ -49,6 +52,18 @@ public sealed class ControlMessageRouter
                 break;
             case DeviceUpdate deviceUpdate:
                 await _user.HandleDeviceUpdateAsync(session, deviceUpdate);
+                break;
+            case GroupCreate groupCreate:
+                await _group.HandleCreateAsync(session, groupCreate);
+                break;
+            case GroupUpdate groupUpdate:
+                await _group.HandleUpdateAsync(session, groupUpdate);
+                break;
+            case GroupDissolve groupDissolve:
+                await _group.HandleDissolveAsync(session, groupDissolve);
+                break;
+            case DeviceListRequest deviceList:
+                await _group.HandleDeviceListAsync(session, deviceList);
                 break;
             default:
                 // 已登记但处理器未挂载：诚实拒绝（避免客户端无限等待）

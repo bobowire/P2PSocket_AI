@@ -30,6 +30,7 @@ public sealed class UserTests : IAsyncLifetime
         var router = new ControlMessageRouter(
             new RegistrationService(factory, _registry, audit),
             new UserService(factory, audit),
+            new GroupService(factory, _registry),
             audit);
         _server = new ControlServer(factory, _registry, router.DispatchAsync);
         return _server.StartAsync(new IPEndPoint(IPAddress.Loopback, 0));
