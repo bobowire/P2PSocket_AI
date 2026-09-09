@@ -16,28 +16,29 @@ public interface ITunnelTransport : IAsyncDisposable
     ValueTask<byte[]?> ReceiveAsync(CancellationToken ct = default);
 }
 
-/// <summary>channel 事件处理（M1-25 定义，M1-27 MappingEngine 实现挂载）。</summary>
+/// <summary>channel 事件处理（M1-25 定义，M1-27 MappingEngine 实现挂载）。
+/// 回调带会话上下文：channel 表按 (sessionId, channelId) 组织（channelId 32bit 随机起点只避碰撞不保证全局唯一）。</summary>
 public interface ITunnelChannelHandler
 {
     /// <summary>收到 OPEN（本端为目标侧：对端请求打开目标连接）。</summary>
-    void OnOpen(uint channelId, OpenPayload open);
+    void OnOpen(TunnelSession session, uint channelId, OpenPayload open);
 
     /// <summary>收到 OPEN_OK / OPEN_FAIL（本端为访问侧）。</summary>
-    void OnOpenResult(uint channelId, OpenResultPayload result);
+    void OnOpenResult(TunnelSession session, uint channelId, OpenResultPayload result);
 
     /// <summary>收到 DATA。</summary>
-    void OnData(uint channelId, ReadOnlyMemory<byte> data);
+    void OnData(TunnelSession session, uint channelId, ReadOnlyMemory<byte> data);
 
     /// <summary>收到 CLOSE（channel 结束；正常/异常不区分载荷）。</summary>
-    void OnClose(uint channelId);
+    void OnClose(TunnelSession session, uint channelId);
 }
 
 /// <summary>channel 事件空实现（测试/未挂载引擎时）。</summary>
 public sealed class NullChannelHandler : ITunnelChannelHandler
 {
     public static NullChannelHandler Instance { get; } = new();
-    public void OnOpen(uint channelId, OpenPayload open) { }
-    public void OnOpenResult(uint channelId, OpenResultPayload result) { }
-    public void OnData(uint channelId, ReadOnlyMemory<byte> data) { }
-    public void OnClose(uint channelId) { }
+    public void OnOpen(TunnelSession session, uint channelId, OpenPayload open) { }
+    public void OnOpenResult(TunnelSession session, uint channelId, OpenResultPayload result) { }
+    public void OnData(TunnelSession session, uint channelId, ReadOnlyMemory<byte> data) { }
+    public void OnClose(TunnelSession session, uint channelId) { }
 }

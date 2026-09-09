@@ -222,10 +222,10 @@ public sealed class TunnelSessionTests
     private sealed class RecordingHandler : ITunnelChannelHandler
     {
         public ConcurrentQueue<Event> Events { get; } = [];
-        public void OnOpen(uint channelId, OpenPayload open) => Events.Enqueue(new(channelId, "open", open));
-        public void OnOpenResult(uint channelId, OpenResultPayload result) => Events.Enqueue(new(channelId, "openresult", result));
-        public void OnData(uint channelId, ReadOnlyMemory<byte> data) => Events.Enqueue(new(channelId, "data", data.ToArray()));
-        public void OnClose(uint channelId) => Events.Enqueue(new(channelId, "close", null));
+        public void OnOpen(TunnelSession session, uint channelId, OpenPayload open) => Events.Enqueue(new(channelId, "open", open));
+        public void OnOpenResult(TunnelSession session, uint channelId, OpenResultPayload result) => Events.Enqueue(new(channelId, "openresult", result));
+        public void OnData(TunnelSession session, uint channelId, ReadOnlyMemory<byte> data) => Events.Enqueue(new(channelId, "data", data.ToArray()));
+        public void OnClose(TunnelSession session, uint channelId) => Events.Enqueue(new(channelId, "close", null));
     }
 }
 

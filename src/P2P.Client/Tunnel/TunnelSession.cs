@@ -293,16 +293,16 @@ public sealed class TunnelSession : IAsyncDisposable
                     }
                     break;
                 case PtpFrameType.Open:
-                    _handler.OnOpen(header.ChannelId, MessagePackSerializer.Deserialize<OpenPayload>(plain));
+                    _handler.OnOpen(this, header.ChannelId, MessagePackSerializer.Deserialize<OpenPayload>(plain));
                     break;
                 case PtpFrameType.OpenResult:
-                    _handler.OnOpenResult(header.ChannelId, MessagePackSerializer.Deserialize<OpenResultPayload>(plain));
+                    _handler.OnOpenResult(this, header.ChannelId, MessagePackSerializer.Deserialize<OpenResultPayload>(plain));
                     break;
                 case PtpFrameType.Data:
-                    _handler.OnData(header.ChannelId, plain);
+                    _handler.OnData(this, header.ChannelId, plain);
                     break;
                 case PtpFrameType.Close:
-                    _handler.OnClose(header.ChannelId);
+                    _handler.OnClose(this, header.ChannelId);
                     break;
                 default:
                     Log?.Invoke($"未知帧 type 0x{header.Type:X2} 容忍丢弃（02 §7）");
