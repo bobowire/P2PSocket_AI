@@ -23,6 +23,27 @@ public sealed class EcKeyPair : IDisposable
         return pub;
     }
 
+    /// <summary>导出私钥标量（32B；M1-24 注册后随 state 持久化，机密保护由存储层负责，07 §4）。</summary>
+    public byte[] ExportPrivateKey()
+    {
+        var p = _dh.ExportParameters(true);
+        return p.D!;
+    }
+
+    /// <summary>从私钥标量重建密钥对（公钥点自动推导；32B P-256）。</summary>
+    public static EcKeyPair FromPrivateKey(ReadOnlySpan<byte> d32)
+    {
+        if (d32.Length != 32)
+            throw new ArgumentException("私钥须为 32B P-256 标量", nameof(d32));
+        var dh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+        dh.ImportParameters(new ECParameters
+        {
+            Curve = ECCurve.NamedCurves.nistP256,
+            D = d32.ToArray(),
+        });
+        return new EcKeyPair(dh);
+    }
+
     public void Dispose() => _dh.Dispose();
 
     /// <summary>
