@@ -17,6 +17,10 @@ public sealed record TunnelSessionOptions
     public TimeSpan KeepaliveInterval { get; init; } = TimeSpan.FromSeconds(20);
     public int KeepaliveMissLimit { get; init; } = 3;
     public TimeSpan HandshakeTimeout { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>THello1 连发次数（打洞 10ms×20，02 §5.1；默认 1=不重发）。</summary>
+    public int HandshakeResendCount { get; init; } = 1;
+    public TimeSpan HandshakeResendInterval { get; init; } = TimeSpan.FromMilliseconds(10);
 }
 
 /// <summary>一条已建立的设备对隧道（会话密钥就绪后构造即进入收发循环）。</summary>
@@ -85,16 +89,28 @@ public sealed class TunnelSession : IAsyncDisposable
         IReadOnlyList<IDisposable>? keepAlive = null)
     {
         using var initiator = PtpHandshake.StartInitiator(sessionId, staticKey, peerStaticPub);
-        using var timeoutCts = new CancellationTokenSource((options ?? new TunnelSessionOptions()).HandshakeTimeout);
+        var opts = options ?? new TunnelSessionOptions();
+        using var timeoutCts = new CancellationTokenSource(opts.HandshakeTimeout);
         await transport.SendAsync(initiator.THello1Wire, timeoutCts.Token);
 
-        // 收帧直到 THello2（超时抛 OperationCanceledException 由调用方判打洞失败）
+        // 打洞窗口连发（02 §5.1：NAT 打开期丢包容忍；收到 THello2 即停）
+        using var resendCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token);
+        var resend = ResendHandshakeAsync(transport, initiator.THello1Wire, opts, time, resendCts.Token);
         byte[]? tHello2;
-        while (true)
+        try
         {
-            tHello2 = await transport.ReceiveAsync(timeoutCts.Token)
-                ?? throw new IOException("承载在握手期间关闭");
-            if (PtpFrameCodec.ParseHeader(tHello2).Type == PtpFrameType.THello2) break;
+            // 收帧直到 THello2（超时抛 OperationCanceledException 由调用方判打洞失败）
+            while (true)
+            {
+                tHello2 = await transport.ReceiveAsync(timeoutCts.Token)
+                    ?? throw new IOException("承载在握手期间关闭");
+                if (PtpFrameCodec.ParseHeader(tHello2).Type == PtpFrameType.THello2) break;
+            }
+        }
+        finally
+        {
+            resendCts.Cancel();
+            try { await resend; } catch { /* 尽力而为重发 */ }
         }
         var (tConfirm, keys) = initiator.HandleTHello2(tHello2);
         await transport.SendAsync(tConfirm, timeoutCts.Token);
@@ -125,6 +141,23 @@ public sealed class TunnelSession : IAsyncDisposable
         }
         var keys = responder.VerifyTConfirm(confirmWire);
         return Create(keys.SessionId, peerDeviceId, false, keys, transport, handler, options, time, keepAlive);
+    }
+
+    /// <summary>按周期重发同一握手帧（打洞连发；首发已由调用方发出，此处补发 N-1 次）。</summary>
+    private static async Task ResendHandshakeAsync(ITunnelTransport transport, byte[] wire,
+        TunnelSessionOptions options, TimeProvider? time, CancellationToken ct)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(options.HandshakeResendInterval, time ?? TimeProvider.System);
+            for (var i = 1; i < options.HandshakeResendCount; i++)
+            {
+                if (!await timer.WaitForNextTickAsync(ct)) return;
+                await transport.SendAsync(wire, ct);
+            }
+        }
+        catch (OperationCanceledException) { /* 收到应答/超时：停止连发 */ }
+        catch (Exception) { /* 重发尽力而为，失败不阻断握手等待 */ }
     }
 
     private static TunnelSession Create(Guid sessionId, Guid peerDeviceId, bool isInitiator,
