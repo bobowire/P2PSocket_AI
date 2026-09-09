@@ -35,6 +35,7 @@ public sealed class GroupTests : IAsyncLifetime
             new UserService(factory, audit),
             new GroupService(factory, _registry),
             _signaling,
+            new MappingService(factory, audit),
             audit);
         _server = new ControlServer(factory, _registry, router.DispatchAsync);
         return _server.StartAsync(new IPEndPoint(IPAddress.Loopback, 0));

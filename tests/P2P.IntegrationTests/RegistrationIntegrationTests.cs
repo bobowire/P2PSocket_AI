@@ -40,6 +40,7 @@ public sealed class RegistrationIntegrationTests : IAsyncLifetime
             new UserService(_factory, audit),
             new GroupService(_factory, _registry),
             _signaling,
+            new MappingService(_factory, audit),
             audit);
         _server = new ControlServer(_factory, _registry, router.DispatchAsync);
         await _server.StartAsync(new IPEndPoint(IPAddress.Loopback, 0));

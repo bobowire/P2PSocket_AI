@@ -63,6 +63,7 @@ public sealed class ControlClientIntegrationTests : IAsyncLifetime
             new UserService(_factory, audit),
             new GroupService(_factory, _registry),
             signaling,
+            new MappingService(_factory, audit),
             audit);
         var server = new ControlServer(_factory, _registry, router.DispatchAsync);
         await server.StartAsync(new IPEndPoint(IPAddress.Loopback, port));

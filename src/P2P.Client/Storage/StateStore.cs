@@ -61,6 +61,7 @@ public sealed class StateStore
                 StaticPrivateKey = dto.StaticPrivateKeyBox is null ? null : _protector.Unprotect(Convert.FromBase64String(dto.StaticPrivateKeyBox)),
                 RemoteCode = dto.RemoteCode,
                 VirtualIp = dto.VirtualIp,
+                Mappings = dto.Mappings ?? [],
             };
         }
         catch (Exception e) when (e is JsonException or FormatException or CryptographicException)
@@ -86,6 +87,7 @@ public sealed class StateStore
                 StaticPrivateKeyBox = State.StaticPrivateKey is null ? null : Convert.ToBase64String(_protector.Protect(State.StaticPrivateKey)),
                 RemoteCode = State.RemoteCode,
                 VirtualIp = State.VirtualIp,
+                Mappings = State.Mappings.Count == 0 ? null : State.Mappings, // WhenWritingNull 省略空表
             };
             await AtomicFile.WriteAllBytesAsync(_path,
                 JsonSerializer.SerializeToUtf8Bytes(dto, JsonOptions), ct);
@@ -108,5 +110,6 @@ public sealed class StateStore
         public string? StaticPrivateKeyBox { get; set; }
         public string? RemoteCode { get; set; }
         public string? VirtualIp { get; set; }
+        public List<StoredMapping>? Mappings { get; set; }
     }
 }

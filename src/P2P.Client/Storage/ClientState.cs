@@ -22,8 +22,22 @@ public sealed class ClientState
     /// <summary>虚拟 IP（统一下发固定 .2，OQ-13）。</summary>
     public string? VirtualIp { get; set; }
 
+    /// <summary>端口映射表（M1-28：0x60/0x61 全量同步服务端后本地持久化，重启恢复）。</summary>
+    public List<StoredMapping> Mappings { get; set; } = [];
+
     /// <summary>是否已注册（网卡创建与自动登录的前提，A-1/A-2 场景）。</summary>
     [JsonIgnore]
     public bool IsRegistered =>
         DeviceId is not null && DeviceSecret is not null && !string.IsNullOrEmpty(VirtualIp);
 }
+
+/// <summary>本地持久化的映射（PRD 06 §2 字段；TargetRemoteCode 为用户语义，PeerDeviceId 由同步层解析）。</summary>
+public sealed record StoredMapping(
+    Guid MappingId,
+    string Name,
+    ushort LocalPort,
+    string Proto,
+    string TargetRemoteCode,
+    string TargetAddr,
+    ushort TargetPort,
+    bool Enabled);

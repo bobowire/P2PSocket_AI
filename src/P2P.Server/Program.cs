@@ -64,6 +64,7 @@ builder.Services.AddSingleton<Authorizer>();
 builder.Services.AddSingleton<RegistrationService>();
 builder.Services.AddSingleton<UserService>();
 builder.Services.AddSingleton<GroupService>();
+builder.Services.AddSingleton<MappingService>();
 builder.Services.AddSingleton(sp => new SignalingCoordinator(
     sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
     sp.GetRequiredService<DeviceRegistry>(),
