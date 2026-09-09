@@ -75,6 +75,7 @@ public sealed class ControlClient : IAsyncDisposable
     private CapabilityMode _capability = CapabilityMode.Normal;
     private bool _stopped;
     private IReadOnlyList<(string Host, int Port)> _serverAddrs; // 可换（向导选定地址，M1-29）
+    private CancellationTokenSource? _backoffWake; // 退避等待可被换址唤醒（M1-30：向导选定地址即重连，不等满退避期）
 
     /// <summary>状态变迁通知（UI/宿主展示连接性）。</summary>
     public event Action<ControlClientState>? StateChanged;
@@ -187,6 +188,8 @@ public sealed class ControlClient : IAsyncDisposable
         if (addrs.Count == 0)
             throw new ArgumentException("serverAddrs 不能为空（08 §5.2）", nameof(serverAddrs));
         _serverAddrs = addrs;
+        try { Volatile.Read(ref _backoffWake)?.Cancel(); } // 唤醒退避等待（换了地址就不必等满旧退避期）
+        catch (ObjectDisposedException) { /* 唤醒窗口竞态：等待已自然结束 */ }
         try { _tcp?.Dispose(); } catch { /* 已关 */ } // 杀当前连接 → 读循环退出 → 下一轮新表
     }
 
@@ -260,8 +263,14 @@ public sealed class ControlClient : IAsyncDisposable
             var delay = _backoff.ComputeDelay(attempt); // 1s→30s 指数退避（08 §5.2）
             SetState(ControlClientState.BackoffWait);
             Log?.Invoke($"退避 {delay.TotalSeconds:0.#}s 后重连");
-            try { await Task.Delay(delay, ct); }
-            catch (OperationCanceledException) { break; }
+            using (var wake = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                Volatile.Write(ref _backoffWake, wake);
+                try { await Task.Delay(delay, wake.Token); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
+                catch (OperationCanceledException) { /* 换址唤醒：立即用新表重连 */ }
+                finally { Volatile.Write(ref _backoffWake, null); }
+            }
         }
     }
 

@@ -1,0 +1,18 @@
+# M1-30 客户端 systemd 服务定义（08 §3.2：/usr/bin/p2p-client + /etc/p2p-client/ 配置）。
+# 安装（打包器 M4 落位后）：cp p2p-client.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now p2p-client
+[Unit]
+Description=P2P Client (virtual NIC + port mapping tunnel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/p2p-client
+# 崩溃自愈（FR-C-902，01 §4.2）：恒定重启，5s 间隔
+Restart=always
+RestartSec=5
+# 状态目录（03 §5：/etc/p2p-client，0700 root/专用服务账户）
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target
