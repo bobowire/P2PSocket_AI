@@ -5,6 +5,12 @@
     <AssemblyName>p2p-client</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
+    <!-- M1-23：镜像表/消息重建器供单测直访（IsActiveClass/AckTypeFor/MessageRebuilder） -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>P2P.Client.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\P2P.Core\P2P.Core.csproj" />
     <ProjectReference Include="..\P2P.Nic\P2P.Nic.csproj" />
   </ItemGroup>

@@ -17,6 +17,17 @@ public static class PcpCodec
         return MessagePackSerializer.Serialize(message);
     }
 
+    /// <summary>运行时类型序列化（静态类型为 IPcpMessage 的持有方，如客户端 5005 重试的重建消息）。</summary>
+    public static byte[] EncodeObject(IPcpMessage message)
+    {
+        var type = message.GetType();
+        var expected = ExpectedMsgType(type)
+            ?? throw new ProtocolException($"类型 {type.Name} 未登记 msgType");
+        if (message.MsgType != expected)
+            throw new ProtocolException($"msgType 不匹配：期望 0x{expected:X2}，实得 0x{message.MsgType:X2}");
+        return MessagePackSerializer.Serialize(type, message);
+    }
+
     /// <summary>反序列化为具体类型；msgType 与 T 期望值不符抛 <see cref="ProtocolException"/>。</summary>
     public static T Decode<T>(ReadOnlyMemory<byte> msgpackBody) where T : class, IPcpMessage
     {
@@ -39,6 +50,15 @@ public static class PcpCodec
     public static byte[] EncodeSigned<T>(T message, ReadOnlySpan<byte> connMacKey) where T : class, IPcpMessage
     {
         var body = Encode(message);
+        return AppendMac(body, connMacKey);
+    }
+
+    /// <summary>运行时类型组签名帧体（与 <see cref="EncodeObject"/> 配对）。</summary>
+    public static byte[] EncodeSignedObject(IPcpMessage message, ReadOnlySpan<byte> connMacKey)
+        => AppendMac(EncodeObject(message), connMacKey);
+
+    private static byte[] AppendMac(byte[] body, ReadOnlySpan<byte> connMacKey)
+    {
         var mac = Mac.HmacSha256(connMacKey, body);
         var wire = new byte[body.Length + mac.Length];
         body.AsSpan().CopyTo(wire);
