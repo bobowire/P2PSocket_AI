@@ -29,6 +29,9 @@ public sealed record MappingView(
     string State,
     string? Detail);
 
+/// <summary>映射流量视图（04 §2.8 mapping_stats 事件源：累计字节 + 当前路径）。</summary>
+public sealed record MappingTrafficView(Guid MappingId, long BytesUp, long BytesDown, string Path);
+
 /// <summary>
 /// 映射同步服务：CRUD 编排（校验→服务端同步→引擎启停→落盘）。
 /// 写顺序=服务端先行（拒绝则本地不动，事务性），引擎动作在后。
@@ -66,6 +69,16 @@ public sealed class MappingSyncService
                     StateString(snap?.State), snap?.Detail);
             })
             .OrderBy(m => m.Name).ThenBy(m => m.MappingId)
+            .ToList();
+    }
+
+    /// <summary>流量视图（启用中映射；WS hub 1s 采样算速率，04 §2.8）。</summary>
+    public IReadOnlyList<MappingTrafficView> Traffic()
+    {
+        var states = _engine.Snapshots.ToDictionary(s => s.Config.MappingId, s => s.State);
+        return _engine.TrafficSnapshots()
+            .Select(t => new MappingTrafficView(t.MappingId, t.BytesUp, t.BytesDown,
+                StateString(states.GetValueOrDefault(t.MappingId))))
             .ToList();
     }
 

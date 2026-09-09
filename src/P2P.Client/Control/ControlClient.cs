@@ -51,7 +51,6 @@ public sealed class PassiveModeException(string message) : Exception(message);
 public sealed class ControlClient : IAsyncDisposable
 {
     private readonly ControlClientOptions _options;
-    private readonly IReadOnlyList<(string Host, int Port)> _serverAddrs;
     private readonly BackoffPolicy _backoff;
     private readonly TimeProvider _time;
     private readonly CancellationTokenSource _cts = new();
@@ -75,6 +74,7 @@ public sealed class ControlClient : IAsyncDisposable
     private int _state = (int)ControlClientState.Idle;
     private CapabilityMode _capability = CapabilityMode.Normal;
     private bool _stopped;
+    private IReadOnlyList<(string Host, int Port)> _serverAddrs; // 可换（向导选定地址，M1-29）
 
     /// <summary>状态变迁通知（UI/宿主展示连接性）。</summary>
     public event Action<ControlClientState>? StateChanged;
@@ -174,6 +174,20 @@ public sealed class ControlClient : IAsyncDisposable
     {
         DeviceId = deviceId;
         _deviceSecret = (byte[]?)deviceSecret?.Clone() ?? [];
+    }
+
+    /// <summary>当前生效地址表（host:port；向导换址判断/诊断展示用）。</summary>
+    public IReadOnlyList<string> ServerAddrs => _serverAddrs.Select(a => $"{a.Host}:{a.Port}").ToList();
+
+    /// <summary>更换服务端地址表（向导第一步选定后即时生效，04 §2.2 / 08 §5.2）：
+    /// 断开当前连接，主循环下一轮退避后即用新地址重连。已建立的请求会以"连接已断开"失败。</summary>
+    public void UpdateServerAddrs(IEnumerable<string> serverAddrs)
+    {
+        var addrs = serverAddrs.Select(ParseHostPort).ToList();
+        if (addrs.Count == 0)
+            throw new ArgumentException("serverAddrs 不能为空（08 §5.2）", nameof(serverAddrs));
+        _serverAddrs = addrs;
+        try { _tcp?.Dispose(); } catch { /* 已关 */ } // 杀当前连接 → 读循环退出 → 下一轮新表
     }
 
     // ── 连接生命周期 ─────────────────────────────────────────────────

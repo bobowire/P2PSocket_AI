@@ -84,6 +84,13 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
     public IReadOnlyCollection<MappingSnapshot> Snapshots
         => _mappings.Values.Select(r => new MappingSnapshot(r.Config, r.State, r.Detail)).ToList();
 
+    /// <summary>流量快照（04 §2.8 mapping_stats 事件源；访问侧 channel 计数，目标侧归对端映射）。</summary>
+    public sealed record MappingTraffic(Guid MappingId, long BytesUp, long BytesDown);
+
+    public IReadOnlyCollection<MappingTraffic> TrafficSnapshots()
+        => _mappings.Values.Select(r => new MappingTraffic(r.Config.MappingId,
+               Volatile.Read(ref r.BytesUp), Volatile.Read(ref r.BytesDown))).ToList();
+
     public MappingEngine(TunnelHost tunnels, PunchScheduler scheduler, IPAddress virtualIp,
         MappingEngineOptions? options = null)
     {
@@ -102,6 +109,8 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         public string? Detail;
         public TcpListener? Listener;
         public Task? AcceptLoop;
+        public long BytesUp;     // 访问侧累计（mapping_stats 速率采样，04 §2.8）
+        public long BytesDown;
     }
 
     // ── 映射生命周期（M1-28 同步层调用）──────────────────────────────
@@ -205,7 +214,8 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
             return;
         }
         var channelId = session.AllocateChannelId();
-        var entry = new ChannelEntry(rt.Config.MappingId, socket, session, channelId, _options.BacklogBytes);
+        var entry = new ChannelEntry(rt.Config.MappingId, socket, session, channelId, _options.BacklogBytes)
+        { Owner = rt };
         _channels[(session.SessionId, channelId)] = entry;
         try
         {
@@ -353,6 +363,8 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
     {
         /// <summary>本地映射 id（访问侧）；目标侧 channel 无本地映射 → null。</summary>
         public Guid? MappingId { get; } = mappingId;
+        /// <summary>访问侧归属 Runtime（流量计数；目标侧 null）。</summary>
+        public Runtime? Owner { get; set; }
         /// <summary>本地应用侧 socket（访问侧=accepted；目标侧=连到本地服务）。</summary>
         public Socket Socket { get; } = socket;
         public TunnelSession Session { get; } = session;
@@ -392,6 +404,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
                 await entry.OutQuota.WaitAsync(ct); // 背压：在飞槽位满则暂停读本地 socket
                 try { await entry.Session.SendDataAsync(entry.ChannelId, chunk, ct); }
                 finally { entry.OutQuota.Release(); }
+                if (entry.Owner is { } o) Interlocked.Add(ref o.BytesUp, n); // 流量计数（成功发出后）
             }
             await CloseEntryAsync(entry, notifyPeer: true); // EOF → CLOSE
         }
@@ -408,7 +421,10 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         try
         {
             await foreach (var data in entry.Inbound.Reader.ReadAllAsync(ct))
+            {
                 await entry.Socket.SendAsync(data, ct);
+                if (entry.Owner is { } o) Interlocked.Add(ref o.BytesDown, data.Length);
+            }
         }
         catch (Exception e) when (e is OperationCanceledException or SocketException
             or IOException or ObjectDisposedException)

@@ -84,7 +84,9 @@ public sealed class ClientRegistrationService(
 
     /// <summary>确认注册（向导第三步）。前置：会话处于 NeedRegister（未注册设备握手后停留态）。</summary>
     /// <param name="macCodeOverride">测试注入固定 macCode；默认按 05 §10 生成。</param>
-    public async Task<RegistrationResult> RegisterAsync(string? macCodeOverride = null, CancellationToken ct = default)
+    /// <param name="deviceName">向导填写的设备名（04 §2.2）；空则用 <see cref="RegistrationOptions.Hostname"/>。</param>
+    public async Task<RegistrationResult> RegisterAsync(string? macCodeOverride = null,
+        string? deviceName = null, CancellationToken ct = default)
     {
         if (client.State != ControlClientState.NeedRegister)
             throw new ControlClientException($"当前状态 {client.State} 不可注册（须为 NeedRegister）");
@@ -96,7 +98,7 @@ public sealed class ClientRegistrationService(
         using var keyPair = EcKeyPair.Generate();
         var ack = await client.SendRequestAsync<RegisterAck>(new Register(
             client.NextSeq(), client.TimestampMs(), MsgType.Register,
-            macCode, _options.Hostname, _options.Os, _options.ClientVersion,
+            macCode, deviceName ?? _options.Hostname, _options.Os, _options.ClientVersion,
             keyPair.ExportPublicKey(), null, null, null));
         var deviceSecret = Ecies.Decrypt(keyPair, ack.DeviceSecretBox);
 
