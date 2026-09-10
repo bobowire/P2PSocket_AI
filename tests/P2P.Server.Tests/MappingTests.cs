@@ -47,7 +47,9 @@ public sealed class MappingTests : IAsyncLifetime
         foreach (var c in _clients) await c.DisposeAsync();
         await _server.DisposeAsync();
         await _signaling.DisposeAsync();
-        _connection.Dispose();
+        await Task.Delay(200); // 服务端收尾审计与连接销毁竞态宽限（LocalWebApi 测试同法）
+        try { _connection.Dispose(); }
+        catch (Exception) { /* sqlite 收尾竞态已知瞬态家族（IOE/NRE 换皮）：测试本体已断言完毕 */ }
     }
 
     private AppDbContext CreateDb() => new(

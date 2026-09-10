@@ -343,10 +343,10 @@ public sealed class MappingEngineTests
 
         await topo.EngineA.EnableAsync(new MappingConfig(mappingId, "m1", localPort, "tcp",
             "self", 80, topo.PeerB));
-        Assert.Equal(MappingState.Punching, topo.EngineA.Snapshots.Single().State);
         await UntilAsync(() => topo.PuncherA.Initiated.Count == 1, "打洞出队执行");
 
-        // 瞬态经事件轨迹断言（轮询快照在满载并发下可能错过瞬变）
+        // 瞬态经事件轨迹断言（轮询快照在满载并发下可能错过瞬变——
+        // Behavior 同步完成时快照已越过 Punching，轨迹保序仍可证明经过）
         await UntilAsync(() => states.Contains(MappingState.Failed), "null 会话按失败→failed");
         Assert.Contains(MappingState.Punching, states);
         Assert.Equal(MappingState.Failed, topo.EngineA.Snapshots.Single().State);

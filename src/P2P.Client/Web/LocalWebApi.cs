@@ -40,14 +40,14 @@ public sealed class LocalApiServices : IAsyncDisposable
         // WS 事件源接线（TD-16：提示性推送，真相由前端 refetch）
         Mappings.StateChanged += e => Hub.Publish(new
         {
-            ev = "mapping_state",
+            ev = WsEventNames.MappingState,
             id = e.MappingId,
             state = MappingSyncService.StateString(e.State),
             reason = e.Detail ?? "",
         });
         Control.CapabilityChanged += mode => Hub.Publish(new
         {
-            ev = "login_state",
+            ev = WsEventNames.LoginState,
             mode = mode == CapabilityMode.Normal ? "normal" : "passive",
         });
     }

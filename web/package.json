@@ -5,6 +5,7 @@
     "build": "pnpm -r build",
     "test": "pnpm -r --no-bail test",
     "lint": "pnpm -r lint",
-    "dev": "pnpm --filter @p2p/client-app dev"
+    "dev": "pnpm --filter @p2p/client-app dev",
+    "gen:api": "dotnet run --project ../src/Tools/ExportTs -c Release"
   }
 }

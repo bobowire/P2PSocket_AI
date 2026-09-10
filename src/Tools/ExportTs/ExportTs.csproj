@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 生成工具不参与发布链（08 §2③ 仅本地/CI 生成 api.d.ts），不打 warning 等级外的特殊处理 -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\P2P.Client\P2P.Client.csproj" />
+  </ItemGroup>
+
+</Project>

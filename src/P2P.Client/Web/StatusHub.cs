@@ -11,6 +11,19 @@ using P2P.Client.Mapping;
 
 namespace P2P.Client.Web;
 
+/// <summary>WS 事件名常量（04 §2.8；单一事实源——ExportTs 反射同源生成前端 TS 联合类型）。</summary>
+public static class WsEventNames
+{
+    /// <summary>映射状态变迁（状态类→前端 refetch，TD-16）。</summary>
+    public const string MappingState = "mapping_state";
+
+    /// <summary>映射速率增量（1s 数值类→前端直写，TD-16）。</summary>
+    public const string MappingStats = "mapping_stats";
+
+    /// <summary>登录态/能力模式变迁（状态类→前端 refetch）。</summary>
+    public const string LoginState = "login_state";
+}
+
 /// <summary>WS 事件广播中枢（单例；宿主挂 /ws/status 端点转 <see cref="HandleAsync"/>）。</summary>
 public sealed class StatusHub : IAsyncDisposable
 {
@@ -96,7 +109,7 @@ public sealed class StatusHub : IAsyncDisposable
                     var dUp = view.BytesUp - prev.Up;
                     var dDown = view.BytesDown - prev.Down;
                     if (dUp <= 0 && dDown <= 0) continue;
-                    Publish(new { ev = "mapping_stats", id = view.MappingId,
+                    Publish(new { ev = WsEventNames.MappingStats, id = view.MappingId,
                         rateUp = dUp, rateDown = dDown, path = view.Path });
                 }
                 // 摘除已消失映射的采样基线（防长期增长）

@@ -11,4 +11,17 @@ export default tseslint.config(
     files: ["**/*.vue"],
     languageOptions: { parserOptions: { parser: tseslint.parser } },
   },
+  {
+    // 浏览器 API 白名单（useWs/useApi/CodeText 引用； happy-dom 测试环境同源）
+    files: ["src/**/*.{ts,vue}"],
+    languageOptions: {
+      globals: {
+        document: "readonly",
+        navigator: "readonly",
+        WebSocket: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
+      },
+    },
+  },
 );

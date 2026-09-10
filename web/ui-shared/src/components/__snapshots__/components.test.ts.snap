@@ -1,0 +1,136 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`AdminLayout > 侧边栏菜单 + 顶栏 + 主区插槽（快照） 1`] = `
+<div
+  class="admin-layout"
+  data-v-e5e83559=""
+>
+  <aside
+    class="sidebar"
+    data-v-e5e83559=""
+  >
+    <div
+      class="brand"
+      data-v-e5e83559=""
+    >
+      P2P 客户端
+    </div>
+    <nav
+      class="menu"
+      data-v-e5e83559=""
+    >
+      
+      <a
+        class="menu-item"
+        data-v-e5e83559=""
+      >
+        仪表盘
+      </a>
+      <a
+        class="menu-item"
+        data-v-e5e83559=""
+      >
+        端口映射
+      </a>
+      
+    </nav>
+  </aside>
+  <div
+    class="main"
+    data-v-e5e83559=""
+  >
+    <header
+      class="topbar"
+      data-v-e5e83559=""
+    >
+      <div
+        class="alert"
+        data-v-e5e83559=""
+        role="alert"
+      />
+      <div
+        class="actions"
+        data-v-e5e83559=""
+      >
+        
+        <span>
+          user
+        </span>
+        
+      </div>
+    </header>
+    <main
+      class="content"
+      data-v-e5e83559=""
+    >
+      
+      <p>
+        main
+      </p>
+      
+    </main>
+  </div>
+</div>
+`;
+
+exports[`DeviceCard > 渲染设备名/分组/远程码/在线态（快照） 1`] = `
+<div
+  class="device-card"
+  data-online="true"
+  data-v-026086e9=""
+>
+  <div
+    class="row head"
+    data-v-026086e9=""
+  >
+    <span
+      class="dot"
+      data-online="true"
+      data-v-026086e9=""
+    />
+    <span
+      class="name"
+      data-v-026086e9=""
+    >
+      办公室主机
+    </span>
+    <span
+      class="group"
+      data-v-026086e9=""
+    >
+      默认分组
+    </span>
+  </div>
+  <div
+    class="row meta"
+    data-v-026086e9=""
+  >
+    <button
+      class="code-text"
+      data-v-026086e9=""
+      data-v-3ab16f36=""
+      title="复制 远程码：0a1b2c"
+      type="button"
+    >
+      <code
+        data-v-3ab16f36=""
+      >
+        0a1b2c
+      </code>
+      <span
+        class="hint"
+        data-v-3ab16f36=""
+      >
+        复制
+      </span>
+    </button>
+    <span
+      class="online-text"
+      data-v-026086e9=""
+    >
+      在线
+    </span>
+  </div>
+  <!--v-if-->
+</div>
+`;
