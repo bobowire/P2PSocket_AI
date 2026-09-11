@@ -7,6 +7,7 @@ import { useRoute } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import type { FormInstance } from "element-plus";
 import { StatusTag, ApiError } from "@p2p/ui-shared";
+import PassiveBanner from "../components/PassiveBanner.vue";
 import { useMappingStore, type MappingFormInput } from "../stores/mappings";
 import { useSystemStore } from "../stores/system";
 import { mappingFormRules as rules } from "./mappingFormRules";
@@ -118,6 +119,7 @@ onMounted(() => void mappings.refresh());
 
 <template>
   <section class="mappings">
+    <PassiveBanner />
     <div class="toolbar">
       <h2>端口映射</h2>
       <el-button
@@ -128,7 +130,10 @@ onMounted(() => void mappings.refresh());
       >
         新建映射
       </el-button>
-      <el-button @click="mappings.refresh()">
+      <el-button
+        data-testid="mappings-refresh"
+        @click="mappings.refresh()"
+      >
         刷新
       </el-button>
     </div>
@@ -245,6 +250,7 @@ onMounted(() => void mappings.refresh());
           <el-button
             size="small"
             :disabled="isPassive"
+            data-testid="mapping-edit"
             @click="openEdit(row.mappingId)"
           >
             编辑

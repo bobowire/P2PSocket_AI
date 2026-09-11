@@ -8,6 +8,7 @@ import { createRouter, createWebHashHistory, type Router } from "vue-router";
 import ElementPlus from "element-plus";
 import Dashboard from "../pages/Dashboard.vue";
 import Devices from "../pages/Devices.vue";
+import Groups from "../pages/Groups.vue";
 import Login from "../pages/Login.vue";
 import Mappings from "../pages/Mappings.vue";
 import Settings from "../pages/Settings.vue";
@@ -237,9 +238,9 @@ describe("Devices 走查", () => {
     expect(router.currentRoute.value.query.remoteCode).toBe("d4e5f6");
   });
 
-  it("哑节点：建映射禁用（写操作置灰，06 §2）", async () => {
+  it("哑节点：建映射禁用 + 横幅显隐即时切换（M1-33，06 §2/05 §8）", async () => {
     // /api/devices 属主动类——passive 列表本身拉不到；故先以 normal 态加载，
-    // 再把 system store 置为 passive（等价登录态被服务端降级），断言写按钮全部置灰
+    // 再把 system store 置为 passive（等价登录态被服务端降级/0x75），断言写按钮全部置灰
     const state = createDefaultState();
     state.capability = "normal";
     const { wrapper, pinia } = await mountPage(Devices, state, "/devices");
@@ -250,6 +251,14 @@ describe("Devices 走查", () => {
     await flushPromises();
     const create = wrapper.findAll('[data-testid="devices-create-mapping"]');
     for (const btn of create) expect(btn.attributes("disabled")).toBeDefined();
+    expect(wrapper.find('[data-testid="passive-banner"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="passive-banner"]').text()).toContain("哑节点模式");
+
+    // 重新登录恢复 normal → 横幅消失、写操作恢复（login_state → refetch 同链路）
+    system.device = { ...system.device!, capability: "normal" };
+    await flushPromises();
+    expect(wrapper.find('[data-testid="passive-banner"]').exists()).toBe(false);
+    for (const btn of create) expect(btn.attributes("disabled")).toBeUndefined();
   });
 });
 
@@ -316,8 +325,56 @@ describe("Mappings 走查", () => {
   });
 });
 
-// ── 设置 ───────────────────────────────────────────────────────────
+// ── passive 模式（M1-33）───────────────────────────────────────────
 
+describe("passive 模式走查（M1-33）", () => {
+  it("mappings：能力切换即时翻转——写操作置灰/恢复 + 横幅显隐；只读刷新不受限", async () => {
+    const state = createDefaultState();
+    state.capability = "normal";
+    const { wrapper, pinia } = await mountPage(Mappings, state, "/mappings");
+
+    // normal：无横幅、写操作可用
+    expect(wrapper.find('[data-testid="passive-banner"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="mappings-new"]').attributes("disabled")).toBeUndefined();
+
+    // 降级 passive（等价 login_state 事件 → /api/device refetch 写回 store，05 §8）
+    const system = useSystemStore(pinia);
+    system.device = { ...system.device!, capability: "passive" };
+    await flushPromises();
+    expect(wrapper.find('[data-testid="passive-banner"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="passive-banner"]').text()).toContain("哑节点模式");
+    for (const tid of ["mappings-new", "mapping-enable", "mapping-disable", "mapping-retry", "mapping-edit", "mapping-delete"]) {
+      for (const btn of wrapper.findAll(`[data-testid="${tid}"]`)) {
+        expect(btn.attributes("disabled")).toBeDefined();
+      }
+    }
+    expect(wrapper.find('[data-testid="mappings-refresh"]').attributes("disabled")).toBeUndefined();
+
+    // 重新登录恢复 normal（0x21 → capability 翻转）→ 即时恢复
+    system.device = { ...system.device!, capability: "normal" };
+    await flushPromises();
+    expect(wrapper.find('[data-testid="passive-banner"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="mappings-new"]').attributes("disabled")).toBeUndefined();
+  });
+
+  it("groups 占位：M2 写操作恒置灰；横幅随能力显隐", async () => {
+    const { wrapper, pinia } = await mountPage(Groups, undefined, "/groups");
+
+    expect(wrapper.find('[data-testid="groups-join"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.find('[data-testid="groups-create"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).toContain("M2");
+
+    const system = useSystemStore(pinia);
+    system.device = { ...(system.device ?? { deviceId: "", remoteCode: "", virtualIp: "", username: null, capability: "normal" }), capability: "passive" };
+    await flushPromises();
+    expect(wrapper.find('[data-testid="passive-banner"]').exists()).toBe(true);
+    system.device = { ...system.device!, capability: "normal" };
+    await flushPromises();
+    expect(wrapper.find('[data-testid="passive-banner"]').exists()).toBe(false);
+  });
+});
+
+// ── 设置 ───────────────────────────────────────────────────────────
 describe("Settings 走查", () => {
   it("加载现值；保存 → 即时生效提示；改 Web 端口 → 重启提示", async () => {
     const { wrapper } = await mountPage(Settings, undefined, "/settings");

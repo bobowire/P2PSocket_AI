@@ -13,6 +13,7 @@ import { useDeviceStore } from "./stores/devices";
 const MENU = [
   { path: "/", label: "仪表盘" },
   { path: "/devices", label: "设备发现" },
+  { path: "/groups", label: "分组" },
   { path: "/mappings", label: "端口映射" },
   { path: "/login", label: "账号" },
   { path: "/settings", label: "设置" },

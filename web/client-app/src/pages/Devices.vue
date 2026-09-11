@@ -5,6 +5,7 @@
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { CodeText } from "@p2p/ui-shared";
+import PassiveBanner from "../components/PassiveBanner.vue";
 import { useDeviceStore } from "../stores/devices";
 import { useSystemStore } from "../stores/system";
 
@@ -35,6 +36,7 @@ onMounted(() => void devices.refresh());
 
 <template>
   <section class="devices">
+    <PassiveBanner />
     <div class="toolbar">
       <h2>设备发现</h2>
       <el-select
