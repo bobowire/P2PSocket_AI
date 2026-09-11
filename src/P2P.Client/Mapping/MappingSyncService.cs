@@ -158,6 +158,13 @@ public sealed class MappingSyncService
         finally { _mutex.Release(); }
     }
 
+    /// <summary>失败手动重试（04 §2.5）：引擎态 failed→重排打洞；纯本地动作不经服务端。</summary>
+    public Task RetryAsync(Guid mappingId, CancellationToken ct = default)
+    {
+        Find(mappingId); // 未知 id → 1002（与启停同口径）
+        return _engine.RetryAsync(mappingId);
+    }
+
     // ── 更新/删除 ────────────────────────────────────────────────────
 
     /// <summary>更新：启用态改本地端口/协议 → 1003（与服务端规则同口径，04 §2.5）；

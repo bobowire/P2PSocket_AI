@@ -78,6 +78,12 @@ public static class MappingApi
             catch (Exception e) { return Api.Fail(e); }
         });
 
+        group.MapPost("/{id:guid}/retry", async (Guid id, CancellationToken ct) =>
+        {
+            try { await sync.RetryAsync(id, ct); return Api.Ok(View(sync, id)); }
+            catch (Exception e) { return Api.Fail(e); }
+        });
+
         return app;
     }
 

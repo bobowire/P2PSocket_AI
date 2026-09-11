@@ -15,4 +15,21 @@ export default tseslint.config(
     files: ["**/*.vue"],
     languageOptions: { parserOptions: { parser: tseslint.parser } },
   },
+  {
+    // 浏览器 API 白名单（App 的 location/useWs 回调、store 轮询与速率图采样定时器；
+    // happy-dom 测试环境同源）
+    files: ["src/**/*.{ts,vue}"],
+    languageOptions: {
+      globals: {
+        document: "readonly",
+        navigator: "readonly",
+        location: "readonly",
+        WebSocket: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
+        setInterval: "readonly",
+        clearInterval: "readonly",
+      },
+    },
+  },
 );

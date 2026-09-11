@@ -162,6 +162,17 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
             => throw new NotSupportedException();
     }
 
+    /// <summary>打洞桩：出队即失败（failed 轨迹与手动重试用例）。</summary>
+    private sealed class FailingPuncher : IPuncher
+    {
+        public Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId,
+            CancellationToken ct = default)
+            => Task.FromResult(PunchOutcome.Failure(targetDeviceId, "punch_timeout"));
+
+        public Task<PunchOutcome> RespondAsync(PunchInvite invite, CancellationToken ct = default)
+            => throw new NotSupportedException();
+    }
+
     /// <summary>替身打洞器：内存传输对 + 双端真实 PTP 握手（流量计数路径与产品一致）。</summary>
     private sealed class TunnelPuncher : IPuncher
     {
@@ -535,6 +546,100 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
         Assert.Equal(JsonValueKind.Null, diag.data.Value.GetProperty("currentPunchPeer").ValueKind);
     }
 
+    // ── ⑤b 设备列表：0x40 转发、形状、在线判定、passive 拒发（M1-32）──
+
+    [Fact]
+    public async Task 设备列表端点_0x40转发_形状与在线判定()
+    {
+        var a = await SeedDeviceAsync("web-list-a");
+        var b = await SeedDeviceAsync("web-list-b");
+        // 种一个分组让 b 带分组摘要（SeedDeviceAsync 只写 Device 行，入组接口属 M2）
+        await using (var db = _factory.CreateDbContext())
+        {
+            var adminId = await db.Users.AsNoTracking()
+                .Where(u => u.Username == DbInitializer.AdminUsername).Select(u => u.Id).SingleAsync();
+            var group = new Group { Id = Guid.NewGuid(), Name = "web-grp", OwnerUserId = adminId };
+            db.Groups.Add(group);
+            db.GroupMembers.Add(new GroupMember { GroupId = group.Id, DeviceId = b.DeviceId });
+            await db.SaveChangesAsync();
+        }
+        await using var stack = await StartStackAsync(a); // admin 登录 → 同账号全可见
+
+        var list = await GetAsync(stack, "/api/devices");
+        Assert.Equal(ErrorCode.Ok, list.code);
+        var items = list.data!.Value.EnumerateArray()
+            .Where(d => d.GetProperty("deviceId").GetGuid() == a.DeviceId
+                     || d.GetProperty("deviceId").GetGuid() == b.DeviceId)
+            .ToDictionary(d => d.GetProperty("deviceId").GetGuid());
+
+        // 形状：七字段齐（04 §2.4，camelCase）
+        var mine = items[a.DeviceId];
+        Assert.Equal("web-list-a", mine.GetProperty("deviceName").GetString());
+        Assert.Matches("^[0-9abc]{6}$", mine.GetProperty("remoteCode").GetString());
+        Assert.Equal("100.64.0.2", mine.GetProperty("virtualIp").GetString());
+        Assert.True(mine.GetProperty("online").GetBoolean()); // 本机控制通道在连（registry 会话）
+        Assert.Equal(0, mine.GetProperty("groups").GetArrayLength());
+        Assert.Equal(0, mine.GetProperty("lanSegments").GetArrayLength());
+
+        var other = items[b.DeviceId];
+        Assert.False(other.GetProperty("online").GetBoolean()); // 未连接 → registry 无会话
+        Assert.Contains("web-grp", other.GetProperty("groups")
+            .EnumerateArray().Select(x => x.GetString()));
+
+        // passive 会话 0x40 属主动类：本地拒发 2002（02 §2.5）
+        await PostAsync(stack, "/api/auth/logout", null);
+        var passive = await GetAsync(stack, "/api/devices");
+        Assert.Equal(ErrorCode.ForbiddenPassive, passive.code);
+    }
+
+    // ── ⑤c 设置：GET 全量、PUT 部分合并+校验+换址即时生效（M1-32）────
+
+    [Fact]
+    public async Task 设置端点_GET全量_PUT部分合并校验与换址生效()
+    {
+        var a = await SeedDeviceAsync("web-set-a");
+        await using var stack = await StartStackAsync(a);
+
+        // GET 形状（04 §2.1：无机密字段；全新目录 serverAddrs 为空、其余取默认值）
+        var before = await GetAsync(stack, "/api/settings");
+        Assert.Equal(ErrorCode.Ok, before.code);
+        Assert.Empty(before.data!.Value.GetProperty("serverAddrs").EnumerateArray());
+        Assert.Equal(7100, before.data.Value.GetProperty("localWebPort").GetInt32());
+        Assert.InRange(before.data.Value.GetProperty("punchConcurrency").GetInt32(), 1, 5);
+        Assert.NotEqual(0, before.data.Value.GetProperty("keepaliveSec").GetInt32());
+        Assert.True(before.data.Value.GetProperty("reconnect").ValueKind != JsonValueKind.Null);
+
+        // PUT 部分修改：只送 punchConcurrency → 其余保持，落盘可复读
+        var saved = await PutAsync(stack, "/api/settings", new { punchConcurrency = 5 });
+        Assert.Equal(ErrorCode.Ok, saved.code);
+        Assert.False(saved.data!.Value.GetProperty("restartRequired").GetBoolean());
+        Assert.False(saved.data.Value.GetProperty("serverAddrsChanged").GetBoolean());
+        Assert.Equal(5, saved.data.Value.GetProperty("settings").GetProperty("punchConcurrency").GetInt32());
+        Assert.Equal(7100, saved.data.Value.GetProperty("settings").GetProperty("localWebPort").GetInt32());
+        var reread = new SettingsStore(Path.GetDirectoryName(stack.Settings.SettingsFilePath)!);
+        reread.Load();
+        Assert.Equal(5, reread.Settings.PunchConcurrency);
+
+        // 非法值不写盘：端口越界 → 1001
+        var bad = await PutAsync(stack, "/api/settings", new { localWebPort = 70000 });
+        Assert.Equal(ErrorCode.BadRequest, bad.code);
+        var reread2 = new SettingsStore(Path.GetDirectoryName(stack.Settings.SettingsFilePath)!);
+        reread2.Load();
+        Assert.Equal(7100, reread2.Settings.LocalWebPort);
+
+        // serverAddrs 变更 → 控制通道即时换址（本地 ServerAddrs 更新，M1-30 退避唤醒）
+        var swapped = await PutAsync(stack, "/api/settings",
+            new { serverAddrs = new[] { $"127.0.0.1:{_port}" } });
+        Assert.Equal(ErrorCode.Ok, swapped.code);
+        Assert.True(swapped.data!.Value.GetProperty("serverAddrsChanged").GetBoolean());
+        Assert.Equal([$"127.0.0.1:{_port}"], stack.Control.ServerAddrs);
+
+        // localWebPort 变更 → restartRequired=true（监听端口重启后生效）
+        var port = await PutAsync(stack, "/api/settings", new { localWebPort = 7200 });
+        Assert.Equal(ErrorCode.Ok, port.code);
+        Assert.True(port.data!.Value.GetProperty("restartRequired").GetBoolean());
+    }
+
     // ── ⑥ WS login_state：登录/登出推送 ─────────────────────────────
 
     [Fact]
@@ -634,6 +739,39 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
         await engineB.DisposeAsync();
         await schedulerB.DisposeAsync();
         await hostB.DisposeAsync();
+    }
+
+    // ── ⑧ 失败手动重试：POST /retry 重排打洞 + 未知 id 1002（M1-32）──
+
+    [Fact]
+    public async Task 映射重试端点_failed重排打洞_未知id_1002()
+    {
+        var a = await SeedDeviceAsync("web-retry-a");
+        var b = await SeedDeviceAsync("web-retry-b");
+        await using var stack = await StartStackAsync(a);
+        stack.Puncher.Set(new FailingPuncher()); // 恒失败：failed→重试→再 failed 轨迹稳定
+
+        await using var tap = await WsTap.ConnectAsync(stack.WsUrl);
+        var localPort = (ushort)FreePort();
+        var created = await PostAsync(stack, "/api/mappings", new
+        { name = "m-retry", localPort, targetRemoteCode = b.RemoteCode, targetPort = 8080 });
+        Assert.Equal(ErrorCode.Ok, created.code);
+        var mappingId = created.data!.Value.GetProperty("mappingId").GetGuid();
+
+        var enabled = await PostAsync(stack, $"/api/mappings/{mappingId}/enable", null);
+        Assert.Equal(ErrorCode.Ok, enabled.code);
+        Assert.Equal("punching", (await tap.NextAsync("mapping_state")).GetProperty("state").GetString());
+        Assert.Equal("failed", (await tap.NextAsync("mapping_state")).GetProperty("state").GetString());
+
+        // 手动重试：failed→punching 重排（WS 轨迹按序断言，不赌响应快照——桩同步失败）
+        var retry = await PostAsync(stack, $"/api/mappings/{mappingId}/retry", null);
+        Assert.Equal(ErrorCode.Ok, retry.code);
+        Assert.Equal("punching", (await tap.NextAsync("mapping_state")).GetProperty("state").GetString());
+        Assert.Equal("failed", (await tap.NextAsync("mapping_state")).GetProperty("state").GetString());
+
+        // 未知 id → 1002（与启停同口径）
+        var unknown = await PostAsync(stack, $"/api/mappings/{Guid.NewGuid()}/retry", null);
+        Assert.Equal(ErrorCode.NotFound, unknown.code);
     }
 
     /// <summary>回显服务：收多少回多少。</summary>

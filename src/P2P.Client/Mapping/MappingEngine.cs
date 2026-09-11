@@ -170,6 +170,25 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
             await TeardownAsync(rt, MappingState.Disabled, null);
     }
 
+    /// <summary>失败手动重试（04 §2.5 /retry）：打洞失败态仅重排打洞（监听保持）；
+    /// listen_failed 等无监听失败走全量重新启用（重新绑端口）。其余态幂等空操作。</summary>
+    public Task RetryAsync(Guid mappingId)
+    {
+        if (!_mappings.TryGetValue(mappingId, out var rt))
+            return Task.CompletedTask; // 未启用/不存在：幂等
+        if (rt.Listener is not null)
+        {
+            if (rt.State == MappingState.Failed)
+            {
+                SetState(rt, MappingState.Punching, null);
+                _scheduler.Enqueue(rt.Config.PeerDeviceId, mappingId); // OQ-11 串行队列
+            }
+            return Task.CompletedTask;
+        }
+        var config = rt.Config; // EnableAsync 内部会替换旧 Runtime（先拆后建）
+        return EnableAsync(config);
+    }
+
     /// <summary>授权失效（预留：服务端禁用/0x64 事件到达即标 invalid，任意态可入）。</summary>
     public async Task MarkInvalidAsync(Guid mappingId, string detail)
     {

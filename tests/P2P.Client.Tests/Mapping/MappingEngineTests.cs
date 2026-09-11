@@ -390,4 +390,47 @@ public sealed class MappingEngineTests
         await UntilAsync(() => states.Count == 4, "状态轨迹完整");
         Assert.Equal(new[] { MappingState.Punching, MappingState.Direct, MappingState.Punching, MappingState.Failed }, states);
     }
+
+    // ── M1-32：失败手动重试（04 §2.5 /retry 的引擎语义）──────────────
+
+    [Fact]
+    public async Task 失败重试_failed重排打洞_成功后direct_未知id幂等()
+    {
+        await using var topo = new Topology();
+        var localPort = (ushort)FreePort();
+        var mappingId = Guid.NewGuid();
+        var states = new ConcurrentQueue<MappingState>();
+        topo.EngineA.StateChanged += e => states.Enqueue(e.State);
+
+        // 第 1 次打洞失败；重试后第 2 次产出真实会话 → direct
+        var calls = 0;
+        topo.PuncherA.Behavior = async _ =>
+        {
+            var n = Interlocked.Increment(ref calls);
+            if (n == 1)
+                return PunchOutcome.Failure(topo.PeerB, "punch_timeout");
+            var session = await topo.EstablishTunnelAsync(attach: false);
+            var ep = new IPEndPoint(IPAddress.Loopback, 1);
+            return PunchOutcome.Success(session.SessionId, topo.PeerB, session, ep, ep);
+        };
+
+        await topo.EngineA.EnableAsync(new MappingConfig(mappingId, "m1", localPort, "tcp",
+            "self", 80, topo.PeerB));
+        await UntilAsync(() => states.Contains(MappingState.Failed), "打洞失败→failed");
+        Assert.Single(topo.EngineA.Snapshots, s => s.Config.MappingId == mappingId && s.State == MappingState.Failed);
+
+        // 手动重试：failed→punching 重排（监听保持，不重建 Runtime）
+        await topo.EngineA.RetryAsync(mappingId);
+        await UntilAsync(() => topo.PuncherA.Initiated.Count == 2, "重试重排（第 2 次打洞）");
+        await UntilAsync(() => states.Contains(MappingState.Direct), "重试成功→direct");
+        Assert.Equal(new[] { MappingState.Punching, MappingState.Failed, MappingState.Punching, MappingState.Direct }, states);
+
+        // 未知/未启用 id：幂等空操作（不抛、不打洞）
+        await topo.EngineA.RetryAsync(Guid.NewGuid());
+        Assert.Equal(2, topo.PuncherA.Initiated.Count);
+
+        // direct 态重试：无意义空操作（轨迹不再变化）
+        await topo.EngineA.RetryAsync(mappingId);
+        Assert.Equal(2, topo.PuncherA.Initiated.Count);
+    }
 }

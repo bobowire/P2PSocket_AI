@@ -14,3 +14,22 @@ export {
   type WsOptions,
   type WebSocketLike,
 } from "./composables/useWs";
+// export-ts 生成物（路径常量 + DTO 类型，M1-31；禁止手写字符串路径——06 §5）
+export { ApiPaths, ApiEndpoints } from "./types/api-paths";
+export type {
+  ApiEnvelope,
+  MappingView,
+  MappingTrafficView,
+  RegistrationResult,
+  GroupInfo,
+  ClientSettings,
+  ReconnectSettings,
+  MappingState,
+  SystemPhase,
+  CapabilityMode,
+  MappingStatsEvent,
+  MappingStateEvent,
+  LoginStateEvent,
+  DeviceListEvent,
+  WsEvent,
+} from "./types/api";

@@ -5,10 +5,11 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ApiEndpoints, ApiPaths } from "./api-paths";
 
-/** 04 §2 本地 Web 端点全集（2.1/2.2/2.3/2.5/2.6/2.8）。 */
+/** 04 §2 本地 Web 端点全集（2.1/2.2/2.3/2.4/2.5/2.6/2.8）。 */
 const DOCUMENTED: ReadonlyArray<{ path: string; methods: readonly string[] }> = [
   { path: "/api/system/state", methods: ["GET"] },
   { path: "/api/device", methods: ["GET", "PUT"] },
+  { path: "/api/devices", methods: ["GET"] },
   { path: "/api/auth/register", methods: ["POST"] },
   { path: "/api/auth/login", methods: ["POST"] },
   { path: "/api/auth/logout", methods: ["POST"] },
@@ -20,6 +21,8 @@ const DOCUMENTED: ReadonlyArray<{ path: string; methods: readonly string[] }> = 
   { path: "/api/mappings/{id}", methods: ["PUT", "DELETE"] },
   { path: "/api/mappings/{id}/enable", methods: ["POST"] },
   { path: "/api/mappings/{id}/disable", methods: ["POST"] },
+  { path: "/api/mappings/{id}/retry", methods: ["POST"] },
+  { path: "/api/settings", methods: ["GET", "PUT"] },
   { path: "/api/diagnostics", methods: ["GET"] },
   { path: "/ws/status", methods: ["WS"] },
 ];
