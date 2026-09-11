@@ -20,10 +20,16 @@ jobs:
       - run: corepack enable pnpm
       - name: Build & Test（08 §2 全链）
         run: sh build/build.sh
-      - name: Core 覆盖率采集（M1-36 门槛 ≥70%）
-        run: >
-          dotnet test tests/P2P.Core.Tests -c Release --no-build
-          --collect:"XPlat Code Coverage"
+      # M1-36：coverlet.collector 的 runsettings Threshold 经两法验证不拦运行
+      # （--collect 与 -s 并用仍 0 退出），故门槛为显式解析 cobertura 根 line-rate。
+      - name: Core 覆盖率采集 + 门槛 ≥70%（09 §1/AI-28）
+        run: |
+          dotnet test tests/P2P.Core.Tests -c Release --no-build --collect:"XPlat Code Coverage"
+          f=$(ls tests/P2P.Core.Tests/TestResults/*/coverage.cobertura.xml | head -1)
+          rate=$(grep -o 'line-rate="[0-9.]*"' "$f" | head -1 | sed 's/[^0-9.]//g')
+          awk -v r="$rate" 'BEGIN { printf "Core 行覆盖率 %.2f%%（门槛 70%%）\n", r*100
+            if (r < 0.70) { print "低于门槛，CI 失败"; exit 1 }
+            print "达标" }'
       - uses: actions/upload-artifact@v4
         if: always()
         with:

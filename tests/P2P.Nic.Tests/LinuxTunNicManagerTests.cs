@@ -127,9 +127,9 @@ public sealed class LinuxTunNicManagerTests
 
     private static bool TryGetSkipReason([NotNullWhen(false)] out string? reason)
     {
-        if (!OperatingSystem.IsLinux()) { reason = "仅 Linux 实机（CI/Windows 跳过）"; return false; }
-        if (!File.Exists("/dev/net/tun")) { reason = "内核未提供 /dev/net/tun（modprobe tun）"; return false; }
-        if (LinuxNative.geteuid() != 0) { reason = "需要 root（TUN 配址需 CAP_NET_ADMIN）"; return false; }
+        if (!OperatingSystem.IsLinux()) { reason = "仅 Linux 实机（05 §1 平台边界；CI/Windows 跳过，实机验收归 M1-37）"; return false; }
+        if (!File.Exists("/dev/net/tun")) { reason = "内核未提供 /dev/net/tun（modprobe tun；实机用例，M1-37）"; return false; }
+        if (LinuxNative.geteuid() != 0) { reason = "需要 root（TUN 配址需 CAP_NET_ADMIN；实机用例，M1-37）"; return false; }
         if (InterfaceExists()) { reason = "本机已有 p2p-tun 接口（外部残留），避免误删"; return false; }
         reason = null;
         return true;

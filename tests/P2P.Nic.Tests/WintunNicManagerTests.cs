@@ -84,9 +84,9 @@ public sealed class WintunNicManagerTests
 
     private static bool TryGetSkipReason([NotNullWhen(false)] out string? reason)
     {
-        if (!OperatingSystem.IsWindows()) { reason = "仅 Windows 实机（CI/Linux 跳过）"; return false; }
-        if (!RunningAsAdmin()) { reason = "需要管理员权限（Wintun 驱动加载）"; return false; }
-        if (!WintunDllAvailable()) { reason = "程序目录无 Wintun.dll（M1-37 随安装包分发）"; return false; }
+        if (!OperatingSystem.IsWindows()) { reason = "仅 Windows 实机（05 §1 平台边界；CI/Linux 跳过，实机验收归 M1-37）"; return false; }
+        if (!RunningAsAdmin()) { reason = "需要管理员权限（Wintun 驱动加载；实机用例，M1-37）"; return false; }
+        if (!WintunDllAvailable()) { reason = "程序目录无 Wintun.dll（随安装包分发，M1-37/M4）"; return false; }
         if (AdapterExists()) { reason = "本机已有 P2P-Tun 适配器（外部残留），避免误删"; return false; }
         reason = null;
         return true;
