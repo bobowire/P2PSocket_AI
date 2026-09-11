@@ -30,6 +30,10 @@ public sealed class UdpNatOptions
     /// <summary>公网侧监听地址（模拟"互联网"的回环别名；注册客户端在内网侧各用独立回环 IP）。</summary>
     public IPAddress PublicAddress { get; init; } = IPAddress.Loopback;
 
+    /// <summary>STUN 监听端口（0=随机）。TD-07 客户端 STUN 端点=控制地址主机+:3478——
+    /// 控制服务与本模拟器同宿主时须置 3478 才能被真实派生逻辑命中（M1-35 A-3）。</summary>
+    public int StunPort { get; init; }
+
     /// <summary>模拟公网端口段下界（08 §4：该段需从 OS 临时端口排除）。</summary>
     public int ExternalPortBase { get; init; } = 20000;
 
@@ -50,15 +54,16 @@ public sealed record FilterRecord(string Receiver, string Sender, IPEndPoint Sen
 /// 单宿主机 UDP NAT 模拟器（09 §2.2、TD-17）：一个实例同时扮演"互联网"与全部客户端 NAT——
 /// 拥有全部公网套接字（绑定 <see cref="UdpNatOptions.PublicAddress"/>，端口取自模拟端口段），
 /// 代理 STUN（请求经映射公网套接字转发上游，响应按事务 ID 改写 XOR-MAPPED-ADDRESS 后回内部端点）。
-/// 单宿主机上内部套接字互发会物理绕过 NAT，故发送方公网身份在入站侧惰性解析：
-/// 包"语义上穿越了发送方 NAT"（映射创建/ contacted 标记照常发生），投递时从发送方公网套接字发出，
+/// 客户端 NAT 按**内网 IP**注册（一台设备一个 NAT，设备内多个 socket 共享——映射仍按内部端点区分，
+/// 与真实 NAT 一致）；单宿主机上内部套接字互发会物理绕过 NAT，故发送方公网身份在入站侧惰性解析：
+/// 包"语义上穿越了发送方 NAT"（映射创建/contacted 标记照常发生），投递时从发送方公网套接字发出，
 /// 接收方看到的源地址即发送方公网身份（源地址改写语义成立）。未注册来源（外部主机）无法伪造源，
 /// 投递经接收侧公网套接字代发——过滤判定不受影响（矩阵测试只对注册来源断言源端口）。
 /// </summary>
 public sealed class UdpNatSimulator : IAsyncDisposable
 {
     private readonly UdpNatOptions _options;
-    private readonly Dictionary<IPEndPoint, ClientNat> _clients = [];
+    private readonly Dictionary<IPAddress, ClientNat> _clients = [];
     private readonly Dictionary<string, PendingStun> _pending = []; // tid hex → 回程信息
     private readonly List<FilterRecord> _filtered = [];
     private readonly List<Task> _loops = [];
@@ -76,14 +81,14 @@ public sealed class UdpNatSimulator : IAsyncDisposable
         _nextPort = _options.ExternalPortBase;
     }
 
-    /// <summary>注册一个客户端 NAT：internalEndpoint 为其内网侧套接字地址（建议独立回环 IP）。</summary>
-    public void RegisterClient(IPEndPoint internalEndpoint, UdpNatMode mode, string name)
+    /// <summary>注册一个客户端 NAT：internalIp 为其内网侧地址（建议独立回环 IP）。</summary>
+    public void RegisterClient(IPAddress internalIp, UdpNatMode mode, string name)
     {
         lock (_lock)
         {
-            if (_clients.ContainsKey(internalEndpoint))
-                throw new InvalidOperationException($"内部端点已注册：{internalEndpoint}");
-            _clients[internalEndpoint] = new ClientNat(name, mode, internalEndpoint);
+            if (_clients.ContainsKey(internalIp))
+                throw new InvalidOperationException($"内网 IP 已注册：{internalIp}");
+            _clients[internalIp] = new ClientNat(name, mode, internalIp);
         }
     }
 
@@ -91,7 +96,7 @@ public sealed class UdpNatSimulator : IAsyncDisposable
     public Task StartAsync()
     {
         _cts = new CancellationTokenSource();
-        _stunListener = new UdpClient(new IPEndPoint(_options.PublicAddress, 0));
+        _stunListener = new UdpClient(new IPEndPoint(_options.PublicAddress, _options.StunPort));
         StunEndpoint = (IPEndPoint)_stunListener.Client.LocalEndPoint!;
         _loops.Add(Task.Run(() => StunLoopAsync(_cts.Token)));
         return Task.CompletedTask;
@@ -104,7 +109,7 @@ public sealed class UdpNatSimulator : IAsyncDisposable
         {
             lock (_lock)
                 return _clients.Values.SelectMany(c => c.Mappings, (c, m) =>
-                    new NatMappingView(c.Name, c.Mode, c.Internal, m.Public, m.Destination)).ToList();
+                    new NatMappingView(c.Name, c.Mode, m.Internal, m.Public, m.Destination)).ToList();
         }
     }
 
@@ -128,12 +133,12 @@ public sealed class UdpNatSimulator : IAsyncDisposable
             Mapping mapping;
             lock (_lock)
             {
-                if (!_clients.TryGetValue(r.RemoteEndPoint, out var nat)) continue; // 未注册来源不代理
-                mapping = UseMapping(nat, StunEndpoint);
+                if (!_clients.TryGetValue(r.RemoteEndPoint.Address, out var nat)) continue; // 未注册来源不代理
+                mapping = UseMapping(nat, r.RemoteEndPoint, StunEndpoint);
                 if (TryGetHeaderTransactionId(r.Buffer, out var tid))
                 {
                     PurgeExpiredPendingNoLock();
-                    _pending[Convert.ToHexString(tid)] = new PendingStun(nat.Internal, mapping.Public);
+                    _pending[Convert.ToHexString(tid)] = new PendingStun(r.RemoteEndPoint, mapping.Public);
                 }
             }
             mapping.Socket.Send(r.Buffer, r.Buffer.Length, _options.Upstream);
@@ -164,13 +169,13 @@ public sealed class UdpNatSimulator : IAsyncDisposable
                     continue;
                 }
 
-                // ② 发送方身份解析：注册来源 → 惰性穿越发送方 NAT（映射/ contacted 照常），外部来源 → 原样地址
+                // ② 发送方身份解析：注册来源 → 惰性穿越发送方 NAT（映射/contacted 照常），外部来源 → 原样地址
                 IPEndPoint senderIdentity;
                 string senderName;
                 UdpClient? senderSocket = null;
-                if (_clients.TryGetValue(r.RemoteEndPoint, out var senderNat))
+                if (_clients.TryGetValue(r.RemoteEndPoint.Address, out var senderNat))
                 {
-                    var sm = UseMapping(senderNat, m.Public);
+                    var sm = UseMapping(senderNat, r.RemoteEndPoint, m.Public);
                     senderIdentity = sm.Public;
                     senderName = senderNat.Name;
                     senderSocket = sm.Socket;
@@ -190,7 +195,7 @@ public sealed class UdpNatSimulator : IAsyncDisposable
 
                 // ④ 投递：从发送方公网套接字发出 → 接收方看到的源即发送方公网身份；
                 //    外部来源无法伪造源地址，经接收侧公网套接字代发
-                deliverTo = m.Owner.Internal;
+                deliverTo = m.Internal;
                 deliverFrom = senderSocket ?? m.Socket;
             }
             deliverFrom.Send(r.Buffer, r.Buffer.Length, deliverTo);
@@ -213,24 +218,22 @@ public sealed class UdpNatSimulator : IAsyncDisposable
 
     // ── 映射管理 ───────────────────────────────────────────────────────
 
-    /// <summary>出站使用映射（须持锁）：cone 复用首条；symmetric 按目的地一条；同时标记 contacted。</summary>
-    private Mapping UseMapping(ClientNat nat, IPEndPoint destination)
+    /// <summary>出站使用映射（须持锁）：同一内部端点 cone 固定一条、symmetric 按目的地一条（真实 NAT 语义）；同时标记 contacted。</summary>
+    private Mapping UseMapping(ClientNat nat, IPEndPoint internalEndpoint, IPEndPoint destination)
     {
-        Mapping? existing;
-        if (nat.Mode == UdpNatMode.SymmetricRandom)
-            existing = nat.Mappings.FirstOrDefault(x => x.Destination.Equals(destination));
-        else
-            existing = nat.Mappings.FirstOrDefault();
-        var mapping = existing ?? CreateMappingNoLock(nat, destination);
+        var existing = nat.Mode == UdpNatMode.SymmetricRandom
+            ? nat.Mappings.FirstOrDefault(x => x.Internal.Equals(internalEndpoint) && x.Destination.Equals(destination))
+            : nat.Mappings.FirstOrDefault(x => x.Internal.Equals(internalEndpoint));
+        var mapping = existing ?? CreateMappingNoLock(nat, internalEndpoint, destination);
         nat.Contacted.Add(destination);
         return mapping;
     }
 
     /// <summary>创建映射（须持锁）：绑定公网套接字（cone 顺序分配 / symmetric 随机）并启动入站循环。</summary>
-    private Mapping CreateMappingNoLock(ClientNat nat, IPEndPoint destination)
+    private Mapping CreateMappingNoLock(ClientNat nat, IPEndPoint internalEndpoint, IPEndPoint destination)
     {
         var socket = BindPublicSocket(nat.Mode);
-        var mapping = new Mapping(nat, socket, (IPEndPoint)socket.Client.LocalEndPoint!, destination);
+        var mapping = new Mapping(nat, internalEndpoint, socket, (IPEndPoint)socket.Client.LocalEndPoint!, destination);
         nat.Mappings.Add(mapping);
         _loops.Add(Task.Run(() => PublicLoopAsync(mapping, _cts.Token)));
         return mapping;
@@ -282,18 +285,19 @@ public sealed class UdpNatSimulator : IAsyncDisposable
 
     // ── 内部状态 ───────────────────────────────────────────────────────
 
-    private sealed class ClientNat(string name, UdpNatMode mode, IPEndPoint internalEp)
+    private sealed class ClientNat(string name, UdpNatMode mode, IPAddress internalIp)
     {
         public string Name { get; } = name;
         public UdpNatMode Mode { get; } = mode;
-        public IPEndPoint Internal { get; } = internalEp;
+        public IPAddress InternalIp { get; } = internalIp;
         public List<Mapping> Mappings { get; } = [];
         public HashSet<IPEndPoint> Contacted { get; } = [];
     }
 
-    private sealed class Mapping(ClientNat owner, UdpClient socket, IPEndPoint pub, IPEndPoint destination)
+    private sealed class Mapping(ClientNat owner, IPEndPoint internalEp, UdpClient socket, IPEndPoint pub, IPEndPoint destination)
     {
         public ClientNat Owner { get; } = owner;
+        public IPEndPoint Internal { get; } = internalEp;
         public UdpClient Socket { get; } = socket;
         public IPEndPoint Public { get; } = pub;
         public IPEndPoint Destination { get; } = destination;

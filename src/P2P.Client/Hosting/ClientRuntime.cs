@@ -33,6 +33,10 @@ public sealed record ClientRuntimeOptions
 
     /// <summary>网卡替身缝（M1-35 双实例冒烟同法注入）。</summary>
     public INicManager? NicOverride { get; init; }
+
+    /// <summary>打洞 socket 绑定地址覆盖缝（M1-35：NatSimulator 按源 IP 识别客户端 NAT，
+    /// 双客户端打洞 socket 须各自绑定内网回环别名；生产 null=Any 全接口）。</summary>
+    public IPAddress? PunchBindOverride { get; init; }
 }
 
 /// <summary>客户端全组件生命周期（单一属主；启动序=01 §4.1，停机序为其逆序）。</summary>
@@ -184,7 +188,11 @@ public sealed class ClientRuntime : IAsyncDisposable
                 : StunProber.ProbeAsync(socket, stunEp, deviceId, deviceSecret, _control.Clock, ct: ct),
             EcKeyPair.FromPrivateKey(privateKey),
             _engine,
-            new PunchOptions { KeepaliveSec = _settings.Settings.KeepaliveSec }));
+            new PunchOptions
+            {
+                KeepaliveSec = _settings.Settings.KeepaliveSec,
+                BindAddress = _options.PunchBindOverride,
+            }));
         Log?.Invoke($"打洞器已接线（STUN={stunEp?.ToString() ?? "解析失败"}，派生自控制地址 :3478，TD-07）");
     }
 

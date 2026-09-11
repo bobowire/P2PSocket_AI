@@ -32,8 +32,8 @@ public sealed class NatSimulatorTests : IAsyncLifetime
         _c2 = Bind(IPAddress.Parse("127.0.0.5"));
         _c3 = Bind(IPAddress.Parse("127.0.0.6"));
         _r = Bind(IPAddress.Parse("127.0.0.9"));
-        _sim.RegisterClient(LocalEp(_c2), UdpNatMode.FullCone, "C2");
-        _sim.RegisterClient(LocalEp(_c3), UdpNatMode.FullCone, "C3");
+        _sim.RegisterClient(IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone, "C2");
+        _sim.RegisterClient(IPAddress.Parse("127.0.0.6"), UdpNatMode.FullCone, "C3");
     }
 
     public async Task DisposeAsync()
@@ -53,7 +53,7 @@ public sealed class NatSimulatorTests : IAsyncLifetime
     [InlineData(UdpNatMode.SymmetricRandom)]
     public async Task 映射分配与STUN改写_模式语义符合定义(UdpNatMode mode)
     {
-        _sim.RegisterClient(LocalEp(_c1), mode, "C1");
+        _sim.RegisterClient(IPAddress.Parse("127.0.0.4"), mode, "C1");
 
         // STUN 探测 → 改写后的公网身份：上游替身恒回 203.0.113.7:9999，客户端读到分配端口即改写生效（TD-17）
         var p1 = await StunProbeAsync(_sim, _c1);
@@ -100,7 +100,7 @@ public sealed class NatSimulatorTests : IAsyncLifetime
     [InlineData(UdpNatMode.SymmetricRandom)]
     public async Task 入站过滤矩阵_按模式定义放行或丢弃(UdpNatMode mode)
     {
-        _sim.RegisterClient(LocalEp(_c1), mode, "C1");
+        _sim.RegisterClient(IPAddress.Parse("127.0.0.4"), mode, "C1");
 
         // 前置：C1/C2 各经 STUN 建映射（P1/P2），且 C1 已出站联系 P2（contacted）
         var p1 = await StunProbeAsync(_sim, _c1);
@@ -160,8 +160,6 @@ public sealed class NatSimulatorTests : IAsyncLifetime
     // ── 工具 ───────────────────────────────────────────────────────────
 
     private static UdpClient Bind(IPAddress address) => new(new IPEndPoint(address, 0));
-
-    private static IPEndPoint LocalEp(UdpClient c) => (IPEndPoint)c.Client.LocalEndPoint!;
 
     private static void Send(UdpClient c, IPEndPoint to, string payload)
     {

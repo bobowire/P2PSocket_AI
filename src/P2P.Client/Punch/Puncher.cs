@@ -22,6 +22,10 @@ public sealed record PunchOptions
     public int BurstCount { get; init; } = 20;
     public TimeSpan BurstInterval { get; init; } = TimeSpan.FromMilliseconds(10);
     public int KeepaliveSec { get; init; } = 20; // NET-72 ≤25s
+
+    /// <summary>打洞 socket 绑定地址（null=Any 全接口，生产行为）。
+    /// M1-35 测试缝：NatSimulator 按源 IP 识别客户端 NAT，打洞 socket 须绑定各自内网回环别名。</summary>
+    public IPAddress? BindAddress { get; init; }
 }
 
 /// <summary>打洞结果（本地事件驱动映射状态机；成功带双方端点）。</summary>
@@ -94,7 +98,7 @@ public sealed class Puncher : IPuncher, IDisposable
     public async Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId, CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) == 1, this);
-        var socket = CreatePunchSocket();
+        var socket = CreatePunchSocket(_options.BindAddress);
         UdpPunchTransport? transport = null; // 接管 socket 后的释放责任
         var established = false;
         try
@@ -159,7 +163,7 @@ public sealed class Puncher : IPuncher, IDisposable
     {
         ArgumentNullException.ThrowIfNull(invite);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) == 1, this);
-        var socket = CreatePunchSocket();
+        var socket = CreatePunchSocket(_options.BindAddress);
         UdpPunchTransport? transport = null;
         var established = false;
         try
@@ -251,10 +255,10 @@ public sealed class Puncher : IPuncher, IDisposable
 
     public void Dispose() => Interlocked.Exchange(ref _disposed, 1);
 
-    /// <summary>新建打洞 socket（IPv4/UDP，随机本地端口）。
+    /// <summary>新建打洞 socket（IPv4/UDP，随机本地端口；bindAddress 缺省 Any 全接口）。
     /// Windows 下禁用 UDP ConnectionReset：向未就绪对端端口发包引发的 ICMP 会让后续 Receive 抛异常
     /// （打洞期对端尚未绑定的窗口必然出现），禁用后表现为无包到达（SIO_UDP_CONNRESET；Linux 不支持则忽略）。</summary>
-    internal static Socket CreatePunchSocket()
+    internal static Socket CreatePunchSocket(IPAddress? bindAddress = null)
     {
         var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         try
@@ -264,7 +268,7 @@ public sealed class Puncher : IPuncher, IDisposable
         }
         catch (SocketException) { /* Linux/macOS：无此语义 */ }
         catch (PlatformNotSupportedException) { /* 同上 */ }
-        socket.Bind(new IPEndPoint(IPAddress.Any, 0));
+        socket.Bind(new IPEndPoint(bindAddress ?? IPAddress.Any, 0));
         return socket;
     }
 }

@@ -17,7 +17,9 @@ namespace P2P.IntegrationTests;
 /// M1-30 客户端宿主集成测试（任务清单完成判定的代码层等价：kill 后系统拉起且状态恢复——
 /// 映射/网卡/通道三要素经同一 baseDir 重启重建；实机服务安装冒烟属 M1-37）。
 /// 虚拟 IP 用 127.0.0.1 模拟（M1-35 同法：监听可绑定、隔离语义等价）；网卡用替身记录。
+/// 全运行时重组件专用集合（与 ScenarioIntegrationTests 共用，避免并行叠加满载偶发）。
 /// </summary>
+[Collection("heavy-runtime")]
 public sealed class ClientRuntimeIntegrationTests : IAsyncLifetime
 {
     private readonly SqliteConnection _connection = new("Data Source=:memory:");
