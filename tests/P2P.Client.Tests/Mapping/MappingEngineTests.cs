@@ -394,6 +394,53 @@ public sealed class MappingEngineTests
     // ── M1-32：失败手动重试（04 §2.5 /retry 的引擎语义）──────────────
 
     [Fact]
+    public async Task UpdateVirtualIp_新监听绑新地址_与回环同端口占位并存()
+    {
+        // 向导路径缺陷回归 + A-4 端口隔离引擎级语义（01 §3.2 监听绑虚拟 IP）：引擎以 Loopback
+        // 构造（未注册冷启动初值），UpdateVirtualIp 后新启映射监听绑新地址，不占回环同端口；
+        // 打洞失败（failed）监听保留——127.0.0.4 上 accept 后因无隧道被关闭，占位 echo 不受影响。
+        await using var placeholder = new LocalServer(echo: true);
+        var port = placeholder.Port;
+        await using var topo = new Topology();
+        topo.PuncherA.Behavior = _ => Task.FromResult(PunchOutcome.Failure(topo.PeerB, "punch_timeout"));
+        topo.EngineA.UpdateVirtualIp(IPAddress.Parse("127.0.0.4"));
+
+        var mappingId = Guid.NewGuid();
+        await topo.EngineA.EnableAsync(new MappingConfig(mappingId, "m1", port, "tcp",
+            "self", 80, topo.PeerB));
+        await UntilAsync(() => topo.EngineA.Snapshots.Single().State == MappingState.Failed, "打洞失败→failed（监听保留）");
+
+        // 映射监听在 127.0.0.4:port：连接可建立（握手完成）→ 无隧道被引擎关闭
+        using var viaMapping = new TcpClient();
+        await viaMapping.ConnectAsync(IPAddress.Parse("127.0.0.4"), port);
+        var mappingClosed = false;
+        try
+        {
+            var n = await viaMapping.GetStream().ReadAsync(new byte[8]).AsTask()
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            mappingClosed = n == 0; // EOF
+        }
+        catch (Exception e) when (e is IOException or ObjectDisposedException) { mappingClosed = true; } // 重置式关闭
+        Assert.True(mappingClosed, "映射监听应在 127.0.0.4：accept 后无隧道即关闭");
+
+        // 占位不受影响：127.0.0.1:port 仍是本地服务 echo（A-4 并存互不干扰）
+        using var viaLocal = new TcpClient();
+        await viaLocal.ConnectAsync(IPAddress.Loopback, port);
+        var probe = new byte[] { 1, 2, 3 };
+        await viaLocal.GetStream().WriteAsync(probe);
+        var back = new byte[probe.Length];
+        var read = 0;
+        while (read < probe.Length)
+        {
+            var n = await viaLocal.GetStream().ReadAsync(back.AsMemory(read));
+            if (n == 0) throw new IOException("占位 echo 提前 EOF");
+            read += n;
+        }
+        Assert.Equal(probe, back);
+        Assert.Equal(1, placeholder.Connections);
+    }
+
+    [Fact]
     public async Task 失败重试_failed重排打洞_成功后direct_未知id幂等()
     {
         await using var topo = new Topology();

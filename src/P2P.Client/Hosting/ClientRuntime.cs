@@ -114,6 +114,19 @@ public sealed class ClientRuntime : IAsyncDisposable
         _app = builder.Build();
         _app.UseWebSockets();
         _app.MapLocalApi(_api);
+        // SPA 同端口静态托管（04 §0「SPA 由同端口静态托管」、08 §2 NFR-31）：wwwroot 经
+        // MapStaticAssets 服务（读 staticwebassets.endpoints.json，含 .br/.gz 预压缩直发）；
+        // MapFallbackToFile 兜底 SPA 路由（/wizard、/login 等均回 index.html 由前端路由接管）。
+        // 挂载顺序：API 端点在前，fallback 最后兜底，不遮蔽 /api/*。
+        // 清单随发布产物存在才挂——集成测试宿主（testhost）无清单会抛
+        // InvalidOperationException（MapStaticAssets 按 {宿主程序集}.staticwebassets 解析），跳过仅 API。
+        var spaManifest = Path.Combine(AppContext.BaseDirectory,
+            $"{typeof(ClientRuntime).Assembly.GetName().Name}.staticwebassets.endpoints.json");
+        if (File.Exists(spaManifest))
+        {
+            _app.MapStaticAssets(spaManifest);
+            _app.MapFallbackToFile("index.html");
+        }
         await _app.StartAsync(ct);
 
         // ④ 分支：未注册 → 向导模式等待；已注册 → 注册后路径（Nic→通道→映射恢复）
@@ -143,6 +156,10 @@ public sealed class ClientRuntime : IAsyncDisposable
             // 虚拟 IP 应用（FR-C-201）：失败降级告警不阻断（05 §1.1；自愈 FR-C-202 属 M2）
             if (IPAddress.TryParse(_state.State.VirtualIp, out var vip))
             {
+                // 监听绑定地址切换（01 §3.2）：向导路径冷启动时 VirtualIp 尚空、引擎初值是 Loopback
+                // 兜底——不切换则注册后映射监听落 127.0.0.1，与本地同端口服务相撞（A-4 场景）。
+                // 先于 Nic 应用：网卡降级不回退绑定（虚拟 IP 已落盘即为本机监听地址）。
+                _engine.UpdateVirtualIp(vip);
                 try { await _nic.EnsureAsync(vip, CancellationToken.None); }
                 catch (Exception e) { Log?.Invoke($"[nic] 虚拟网卡降级运行：{e.Message}（本地 Web 告警展示）"); }
             }

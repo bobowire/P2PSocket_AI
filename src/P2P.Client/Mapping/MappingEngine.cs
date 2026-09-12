@@ -65,7 +65,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
 
     private readonly TunnelHost _tunnels;
     private readonly PunchScheduler _scheduler;
-    private readonly IPAddress _virtualIp;
+    private IPAddress _virtualIp; // UpdateVirtualIp 可切换（向导注册完成时点）
     private readonly MappingEngineOptions _options;
     private readonly ConcurrentDictionary<Guid, Runtime> _mappings = new();
     private readonly ConcurrentDictionary<(Guid SessionId, uint ChannelId), ChannelEntry> _channels = new();
@@ -101,6 +101,11 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         _scheduler.PunchCompleted += OnPunchCompleted;
         _tunnels.SessionDisconnected += OnTunnelDisconnected;
     }
+
+    /// <summary>更新监听绑定地址（01 §3.2 监听绑虚拟 IP）。向导路径冷启动时 VirtualIp 尚空、
+    /// 构造初值是 Loopback 兜底——注册完成、虚拟 IP 落盘后由运行时切换至此。只影响后续新监听：
+    /// 该时点客户端必然无已启用映射（未注册期间无映射可启），故无既有监听迁移需求。</summary>
+    public void UpdateVirtualIp(IPAddress virtualIp) => _virtualIp = virtualIp;
 
     private sealed class Runtime
     {
