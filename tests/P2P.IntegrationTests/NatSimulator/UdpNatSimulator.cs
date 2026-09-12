@@ -5,7 +5,7 @@ using P2P.Core.Stun;
 
 namespace P2P.IntegrationTests.NatSimulator;
 
-/// <summary>UDP NAT 模式（09 §2.2；SymmetricSequential/TcpBlocked → M2）。</summary>
+/// <summary>UDP NAT 模式（09 §2.2）。</summary>
 public enum UdpNatMode
 {
     /// <summary>同一内部端点 → 固定外部端点，任意外部可入（打洞必成功基线）。</summary>
@@ -19,6 +19,12 @@ public enum UdpNatMode
 
     /// <summary>每个出站目的地独立映射，外部端口随机分配（打洞必失败 → 中继回退，A-6）。</summary>
     SymmetricRandom,
+
+    /// <summary>每个出站目的地独立映射，外部端口 +1 递增——与 TCP 端口预测同构的 UDP 变体（M2-30）。</summary>
+    SymmetricSequential,
+
+    /// <summary>丢弃全部 UDP 出站（不建映射）——迫使 TCP 打洞/TCP 中继承载路径（FR-S-704 场景，M2-30）。</summary>
+    UdpBlocked,
 }
 
 /// <summary>NatSimulator 配置（测试注入地址，09 §2.2：客户端 STUN/打洞目标均指向模拟器）。</summary>
@@ -50,6 +56,9 @@ public sealed record NatMappingView(string Client, UdpNatMode Mode, IPEndPoint I
 /// <summary>被过滤入站包的观测记录（负向断言即时化：不必靠静默超时）。</summary>
 public sealed record FilterRecord(string Receiver, string Sender, IPEndPoint SenderIdentity, IPEndPoint Target);
 
+/// <summary>UdpBlocked 客户端出站被丢弃的观测记录（负向断言即时化）。</summary>
+public sealed record BlockedRecord(string Client, IPEndPoint Target);
+
 /// <summary>
 /// 单宿主机 UDP NAT 模拟器（09 §2.2、TD-17）：一个实例同时扮演"互联网"与全部客户端 NAT——
 /// 拥有全部公网套接字（绑定 <see cref="UdpNatOptions.PublicAddress"/>，端口取自模拟端口段），
@@ -66,6 +75,7 @@ public sealed class UdpNatSimulator : IAsyncDisposable
     private readonly Dictionary<IPAddress, ClientNat> _clients = [];
     private readonly Dictionary<string, PendingStun> _pending = []; // tid hex → 回程信息
     private readonly List<FilterRecord> _filtered = [];
+    private readonly List<BlockedRecord> _blocked = [];
     private readonly List<Task> _loops = [];
     private readonly object _lock = new();
     private UdpClient _stunListener = null!;
@@ -119,6 +129,12 @@ public sealed class UdpNatSimulator : IAsyncDisposable
         get { lock (_lock) return _filtered.ToList(); }
     }
 
+    /// <summary>UdpBlocked 出站丢弃记录快照（负向断言与调试用）。</summary>
+    public IReadOnlyList<BlockedRecord> Blocked
+    {
+        get { lock (_lock) return _blocked.ToList(); }
+    }
+
     // ── 主循环 ─────────────────────────────────────────────────────────
 
     /// <summary>STUN 监听循环：注册客户端的请求经其映射公网套接字转发上游，并挂起事务等改写回程。</summary>
@@ -134,6 +150,11 @@ public sealed class UdpNatSimulator : IAsyncDisposable
             lock (_lock)
             {
                 if (!_clients.TryGetValue(r.RemoteEndPoint.Address, out var nat)) continue; // 未注册来源不代理
+                if (nat.Mode == UdpNatMode.UdpBlocked) // 丢弃 UDP 出站：不建映射、不转发（M2-30）
+                {
+                    _blocked.Add(new BlockedRecord(nat.Name, StunEndpoint));
+                    continue;
+                }
                 mapping = UseMapping(nat, r.RemoteEndPoint, StunEndpoint);
                 if (TryGetHeaderTransactionId(r.Buffer, out var tid))
                 {
@@ -175,6 +196,11 @@ public sealed class UdpNatSimulator : IAsyncDisposable
                 UdpClient? senderSocket = null;
                 if (_clients.TryGetValue(r.RemoteEndPoint.Address, out var senderNat))
                 {
+                    if (senderNat.Mode == UdpNatMode.UdpBlocked) // 丢弃 UDP 出站：穿越发送方 NAT 前拦截（M2-30）
+                    {
+                        _blocked.Add(new BlockedRecord(senderNat.Name, m.Public));
+                        continue;
+                    }
                     var sm = UseMapping(senderNat, r.RemoteEndPoint, m.Public);
                     senderIdentity = sm.Public;
                     senderName = senderNat.Name;
@@ -202,7 +228,7 @@ public sealed class UdpNatSimulator : IAsyncDisposable
         }
     }
 
-    /// <summary>入站过滤矩阵（09 §2.2 各模式定义）。symmetric 只放行映射目的地本身——STUN 映射对外不可达，忠实于"打洞必失败"。</summary>
+    /// <summary>入站过滤矩阵（09 §2.2 各模式定义）。symmetric（Random/Sequential）只放行映射目的地本身——STUN 映射对外不可达，忠实于"打洞必失败"。</summary>
     private static bool IsInboundAllowed(Mapping m, IPEndPoint sender)
     {
         var contacted = m.Owner.Contacted;
@@ -212,16 +238,18 @@ public sealed class UdpNatSimulator : IAsyncDisposable
             UdpNatMode.RestrictedCone => contacted.Any(c => c.Address.Equals(sender.Address)),
             UdpNatMode.PortRestricted => contacted.Contains(sender),
             UdpNatMode.SymmetricRandom => m.Destination.Equals(sender),
+            UdpNatMode.SymmetricSequential => m.Destination.Equals(sender),
             _ => false,
         };
     }
 
     // ── 映射管理 ───────────────────────────────────────────────────────
 
-    /// <summary>出站使用映射（须持锁）：同一内部端点 cone 固定一条、symmetric 按目的地一条（真实 NAT 语义）；同时标记 contacted。</summary>
+    /// <summary>出站使用映射（须持锁）：同一内部端点 cone 固定一条、symmetric（Random/Sequential）按目的地一条（真实 NAT 语义）；同时标记 contacted。</summary>
     private Mapping UseMapping(ClientNat nat, IPEndPoint internalEndpoint, IPEndPoint destination)
     {
-        var existing = nat.Mode == UdpNatMode.SymmetricRandom
+        var symmetric = nat.Mode is UdpNatMode.SymmetricRandom or UdpNatMode.SymmetricSequential;
+        var existing = symmetric
             ? nat.Mappings.FirstOrDefault(x => x.Internal.Equals(internalEndpoint) && x.Destination.Equals(destination))
             : nat.Mappings.FirstOrDefault(x => x.Internal.Equals(internalEndpoint));
         var mapping = existing ?? CreateMappingNoLock(nat, internalEndpoint, destination);

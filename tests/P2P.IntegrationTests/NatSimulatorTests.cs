@@ -9,7 +9,8 @@ using Xunit;
 namespace P2P.IntegrationTests;
 
 /// <summary>
-/// M1-34 NatSimulator UDP 四模式（任务清单完成判定：集成测可按模式参数化拉起；各模式映射行为符合定义）。
+/// M1-34 NatSimulator UDP 模式（任务清单完成判定：集成测可按模式参数化拉起；各模式映射行为符合定义；
+/// M2-30 扩展 SymmetricSequential/UdpBlocked 两模式与背靠背顺序分配断言）。
 /// 拓扑（单宿主机回环别名，09 §2.2）：模拟公网 127.0.0.1｜上游 STUN 替身 127.0.0.2（恒回垃圾映射地址
 /// 证明改写）｜C1=127.0.0.4（参数化模式，各用例首行注册）｜C2=127.0.0.5（FullCone）｜C3=127.0.0.6
 /// （FullCone）｜外部主机 R=127.0.0.9（未注册）。
@@ -51,6 +52,7 @@ public sealed class NatSimulatorTests : IAsyncLifetime
     [InlineData(UdpNatMode.RestrictedCone)]
     [InlineData(UdpNatMode.PortRestricted)]
     [InlineData(UdpNatMode.SymmetricRandom)]
+    [InlineData(UdpNatMode.SymmetricSequential)]
     public async Task 映射分配与STUN改写_模式语义符合定义(UdpNatMode mode)
     {
         _sim.RegisterClient(IPAddress.Parse("127.0.0.4"), mode, "C1");
@@ -70,20 +72,23 @@ public sealed class NatSimulatorTests : IAsyncLifetime
         // C2（FullCone）探测 → 其固定公网身份 P2
         var p2 = await StunProbeAsync(_sim, _c2);
 
-        // C1 → 第二目的地 P2：cone 复用同一映射（同源端口），symmetric 按目的地新映射（随机端口）
+        // C1 → 第二目的地 P2：cone 复用同一映射（同源端口），symmetric 按目的地新映射
         Send(_c1, p2, "hi");
         var hi = await MustReceiveAsync(_c2, "C1 出站经 NAT 投递（源地址改写为公网身份）");
         Assert.Equal("hi", Encoding.UTF8.GetString(hi.Buffer));
         Assert.Equal(IPAddress.Loopback, hi.RemoteEndPoint.Address);
 
         var c1Maps = _sim.Mappings.Where(m => m.Client == "C1").ToList();
-        if (mode == UdpNatMode.SymmetricRandom)
+        if (mode is UdpNatMode.SymmetricRandom or UdpNatMode.SymmetricSequential)
         {
             Assert.Equal(2, c1Maps.Count);
             var second = Assert.Single(c1Maps, m => !m.Public.Equals(p1));
             Assert.Equal(p2, second.Destination);
-            Assert.NotEqual(p1.Port, second.Public.Port); // 随机分配 → 不可预测 → 打洞必失败（A-6 前提）
             Assert.Equal(second.Public.Port, hi.RemoteEndPoint.Port); // 投递源 = 第二映射端口
+            if (mode == UdpNatMode.SymmetricRandom)
+                Assert.NotEqual(p1.Port, second.Public.Port); // 随机分配 → 不可预测 → 打洞必失败（A-6 前提）
+            else
+                Assert.True(second.Public.Port > p1.Port, "顺序分配：单调递增（共享全局分配序，精确 +1 见背靠背用例）");
         }
         else
         {
@@ -98,6 +103,7 @@ public sealed class NatSimulatorTests : IAsyncLifetime
     [InlineData(UdpNatMode.RestrictedCone)]
     [InlineData(UdpNatMode.PortRestricted)]
     [InlineData(UdpNatMode.SymmetricRandom)]
+    [InlineData(UdpNatMode.SymmetricSequential)]
     public async Task 入站过滤矩阵_按模式定义放行或丢弃(UdpNatMode mode)
     {
         _sim.RegisterClient(IPAddress.Parse("127.0.0.4"), mode, "C1");
@@ -134,7 +140,7 @@ public sealed class NatSimulatorTests : IAsyncLifetime
 
         // ③ C2 → P1（其公网身份恰为 contacted 的 P2）：PortRestricted 也放行；Symmetric 丢弃（STUN 映射对外不可达）
         Send(_c2, p1, "C2");
-        if (mode == UdpNatMode.SymmetricRandom)
+        if (mode is UdpNatMode.SymmetricRandom or UdpNatMode.SymmetricSequential)
         {
             await WaitFilteredAsync(p1, 3);
             await AssertSilentAsync(_c1);
@@ -147,7 +153,7 @@ public sealed class NatSimulatorTests : IAsyncLifetime
         }
 
         // ④ Symmetric 精确目的地可入：C2 → C1 的第二映射（该映射目的地即 P2）
-        if (mode == UdpNatMode.SymmetricRandom)
+        if (mode is UdpNatMode.SymmetricRandom or UdpNatMode.SymmetricSequential)
         {
             var m2 = Assert.Single(_sim.Mappings, m => m.Client == "C1" && m.Destination.Equals(p2));
             Send(_c2, m2.Public, "ok");
@@ -157,9 +163,72 @@ public sealed class NatSimulatorTests : IAsyncLifetime
         }
     }
 
+    [Fact]
+    public async Task SymmetricSequential_UDP变体_背靠背出站端口连续加一()
+    {
+        _sim.RegisterClient(IPAddress.Parse("127.0.0.4"), UdpNatMode.SymmetricSequential, "C1");
+
+        var p2 = await StunProbeAsync(_sim, _c2); // contacted 前置：C2/C3 公网身份
+        var p3 = await StunProbeAsync(_sim, _c3);
+
+        // 背靠背两次出站（无第三方分配交错）→ 外部端口连续 +1：与 TCP 端口预测同构的 UDP 基础（M2-30）
+        Send(_c1, p2, "a");
+        await MustReceiveAsync(_c2, "背靠背①");
+        Send(_c1, p3, "b");
+        await MustReceiveAsync(_c3, "背靠背②");
+
+        var c1Maps = _sim.Mappings.Where(m => m.Client == "C1").OrderBy(m => m.Public.Port).ToList();
+        Assert.Equal(2, c1Maps.Count);
+        Assert.Equal(p2, c1Maps[0].Destination);
+        Assert.Equal(p3, c1Maps[1].Destination);
+        Assert.Equal(c1Maps[0].Public.Port + 1, c1Maps[1].Public.Port);
+    }
+
+    [Fact]
+    public async Task UdpBlocked_丢弃UDP出站_不建映射_迫使TCP承载路径()
+    {
+        _sim.RegisterClient(IPAddress.Parse("127.0.0.4"), UdpNatMode.UdpBlocked, "C1");
+
+        // ① STUN 出站即丢弃：不代理、不建映射（客户端只可能超时）
+        var request = BuildStunRequest();
+        _c1.Send(request, request.Length, _sim.StunEndpoint);
+        Assert.Equal("C1", (await WaitBlockedAsync(_sim.StunEndpoint, 1)).Client);
+        await AssertSilentAsync(_c1);
+        Assert.DoesNotContain(_sim.Mappings, m => m.Client == "C1");
+
+        // ② 普通出站同样在发送方 NAT 处被丢弃（接收方静默、且无过滤记录——包未穿越）
+        var p2 = await StunProbeAsync(_sim, _c2);
+        Send(_c1, p2, "hi");
+        Assert.Equal("C1", (await WaitBlockedAsync(p2, 1)).Client);
+        await AssertSilentAsync(_c2);
+        Assert.DoesNotContain(_sim.Filtered, f => f.Receiver == "C2" && f.Sender == "C1");
+        Assert.DoesNotContain(_sim.Mappings, m => m.Client == "C1"); // 永不建映射 → UDP 打洞无通路
+    }
+
     // ── 工具 ───────────────────────────────────────────────────────────
 
     private static UdpClient Bind(IPAddress address) => new(new IPEndPoint(address, 0));
+
+    /// <summary>组一个合法 Binding 请求（DEVICE-AUTH 字段由上游替身/模拟器忽略）。</summary>
+    private static byte[] BuildStunRequest()
+    {
+        return StunCodec.BuildBindingRequest(StunCodec.NewTransactionId(), Guid.NewGuid(),
+            RandomGenerator.Bytes(32), (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), RandomGenerator.Bytes(16));
+    }
+
+    /// <summary>轮询直至 target 的丢弃记录达到 expected 条并返回首条（负向断言即时化）。</summary>
+    private async Task<BlockedRecord> WaitBlockedAsync(IPEndPoint target, int expected)
+    {
+        var deadline = Environment.TickCount64 + 3000;
+        while (true)
+        {
+            var hits = _sim.Blocked.Where(b => b.Target.Equals(target)).ToList();
+            if (hits.Count >= expected) return hits[0];
+            if (Environment.TickCount64 > deadline)
+                Assert.Fail($"UdpBlocked 丢弃记录未达预期：期望 ≥{expected}，实际 {hits.Count}（target={target}）");
+            await Task.Delay(20);
+        }
+    }
 
     private static void Send(UdpClient c, IPEndPoint to, string payload)
     {
