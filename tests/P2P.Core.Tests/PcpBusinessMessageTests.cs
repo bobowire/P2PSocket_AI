@@ -101,11 +101,11 @@ public class PcpBusinessMessageTests
     public void PunchRequest_RequesterEndpointsOptional_Survives()
     {
         // 出队前尚无端点：requesterEndpoints=null（Ack 携带的端点由 0x76 回传补齐）
-        var noEp = new PunchRequest(1, 1UL, MsgType.PunchRequest, Guid.NewGuid(), Guid.NewGuid(), "udp", null);
+        var noEp = new PunchRequest(1, 1UL, MsgType.PunchRequest, Guid.NewGuid(), Guid.NewGuid(), "udp", null, null);
         Assert.Null(PcpCodec.Decode<PunchRequest>(PcpCodec.Encode(noEp)).RequesterEndpoints);
 
         var withEp = new PunchRequest(2, 2UL, MsgType.PunchRequest, Guid.NewGuid(), null, "tcp",
-            new EndpointPair(new Endpoint("203.0.113.10", 40001), null));
+            new EndpointPair(new Endpoint("203.0.113.10", 40001), null), null);
         var decoded = PcpCodec.Decode<PunchRequest>(PcpCodec.Encode(withEp));
         Assert.NotNull(decoded.RequesterEndpoints);
         Assert.Equal("203.0.113.10", decoded.RequesterEndpoints.Udp!.Host);

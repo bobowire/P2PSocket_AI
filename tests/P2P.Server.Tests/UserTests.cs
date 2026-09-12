@@ -119,7 +119,7 @@ public sealed class UserTests : IAsyncLifetime
 
         // 0x70 打洞发起 → 2002 + 审计
         await client.SendAsync(new PunchRequest(client.NextSeq(), client.Now(), MsgType.PunchRequest,
-            Guid.NewGuid(), null, "udp", null));
+            Guid.NewGuid(), null, "udp", null, null));
         var error2 = await client.ReceiveAsync<ErrorMessage>();
         Assert.Equal(ErrorCode.ForbiddenPassive, error2!.Code);
 

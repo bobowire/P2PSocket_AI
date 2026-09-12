@@ -1,6 +1,6 @@
 # P2P 内网穿透产品 · 技术设计文档
 
-> 版本：v1.8　创建日期：2026-08-19　状态：待评审
+> 版本：v1.10　创建日期：2026-08-19　状态：待评审
 > 依据：[产品需求文档 PRD v0.6](../prd/README.md)（决策 D1~D21，D3 经 v0.4 修订；开放问题 OQ-1~OQ-19 已全部决议）
 > 定位：开发阶段的**施工图纸**——所有实现以本文档为准；与 PRD 冲突时以 PRD 为准并提出修订。
 
@@ -81,3 +81,4 @@
 | 2026-08-20 | v1.7 | M1 任务清单完整性检查发现**设计缺口 OQ-18：打洞端点互换时序无协议载体**（02 §5.1①"双方各自探测"与 05 §5.3"STUN 不长持"矛盾；被动方在邀请前无探测动机；0x70/0x71 均未定义端点生产者），经用户决议落地为 **TD-19 两段式**：0x70 增可选字段 requesterEndpoints、新增 **0x76 PunchEndpoint**（被邀请方端点回传）、0x70 Ack 延后至对端端点就绪（与 OQ-11 排队语义一致）、新增错误码 **4005 TARGET_OFFLINE**；02 §5.1/§5.2 时序重写、05 §3/§3.1/§5 SignalingCoordinator 两段式协调、04 §5 同步；追溯矩阵 OQ-18/FR-S-502/FR-C-401 行更新 |
 | 2026-09-12 | v1.8 | M2 任务清单编制回流两项：**① OQ-19 决议（TD-20）**——打洞并发路数 N 无上送载体（TD-13 要求 N 取发起方配置并经 PunchInvite 统一下发，但 0x70 载荷未定义 N 字段、服务端实现硬编码 3）：0x70 增可选字段 punchConcurrency（1~5，缺省 3），服务端校验后经 0x71/0x70 Ack 统一回填；02 §2.4 0x70/0x71 行、05 §3 N 来源句同步。**② 帧值表勘误（对齐 M1 实现）**——02 §4.2 原表 0x06 PING/PONG 合一、0x07 REKEY、0x08 UDP_DGRAM、0x09 WINDOW 与代码实际帧值不符（M1 实现将 PING/PONG 拆为独立帧 0x06/0x07，后续顺移：0x08 REKEY、0x09 UDP_DGRAM、0x0A WINDOW；协议未对外发布无兼容负担，文档对齐实现）；FRAG 帧值随 M2 UDP 映射实现定案后回填 |
 | 2026-09-12 | v1.9 | 技术问答澄清落档（用户指示）：STUN 版本与打洞成功率无因果关系（本项目 M1 起即 RFC5389 子集，非 3489；Binding 所得映射端点各版本等价，成败由 NAT mapping × filtering 组合决定）；**M3 诊断扩展预留 05 §7.2 NAT 行为发现（RFC5780 子集）**——双地址监听 + OTHER-ADDRESS/RESPONSE-ORIGIN 属性、mapping（EIM/ADM/APDM）与 filtering（EIF/ADF/APDF）分级判型、TCP 变体端口分配规律（SymmetricSequential 判定），供 FR-C-808 stun-test"NAT 行为初判"与打洞前不可穿透组合预判；04 §2.6 stun-test 行同步；M2 范围不动 |
+| 2026-09-12 | v1.10 | M2-03 消息表字段级细化（随编码落地，02 §2.4 八行）：0x03 响应字段形状 {latestVersion, minProtocol~maxProtocol, upgradeUrl, notes}；0x41 无附加载荷提示帧；0x53 三操作共用 msgType 的判别式 {action: list/approve/reject, groupId?/requestId?} 与队列项字段；0x54 {groupId, revoke}→Ack{ok, inviteCode?}；0x63 {segmentId?, cidr, enabled}（false=移除语义）；0x64 批量化 entries[]；0x73 方向列澄清 C↔S 双向（访问方 60s 请求协调 / 服务端通知双端重打）；0x74 relaySessionId 标注 8B 整数（RLP 外层会话头标识，非 Guid）。另：v1.9 时版本头笔误仍标 v1.8，本次一并修正 |

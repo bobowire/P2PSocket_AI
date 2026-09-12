@@ -90,7 +90,7 @@ public sealed class SignalingTests : IAsyncLifetime
         var aEndpoints = UdpOnly("203.0.113.10", 50000);
 
         await a.SendAsync(new PunchRequest(a.NextSeq(), a.Now(), MsgType.PunchRequest,
-            bId, null, "udp", aEndpoints));
+            bId, null, "udp", aEndpoints, null));
 
         // B 收 0x71：A 信息 + A 端点 + N + relayAllowed=false
         var invite = await b.ReceiveAsync<PunchInvite>() ?? throw new IOException("B 未收到 PunchInvite");
@@ -135,7 +135,7 @@ public sealed class SignalingTests : IAsyncLifetime
         }
 
         await a.SendAsync(new PunchRequest(a.NextSeq(), a.Now(), MsgType.PunchRequest,
-            bId, null, "udp", null));
+            bId, null, "udp", null, null));
         var error = await a.ReceiveAsync<ErrorMessage>();
         Assert.Equal(ErrorCode.TargetNotAuthorized, error!.Code);
 
@@ -155,12 +155,12 @@ public sealed class SignalingTests : IAsyncLifetime
 
         // 第一发：B 空闲 → 立即收到邀请
         await a1.SendAsync(new PunchRequest(a1.NextSeq(), a1.Now(), MsgType.PunchRequest,
-            bId, null, "udp", UdpOnly("203.0.113.1", 40001)));
+            bId, null, "udp", UdpOnly("203.0.113.1", 40001), null));
         var invite1 = await b.ReceiveAsync<PunchInvite>() ?? throw new IOException("第一次未收到邀请");
 
         // 第二发：B 忙 → 排队，不下发邀请、A2 无任何应答
         await a2.SendAsync(new PunchRequest(a2.NextSeq(), a2.Now(), MsgType.PunchRequest,
-            bId, null, "udp", UdpOnly("203.0.113.2", 40002)));
+            bId, null, "udp", UdpOnly("203.0.113.2", 40002), null));
         await AssertSilentAsync(a2);
         await AssertSilentAsync(b);
 
@@ -189,7 +189,7 @@ public sealed class SignalingTests : IAsyncLifetime
         var (b, bId, _) = await RegisterAsync("wait-b");
 
         await a.SendAsync(new PunchRequest(a.NextSeq(), a.Now(), MsgType.PunchRequest,
-            bId, null, "udp", UdpOnly("203.0.113.3", 40003)));
+            bId, null, "udp", UdpOnly("203.0.113.3", 40003), null));
         _ = await b.ReceiveAsync<PunchInvite>(); // B 收到邀请但不上报
 
         await AssertSilentAsync(a); // 0x76 未达 → Ack 不下发
@@ -212,7 +212,7 @@ public sealed class SignalingTests : IAsyncLifetime
         Assert.False(_registry.IsOnline(bId));
 
         await a.SendAsync(new PunchRequest(a.NextSeq(), a.Now(), MsgType.PunchRequest,
-            bId, null, "udp", null));
+            bId, null, "udp", null, null));
         var error = await a.ReceiveAsync<ErrorMessage>();
         Assert.Equal(ErrorCode.TargetOffline, error!.Code);
     }
@@ -226,7 +226,7 @@ public sealed class SignalingTests : IAsyncLifetime
         var (b, bId, _) = await RegisterAsync("silent-b");
 
         await a.SendAsync(new PunchRequest(a.NextSeq(), a.Now(), MsgType.PunchRequest,
-            bId, null, "udp", UdpOnly("203.0.113.4", 40004)));
+            bId, null, "udp", UdpOnly("203.0.113.4", 40004), null));
         _ = await b.ReceiveAsync<PunchInvite>(); // B 收到邀请但永不回应
 
         _time.Advance(TimeSpan.FromSeconds(11)); // 超过 10s 会话超时

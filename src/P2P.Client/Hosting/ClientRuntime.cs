@@ -194,9 +194,10 @@ public sealed class ClientRuntime : IAsyncDisposable
         var stunEp = ResolveStunEndpoint(_control.ServerAddrs.FirstOrDefault());
 
         _puncher.Attach(new Puncher(
+            // punchConcurrency 通路 M2-16 打通（settings → 0x70 上送）；当前不携带 → 服务端取缺省 3
             (targetId, trigger, proto, endpoints, ct) => _control.SendRequestAsync<PunchRequestAck>(new PunchRequest(
                 _control.NextSeq(), _control.TimestampMs(), MsgType.PunchRequest,
-                targetId, trigger, proto, endpoints), ct),
+                targetId, trigger, proto, endpoints, PunchConcurrency: null), ct),
             (sessionId, endpoints, ct) => _control.SendAsync(new PunchEndpoint(
                 _control.NextSeq(), _control.TimestampMs(), MsgType.PunchEndpoint,
                 sessionId, endpoints), ct),
