@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using P2P.Client.Hosting;
 using P2P.Client.Storage;
 using P2P.Core.Crypto;
+using P2P.Core.Stun;
 using P2P.IntegrationTests.NatSimulator;
 using P2P.Server.Data;
 using P2P.Server.Services;
@@ -35,6 +36,7 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
     private CancellationTokenSource? _echoCts;
     private UdpNatSimulator? _sim;
     private StubStunUpstream? _upstream;
+    private TcpStunStub? _tcpStun;
     private StubFactory _factory = null!;
     private string _rootDir = null!;
     private int _port;
@@ -59,6 +61,7 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         foreach (var h in _https) h.Dispose();
         if (_sim is not null) await _sim.DisposeAsync();
         if (_upstream is not null) await _upstream.DisposeAsync();
+        if (_tcpStun is not null) await _tcpStun.DisposeAsync();
         foreach (var s in _servers) await s.DisposeAsync();
         foreach (var s in _signalings) await s.DisposeAsync();
         await Task.Delay(200); // 服务端收尾与夹具销毁竞态宽限（ClientRuntime 测试同法）
@@ -132,6 +135,9 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         {
             ServerAddrs = [$"127.0.0.1:{_port}"],
             LocalWebPort = FreePort(),
+            // M2-16：tcp 映射改走 TCP 打洞；回环恒等 NAT（无端口平移）下 N=1 直连命中——
+            // N>1 端口预测矩阵归 M2-30 NatSimulator-TCP / M2-31 A-5
+            PunchConcurrency = 1,
         });
         return new SeededClient(deviceId, secret, store.State.RemoteCode, dir, ip);
     }
@@ -170,7 +176,8 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         return http;
     }
 
-    /// <summary>NatSimulator 世界：STUN 派生 :3478（TD-07）+ 上游替身 + 双客户端 NAT 注册。</summary>
+    /// <summary>NatSimulator 世界：STUN 派生 :3478（TD-07）+ 上游替身 + 双客户端 NAT 注册；
+    /// TCP 打洞（M2-16）另拉 TCP STUN 替身（同宿主 :3478/TCP，与 UDP 模拟器不同协议互不冲突）。</summary>
     private async Task StartSimulatorAsync((IPAddress Ip, UdpNatMode Mode) a, (IPAddress Ip, UdpNatMode Mode) b)
     {
         _upstream = new StubStunUpstream();
@@ -179,6 +186,8 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         await _sim.StartAsync();
         _sim.RegisterClient(a.Ip, a.Mode, "A");
         _sim.RegisterClient(b.Ip, b.Mode, "B");
+        _tcpStun = new TcpStunStub();
+        _tcpStun.Start();
     }
 
     /// <summary>本机回环 echo TCP 服务（打洞目标 self:port 的载荷校验终点）。</summary>
@@ -216,6 +225,56 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
             }
         }
         catch { /* 客户端断开 */ }
+    }
+
+    /// <summary>TCP STUN Binding 应答替身（M2-06 正式四道闸服务落地前的场景缝）：常驻
+    /// 127.0.0.1:3478/TCP（TD-07 派生端口），收一帧→回 XOR-MAPPED（服务端所见的源端点）→关；
+    /// 双客户端并发探测（A/B 各一笔短事务，02 §3.3）。</summary>
+    private sealed class TcpStunStub : IAsyncDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 3478);
+        private readonly CancellationTokenSource _cts = new();
+
+        public void Start()
+        {
+            _listener.Start(16);
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    while (true)
+                    {
+                        var conn = await _listener.AcceptSocketAsync(_cts.Token);
+                        _ = Task.Run(() => ServeAsync(conn));
+                    }
+                }
+                catch { /* 停机关闭 */ }
+            });
+        }
+
+        private async Task ServeAsync(Socket conn)
+        {
+            try
+            {
+                using var _ = conn;
+                using var stream = new NetworkStream(conn, ownsSocket: false);
+                var request = await StunTcpFraming.TryReadAsync(stream, _cts.Token);
+                if (request is null) return;
+                var tid = request.AsSpan(8, StunCodec.TransactionIdLen).ToArray(); // 头 type2+len2+magic4 → tid@8
+                var remote = (IPEndPoint)conn.RemoteEndPoint!;
+                await StunTcpFraming.WriteAsync(stream,
+                    StunCodec.BuildBindingResponse(tid, remote.Address, (ushort)remote.Port), _cts.Token);
+            }
+            catch { /* 单事务尽力而为 */ }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            _cts.Cancel();
+            _listener.Stop();
+            await Task.Delay(50); // 在飞事务收尾宽限
+            _cts.Dispose();
+        }
     }
 
     // ── HTTP/断言工具 ─────────────────────────────────────────────────

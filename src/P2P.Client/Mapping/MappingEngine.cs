@@ -164,7 +164,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
             return Task.CompletedTask;
         }
         SetState(rt, MappingState.Punching, null);
-        _scheduler.Enqueue(config.PeerDeviceId, config.MappingId); // OQ-11 串行队列（同对合并）
+        _scheduler.Enqueue(config.PeerDeviceId, config.MappingId, config.Proto); // OQ-11 串行队列（同对合并；proto 随映射，M2-16）
         return Task.CompletedTask;
     }
 
@@ -186,7 +186,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
             if (rt.State == MappingState.Failed)
             {
                 SetState(rt, MappingState.Punching, null);
-                _scheduler.Enqueue(rt.Config.PeerDeviceId, mappingId); // OQ-11 串行队列
+                _scheduler.Enqueue(rt.Config.PeerDeviceId, mappingId, rt.Config.Proto); // OQ-11 串行队列
             }
             return Task.CompletedTask;
         }
@@ -364,7 +364,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         {
             if (rt.State != MappingState.Direct) continue;
             SetState(rt, MappingState.Punching, $"reconnect: {reason}"); // 02 §4.5 重建
-            _scheduler.Enqueue(peerDeviceId, rt.Config.MappingId);
+            _scheduler.Enqueue(peerDeviceId, rt.Config.MappingId, rt.Config.Proto);
         }
     }
 

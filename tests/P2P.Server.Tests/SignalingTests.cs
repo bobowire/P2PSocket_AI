@@ -99,7 +99,7 @@ public sealed class SignalingTests : IAsyncLifetime
         Assert.NotEmpty(invite.Peer.StaticPubKey);
         Assert.Equal(aEndpoints.Udp!.Host, invite.PeerEndpoints.Udp!.Host);
         Assert.Equal(aEndpoints.Udp.Port, invite.PeerEndpoints.Udp.Port);
-        Assert.Equal(SignalingCoordinator.DefaultPunchCount, invite.PunchCount);
+        Assert.Equal(PunchPolicy.DefaultConcurrency, invite.PunchCount); // 未携带 → 缺省 3（OQ-19）
         Assert.False(invite.RelayAllowed);
 
         // B 回 0x76（即时 STUN 所得端点）
@@ -115,6 +115,30 @@ public sealed class SignalingTests : IAsyncLifetime
         Assert.Equal(bEndpoints.Udp!.Host, ack.PeerEndpoints.Udp!.Host);
         Assert.Equal(bEndpoints.Udp.Port, ack.PeerEndpoints.Udp.Port);
         Assert.False(ack.RelayAllowed);
+    }
+
+    // ── M2-16 OQ-19/TD-20：punchConcurrency 取请求值校验回填（0x71/0x70 Ack 同值）──
+
+    [Theory]
+    [InlineData(5, 5)]   // 合法上限
+    [InlineData(1, 1)]   // 合法下限
+    [InlineData(0, 3)]   // 越界 → 缺省（容忍，PunchPolicy.Normalize）
+    [InlineData(6, 3)]
+    [InlineData(255, 3)]
+    public async Task Punch_ConcurrencyNormalized_BackfilledInInviteAndAck(byte requested, byte expected)
+    {
+        var (a, _, _) = await RegisterAsync("con-a");
+        var (b, bId, _) = await RegisterAsync("con-b");
+
+        await a.SendAsync(new PunchRequest(a.NextSeq(), a.Now(), MsgType.PunchRequest,
+            bId, null, "tcp", UdpOnly("203.0.113.10", 50000), requested));
+        var invite = await b.ReceiveAsync<PunchInvite>() ?? throw new IOException("B 未收到 PunchInvite");
+        Assert.Equal(expected, invite.PunchCount);
+
+        await b.SendAsync(new PunchEndpoint(b.NextSeq(), b.Now(), MsgType.PunchEndpoint,
+            invite.SessionId, UdpOnly("198.51.100.20", 50001)));
+        var ack = await a.ReceiveAsync<PunchRequestAck>() ?? throw new IOException("A 未收到延后 Ack");
+        Assert.Equal(expected, ack.PunchCount); // 双方该次打洞执行同一 N（02 §5.2② 对称性硬约束）
     }
 
     // ── 完成判定②：L2 拒 4001 + punch_deny 审计 ──────────────────────

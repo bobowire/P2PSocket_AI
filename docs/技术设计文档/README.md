@@ -1,6 +1,6 @@
 # P2P 内网穿透产品 · 技术设计文档
 
-> 版本：v1.11　创建日期：2026-08-19　状态：待评审
+> 版本：v1.12　创建日期：2026-08-19　状态：待评审
 > 依据：[产品需求文档 PRD v0.6](../prd/README.md)（决策 D1~D21，D3 经 v0.4 修订；开放问题 OQ-1~OQ-19 已全部决议）
 > 定位：开发阶段的**施工图纸**——所有实现以本文档为准；与 PRD 冲突时以 PRD 为准并提出修订。
 
@@ -83,3 +83,4 @@
 | 2026-09-12 | v1.9 | 技术问答澄清落档（用户指示）：STUN 版本与打洞成功率无因果关系（本项目 M1 起即 RFC5389 子集，非 3489；Binding 所得映射端点各版本等价，成败由 NAT mapping × filtering 组合决定）；**M3 诊断扩展预留 05 §7.2 NAT 行为发现（RFC5780 子集）**——双地址监听 + OTHER-ADDRESS/RESPONSE-ORIGIN 属性、mapping（EIM/ADM/APDM）与 filtering（EIF/ADF/APDF）分级判型、TCP 变体端口分配规律（SymmetricSequential 判定），供 FR-C-808 stun-test"NAT 行为初判"与打洞前不可穿透组合预判；04 §2.6 stun-test 行同步；M2 范围不动 |
 | 2026-09-12 | v1.10 | M2-03 消息表字段级细化（随编码落地，02 §2.4 八行）：0x03 响应字段形状 {latestVersion, minProtocol~maxProtocol, upgradeUrl, notes}；0x41 无附加载荷提示帧；0x53 三操作共用 msgType 的判别式 {action: list/approve/reject, groupId?/requestId?} 与队列项字段；0x54 {groupId, revoke}→Ack{ok, inviteCode?}；0x63 {segmentId?, cidr, enabled}（false=移除语义）；0x64 批量化 entries[]；0x73 方向列澄清 C↔S 双向（访问方 60s 请求协调 / 服务端通知双端重打）；0x74 relaySessionId 标注 8B 整数（RLP 外层会话头标识，非 Guid）。另：v1.9 时版本头笔误仍标 v1.8，本次一并修正 |
 | 2026-09-12 | v1.11 | M2-05 落地同步：05 §2.3 WINDOW 帧值勘误补遗——v1.8 帧值勘误仅改 02 §4.2，05 §2.3 本行残留勘误前旧值 0x09，随 M2-05 交付（WINDOW=0x0A、CreditWindow 账本默认 64KiB、载荷=已消费字节数而 channelId 在帧头）一并修正；REKEY(0x08)/REKEY_ACK 载荷定长 81B（新 eph 公钥 65+新 nonce 16，承载于现会话密钥 AEAD 内无需另加握手 mac）随编码定案记入 02 §4.4 补注（不改变决议范围） |
+| 2026-09-12 | v1.12 | M2-16 落地同步：02 §5.2 实现备注补承载分帧条目——直连 TCP 打洞胜出连接的 PTP 会话承载与 §6.2 中继 TCP 承载复用同一定界（`[u16 帧长（小端）][PTP 帧]`，§6.2 原文为中继场景所写），帧上限 16416B（16B 帧头 + 16KiB DATA 载荷上限 + 16B AEAD tag）随编码定案：发送侧越界拒绝、接收侧前缀越界/中途截断按承载关闭契约处理（不改变决议范围） |

@@ -9,12 +9,12 @@ namespace P2P.Server.Services;
 /// 0x70（含发起方端点）→ L1/L2 授权 → ① 向 B 下发 PunchInvite → 收 B 的 0x76 →
 /// ② 向 A 下发延后 Ack（B 端点）。per-device 至多一个活跃会话：并发申请排队、同对去重。
 /// B 离线 → 4005；0x76 超 10s 未达 → 5001 失败收尾；M1 relayAllowed 恒 false（中继 M2）。
+/// 并发路数 N（OQ-19/TD-20，M2-16）：取 0x70 punchConcurrency 经 PunchPolicy.Normalize 校验
+/// （1~5 缺省 3），经 0x71/0x70 Ack 的 PunchCount 统一回填——双方该次打洞执行同一 N（02 §5.2②）。
 /// 0x72 PunchResult 处理属 FR-C-404 → M2。
 /// </summary>
 public sealed class SignalingCoordinator : IAsyncDisposable
 {
-    /// <summary>UDP 打洞连发路数（PunchInvite 统一下发；02 §5.1⑤）。</summary>
-    public const byte DefaultPunchCount = 3;
     public static readonly TimeSpan SessionTimeout = TimeSpan.FromSeconds(10);
 
     private readonly IDbContextFactory<AppDbContext> _dbFactory;
@@ -116,7 +116,8 @@ public sealed class SignalingCoordinator : IAsyncDisposable
             InitiatorInfo = new PeerInfo(a.Id, a.DeviceName, a.RemoteCode, a.StaticPubKey),
             TargetInfo = new PeerInfo(b.Id, b.DeviceName, b.RemoteCode, b.StaticPubKey),
             RequesterEndpoints = msg.RequesterEndpoints ?? new EndpointPair(null, null),
-            PunchCount = DefaultPunchCount,
+            // OQ-19/TD-20（M2-16）：取发起方请求值（越界/缺省 → 3，容忍哲学），Ack/Invite 统一回填
+            PunchCount = PunchPolicy.Normalize(msg.PunchConcurrency),
             CreatedAt = _time.GetLocalNow(),
         };
 

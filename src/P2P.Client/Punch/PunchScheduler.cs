@@ -12,8 +12,8 @@ namespace P2P.Client.Punch;
 public sealed class PunchScheduler : IAsyncDisposable
 {
     private readonly IPuncher _puncher;
-    private readonly Channel<(Guid Target, Guid? Trigger)> _queue =
-        Channel.CreateUnbounded<(Guid, Guid?)>(new UnboundedChannelOptions { SingleReader = true });
+    private readonly Channel<(Guid Target, Guid? Trigger, string Proto)> _queue =
+        Channel.CreateUnbounded<(Guid, Guid?, string)>(new UnboundedChannelOptions { SingleReader = true });
     private readonly HashSet<Guid> _queuedPeers = [];
     private readonly object _gate = new();
     private readonly CancellationTokenSource _cts = new();
@@ -46,8 +46,9 @@ public sealed class PunchScheduler : IAsyncDisposable
         _loop = LoopAsync(_cts.Token);
     }
 
-    /// <summary>入队打洞需求（映射 enable/隧道重建/中继回切重试）。同对已在队列或进行中 → 合并（false）。</summary>
-    public bool Enqueue(Guid targetDeviceId, Guid? triggerMappingId = null)
+    /// <summary>入队打洞需求（映射 enable/隧道重建/中继回切重试）。同对已在队列或进行中 → 合并（false）；
+    /// proto 取触发映射的协议（02 §4.5：隧道为设备对级资源，首条触发映射的 proto 决定打洞方式，缺省 udp）。</summary>
+    public bool Enqueue(Guid targetDeviceId, Guid? triggerMappingId = null, string proto = "udp")
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) == 1, this);
         lock (_gate)
@@ -56,7 +57,7 @@ public sealed class PunchScheduler : IAsyncDisposable
             if (_currentPeer == targetDeviceId) return false;
             _queuedPeers.Add(targetDeviceId);
         }
-        _queue.Writer.TryWrite((targetDeviceId, triggerMappingId));
+        _queue.Writer.TryWrite((targetDeviceId, triggerMappingId, proto));
         return true;
     }
 
@@ -68,7 +69,7 @@ public sealed class PunchScheduler : IAsyncDisposable
     {
         try
         {
-            await foreach (var (target, trigger) in _queue.Reader.ReadAllAsync(ct))
+            await foreach (var (target, trigger, proto) in _queue.Reader.ReadAllAsync(ct))
             {
                 lock (_gate)
                 {
@@ -78,7 +79,7 @@ public sealed class PunchScheduler : IAsyncDisposable
                 PunchOutcome outcome;
                 try
                 {
-                    outcome = await _puncher.InitiateAsync(target, trigger, ct);
+                    outcome = await _puncher.InitiateAsync(target, trigger, proto, ct);
                 }
                 catch (Exception e)
                 {

@@ -127,7 +127,7 @@ public sealed class MappingSyncIntegrationTests : IAsyncLifetime
         private readonly TaskCompletionSource<PunchOutcome> _gate =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public async Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId,
+        public async Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId, string proto,
             CancellationToken ct = default)
         {
             Initiated.Enqueue(targetDeviceId);

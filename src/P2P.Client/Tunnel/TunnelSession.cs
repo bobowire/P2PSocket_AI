@@ -143,6 +143,17 @@ public sealed class TunnelSession : IAsyncDisposable
         return Create(keys.SessionId, peerDeviceId, false, keys, transport, handler, options, time, keepAlive);
     }
 
+    /// <summary>
+    /// 外部驱动握手完成后的建立入口（M2-16 TCP 打洞）：THello1 须在多条候选连接上扇出、
+    /// 由首条 THello2/THello1 到达的连接胜出——握手时序在 Puncher 侧驱动（02 §5.2③④），
+    /// 此处仅以既得会话密钥启动收发循环（内部同 <see cref="ConnectAsync"/> 收尾）。
+    /// </summary>
+    public static TunnelSession FromEstablishedKeys(Guid sessionId, Guid peerDeviceId, bool isInitiator,
+        PtpSessionKeys keys, ITunnelTransport transport, ITunnelChannelHandler handler,
+        TunnelSessionOptions? options = null, TimeProvider? time = null,
+        IReadOnlyList<IDisposable>? keepAlive = null)
+        => Create(sessionId, peerDeviceId, isInitiator, keys, transport, handler, options, time, keepAlive);
+
     /// <summary>按周期重发同一握手帧（打洞连发；首发已由调用方发出，此处补发 N-1 次）。</summary>
     private static async Task ResendHandshakeAsync(ITunnelTransport transport, byte[] wire,
         TunnelSessionOptions options, TimeProvider? time, CancellationToken ct)

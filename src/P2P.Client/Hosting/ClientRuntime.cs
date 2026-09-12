@@ -16,6 +16,7 @@ using P2P.Client.Tunnel;
 using P2P.Client.Web;
 using P2P.Core.Crypto;
 using P2P.Core.Protocol;
+using P2P.Core.Stun;
 using P2P.Nic;
 using P2P.Nic.Linux;
 using P2P.Nic.Windows;
@@ -194,10 +195,12 @@ public sealed class ClientRuntime : IAsyncDisposable
         var stunEp = ResolveStunEndpoint(_control.ServerAddrs.FirstOrDefault());
 
         _puncher.Attach(new Puncher(
-            // punchConcurrency 通路 M2-16 打通（settings → 0x70 上送）；当前不携带 → 服务端取缺省 3
+            // OQ-19/TD-20 punchConcurrency 通路（M2-16 打通）：settings → 0x70 上送（发送时点取当前值，
+            // 设置页修改对后续打洞会话生效）；服务端 PunchPolicy.Normalize 校验后经 0x71/0x70 Ack 回填
             (targetId, trigger, proto, endpoints, ct) => _control.SendRequestAsync<PunchRequestAck>(new PunchRequest(
                 _control.NextSeq(), _control.TimestampMs(), MsgType.PunchRequest,
-                targetId, trigger, proto, endpoints, PunchConcurrency: null), ct),
+                targetId, trigger, proto, endpoints,
+                PunchConcurrency: (byte?)_settings.Settings.PunchConcurrency), ct),
             (sessionId, endpoints, ct) => _control.SendAsync(new PunchEndpoint(
                 _control.NextSeq(), _control.TimestampMs(), MsgType.PunchEndpoint,
                 sessionId, endpoints), ct),
@@ -210,7 +213,11 @@ public sealed class ClientRuntime : IAsyncDisposable
             {
                 KeepaliveSec = _settings.Settings.KeepaliveSec,
                 BindAddress = _options.PunchBindOverride,
-            }));
+            },
+            // STUN-TCP 探测缝（M2-04 StunTcpProber，TCP 打洞 M2-16；单事务即关、端口 L 由调用方复用 listen）
+            (socket, ct) => stunEp is null
+                ? throw new IOException("STUN 地址解析失败（服务端主机名不可解析，TD-07 :3478）")
+                : StunTcpProber.ProbeAsync(socket, stunEp, deviceId, deviceSecret, _control.Clock, ct: ct)));
         Log?.Invoke($"打洞器已接线（STUN={stunEp?.ToString() ?? "解析失败"}，派生自控制地址 :3478，TD-07）");
     }
 
@@ -303,9 +310,9 @@ public sealed class ClientRuntime : IAsyncDisposable
 
         public void Attach(IPuncher puncher) => Volatile.Write(ref _inner, puncher);
 
-        public Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId,
+        public Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId, string proto,
             CancellationToken ct = default)
-            => (_inner ?? NotReadyPuncher.Instance).InitiateAsync(targetDeviceId, triggerMappingId, ct);
+            => (_inner ?? NotReadyPuncher.Instance).InitiateAsync(targetDeviceId, triggerMappingId, proto, ct);
 
         public Task<PunchOutcome> RespondAsync(PunchInvite invite, CancellationToken ct = default)
             => (_inner ?? NotReadyPuncher.Instance).RespondAsync(invite, ct);
@@ -320,7 +327,7 @@ public sealed class ClientRuntime : IAsyncDisposable
     {
         public static readonly NotReadyPuncher Instance = new();
 
-        public Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId,
+        public Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId, string proto,
             CancellationToken ct = default)
             => Task.FromResult(PunchOutcome.Failure(targetDeviceId, "puncher_not_ready"));
 

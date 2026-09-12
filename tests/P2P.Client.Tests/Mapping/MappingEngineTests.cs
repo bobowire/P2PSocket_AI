@@ -103,10 +103,13 @@ public sealed class MappingEngineTests
     {
         public Func<Guid, Task<PunchOutcome>>? Behavior { get; set; }
         public ConcurrentQueue<Guid> Initiated { get; } = [];
+        public ConcurrentQueue<string> InitiatedProtos { get; } = [];
 
-        public Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId, CancellationToken ct = default)
+        public Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId, string proto,
+            CancellationToken ct = default)
         {
             Initiated.Enqueue(targetDeviceId);
+            InitiatedProtos.Enqueue(proto);
             return Behavior is not null
                 ? Behavior(targetDeviceId)
                 : Task.FromResult(PunchOutcome.Failure(targetDeviceId, "no_behavior"));
@@ -203,6 +206,17 @@ public sealed class MappingEngineTests
             await HostB.DisposeAsync();
             foreach (var s in _sessions) { try { await s.DisposeAsync(); } catch { } } // 未挂表会话兜底（重复释放无害）
         }
+    }
+
+    [Fact]
+    public async Task 启用映射_随映射proto入队_打洞上送()
+    {
+        await using var topo = new Topology();
+        await topo.EngineA.EnableAsync(new MappingConfig(Guid.NewGuid(), "m-tcp",
+            (ushort)FreePort(), "tcp", "self", 80, topo.PeerB));
+        await UntilAsync(() => topo.PuncherA.Initiated.Count == 1, "打洞出队");
+        // M2-16：0x70 proto 字段消费——proto=tcp 映射走 TCP 打洞，队列透传至 Puncher
+        Assert.Equal(["tcp"], topo.PuncherA.InitiatedProtos);
     }
 
     [Fact]

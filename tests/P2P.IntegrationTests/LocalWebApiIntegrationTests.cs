@@ -137,9 +137,9 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
         public GatedPuncher Default { get; } = new();
         public void Set(IPuncher puncher) => _inner = puncher;
 
-        public Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId,
+        public Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId, string proto,
             CancellationToken ct = default)
-            => (_inner ?? Default).InitiateAsync(targetDeviceId, triggerMappingId, ct);
+            => (_inner ?? Default).InitiateAsync(targetDeviceId, triggerMappingId, proto, ct);
 
         public Task<PunchOutcome> RespondAsync(PunchInvite invite, CancellationToken ct = default)
             => (_inner ?? Default).RespondAsync(invite, ct);
@@ -151,7 +151,7 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
         private readonly TaskCompletionSource<PunchOutcome> _gate =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public async Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId,
+        public async Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId, string proto,
             CancellationToken ct = default)
         {
             try { return await _gate.Task.WaitAsync(ct); }
@@ -165,7 +165,7 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
     /// <summary>打洞桩：出队即失败（failed 轨迹与手动重试用例）。</summary>
     private sealed class FailingPuncher : IPuncher
     {
-        public Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId,
+        public Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId, string proto,
             CancellationToken ct = default)
             => Task.FromResult(PunchOutcome.Failure(targetDeviceId, "punch_timeout"));
 
@@ -194,7 +194,7 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
             _peerB = peerB;
         }
 
-        public async Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId,
+        public async Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId, string proto,
             CancellationToken ct = default)
         {
             var sessionId = Guid.NewGuid();

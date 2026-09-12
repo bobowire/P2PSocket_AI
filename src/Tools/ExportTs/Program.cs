@@ -237,7 +237,7 @@ internal static partial class TsGen // 生成逻辑集中（顶层语句宿主�
 /// <summary>打洞器空实现（仅装配路由，永不调用）。</summary>
 internal sealed class NullPuncher : IPuncher
 {
-    public Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId,
+    public Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId, string proto,
         CancellationToken ct = default)
         => Task.FromResult(PunchOutcome.Failure(targetDeviceId, "export_ts"));
 

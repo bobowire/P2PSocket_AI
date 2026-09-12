@@ -209,7 +209,7 @@ public sealed class PuncherTests
             };
 
             // A 出队打洞：0x70 由假缝接管（假缝内先等 B 上报 → B 必须已启动应答）
-            var outcomeATask = puncherA.InitiateAsync(deviceB, triggerMapping);
+            var outcomeATask = puncherA.InitiateAsync(deviceB, triggerMapping, "udp");
 
             // B 收到邀请（A 端点需 A 已探测——invite 构造等待 A 探测结果）
             var aEp = await seamsA.Probed.Task;
@@ -280,7 +280,7 @@ public sealed class PuncherTests
             Assert.Contains("stun_failed", outcome.FailReason);
             Assert.Empty(seams.Reports);
 
-            var initiate = await puncher.InitiateAsync(Guid.NewGuid(), null);
+            var initiate = await puncher.InitiateAsync(Guid.NewGuid(), null, "udp");
             Assert.False(initiate.Ok);
             Assert.Contains("stun_failed", initiate.FailReason);
         }
@@ -297,7 +297,7 @@ public sealed class PuncherTests
         var puncher = new Puncher(seams.SendRequestAsync, seams.ReportAsync, seams.ProbeAsync, staticKey);
         using (puncher)
         {
-            var outcome = await puncher.InitiateAsync(Guid.NewGuid(), null);
+            var outcome = await puncher.InitiateAsync(Guid.NewGuid(), null, "udp");
             Assert.False(outcome.Ok);
             Assert.Contains("server_4005", outcome.FailReason); // OQ-18：B 离线立即 failed 不等超时
         }
@@ -312,12 +312,15 @@ public sealed class PunchSchedulerTests
         private readonly SemaphoreSlim _gate = new(1, 1);
         public ConcurrentQueue<(Guid Peer, long StartedAt, long EndedAt)> Runs { get; } = [];
         public ConcurrentQueue<Guid> CompletedOrder { get; } = [];
+        public ConcurrentQueue<string> Protos { get; } = [];
         public Func<Guid, Task<PunchOutcome>>? Behavior { get; set; }
         public int MaxConcurrency { get; private set; }
         private int _concurrency;
 
-        public async Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId, CancellationToken ct = default)
+        public async Task<PunchOutcome> InitiateAsync(Guid targetDeviceId, Guid? triggerMappingId, string proto,
+            CancellationToken ct = default)
         {
+            Protos.Enqueue(proto);
             var entered = Interlocked.Increment(ref _concurrency);
             MaxConcurrency = Math.Max(MaxConcurrency, entered);
             await _gate.WaitAsync(ct);
@@ -422,6 +425,19 @@ public sealed class PunchSchedulerTests
             var failed = outcomes.Single(o => !o.Ok);
             Assert.Equal(failPeer, failed.PeerDeviceId);
             Assert.Equal("punch_timeout", failed.FailReason); // 超时失败事件
+        }
+    }
+
+    [Fact]
+    public async Task 入队携带proto_出队透传至打洞器()
+    {
+        var fake = new FakePuncher();
+        await using (var scheduler = new PunchScheduler(fake))
+        {
+            var target = Guid.NewGuid();
+            scheduler.Enqueue(target, null, "tcp"); // M2-16：映射 proto 随队列出队透传（TCP 打洞路由）
+            await UntilAsync(() => fake.CompletedOrder.Count == 1, "完成");
+            Assert.Equal(["tcp"], fake.Protos); // 出队即映射的 proto，非缺省 udp
         }
     }
 }
