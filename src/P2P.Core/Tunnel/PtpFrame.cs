@@ -44,3 +44,8 @@ public sealed record OpenPayload(
 public sealed record OpenResultPayload(
     [property: Key(0)] bool Ok,
     [property: Key(1)] string? FailReason);
+
+/// <summary>WINDOW 信用回报载荷（0x0A，05 §2.3）：channelId 在帧头，载荷仅已消费字节数——接收方据此回报、发送方 Grant 恢复读。</summary>
+[MessagePackObject]
+public sealed record WindowCreditPayload(
+    [property: Key(0)] uint CreditBytes);
