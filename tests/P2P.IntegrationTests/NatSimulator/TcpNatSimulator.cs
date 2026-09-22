@@ -88,8 +88,12 @@ public sealed class TcpNatSimulator : IAsyncDisposable
         _options = options ?? new TcpNatOptions();
     }
 
-    /// <summary>注册一个客户端 NAT：internalIp 为其内网侧地址（建议独立回环 IP）；端口子段按注册序分配。</summary>
-    public void RegisterClient(IPAddress internalIp, TcpNatMode mode, string name)
+    /// <summary>注册一个客户端 NAT：internalIp 为其内网侧地址（建议独立回环 IP）；端口子段按注册序分配。
+    /// punchPerturbation：首次 STUN 探测（打洞会话）后、后续出站连接前，向该客户端端口序列注入 s 条
+    /// 外来流占用（探测型映射、内部指向无人监听端口）——模拟真实 NAT 时序窗内其他 TCP 流对端口预测的
+    /// 扰动：s ≥ N−1 时对端预测目标落在非打洞映射上 → 必 miss（协议已统一双方 N=TD-13/20，
+    /// N_A≠N_B 场景以此等效呈现，TD-21）。</summary>
+    public void RegisterClient(IPAddress internalIp, TcpNatMode mode, string name, int punchPerturbation = 0)
     {
         lock (_lock)
         {
@@ -98,7 +102,10 @@ public sealed class TcpNatSimulator : IAsyncDisposable
             var subBase = _options.PortBase + _registered * _options.SubRangeSize;
             if (subBase + _options.SubRangeSize > _options.PortBase + _options.PortCount)
                 throw new InvalidOperationException("模拟公网端口段耗尽（子段分配越界）");
-            _clients[internalIp] = new ClientNat(name, mode, internalIp, subBase + 1, subBase + _options.SubRangeSize - 1);
+            _clients[internalIp] = new ClientNat(name, mode, internalIp, subBase + 1, subBase + _options.SubRangeSize - 1)
+            {
+                PunchPerturbation = punchPerturbation,
+            };
             _registered++;
         }
     }
@@ -167,6 +174,19 @@ public sealed class TcpNatSimulator : IAsyncDisposable
             {
                 pub = AllocateNoLock(nat);
                 nat.Mappings[pub] = new Mapping(nat, remote, pub, StunEndpoint, null); // 探测映射：交付目标=内部端点 listen
+                // 首次探测（打洞会话）注入时序扰动（一次性）：外来流占用 s 个后续端口——
+                // 内部指向无人监听端口（探测型），预测目标命中它们即 listener_refused miss
+                if (nat.PunchPerturbation > 0)
+                {
+                    for (var i = 0; i < nat.PunchPerturbation; i++)
+                    {
+                        var foreign = AllocateNoLock(nat);
+                        nat.Mappings[foreign] = new Mapping(nat,
+                            new IPEndPoint(nat.InternalIp, 1), foreign, // 端口 1：必然无人监听
+                            new IPEndPoint(_options.PublicAddress, 1), null);
+                    }
+                    nat.PunchPerturbation = 0;
+                }
             }
             OpenWindow(nat, pub); // 窗口先于响应（响应触发对端打洞时窗口必须就位）
             await StunTcpFraming.WriteAsync(stream, StunCodec.BuildBindingResponse(tid, _options.PublicAddress, (ushort)pub), txnCts.Token);
@@ -384,6 +404,7 @@ public sealed class TcpNatSimulator : IAsyncDisposable
         public int SubBase { get; } = subBase;
         public int SubCeiling { get; } = subCeiling;
         public int NextPort { get; set; } = subBase;
+        public int PunchPerturbation { get; set; }
         public Dictionary<int, Mapping> Mappings { get; } = [];
     }
 

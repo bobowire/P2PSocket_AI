@@ -12,19 +12,22 @@ using P2P.IntegrationTests.NatSimulator;
 using P2P.Server.Data;
 using P2P.Server.Services;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace P2P.IntegrationTests;
 
 /// <summary>
-/// M1-35 集成场景自动化 A-1~A-4（09 §2.3，任务清单完成判定：四场景集成测试全绿、无需管理员权限可在 CI 运行）。
+/// 集成场景自动化 A-1~A-5（09 §2.3；M1-35 交付 A-1~A-4、M2-31 交付 A-5 TCP 打洞命中率矩阵）。
 /// 三进程 in-proc：服务端 + 双客户端（各自独立 baseDir）；网卡以 StubNicManager 替身、虚拟 IP 用 127.0.0.x
-/// 回环别名（A-4 隔离语义在 127.0.0.0/8 内等价成立）；A-3/A-4 打洞链路经 NatSimulator（STUN 派生 :3478，TD-07）。
+/// 回环别名（A-4 隔离语义在 127.0.0.0/8 内等价成立）；A-3/A-4 打洞链路经 NatSimulator（STUN 派生 :3478，TD-07），
+/// A-5 双端 SymmetricSequential 经 TcpNatSimulator（TD-17/21）。
 /// 全运行时重组件专用集合（与 ClientRuntimeIntegrationTests 共用）：每用例拉起双 Kestrel+服务端+打洞链路，
 /// 相互串行避免与轻量类并行时叠加满载偶发（沿 M1-31 加固惯例）。
 /// </summary>
 [Collection("heavy-runtime")]
 public sealed class ScenarioIntegrationTests : IAsyncLifetime
 {
+    private readonly ITestOutputHelper _output;
     private readonly SqliteConnection _connection = new("Data Source=:memory:");
     private readonly DeviceRegistry _registry = new();
     private readonly List<SignalingCoordinator> _signalings = [];
@@ -37,9 +40,12 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
     private UdpNatSimulator? _sim;
     private StubStunUpstream? _upstream;
     private TcpStunStub? _tcpStun;
+    private TcpNatSimulator? _tcpSim;
     private StubFactory _factory = null!;
     private string _rootDir = null!;
     private int _port;
+
+    public ScenarioIntegrationTests(ITestOutputHelper output) => _output = output;
 
     public async Task InitializeAsync()
     {
@@ -62,6 +68,7 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         if (_sim is not null) await _sim.DisposeAsync();
         if (_upstream is not null) await _upstream.DisposeAsync();
         if (_tcpStun is not null) await _tcpStun.DisposeAsync();
+        if (_tcpSim is not null) await _tcpSim.DisposeAsync();
         foreach (var s in _servers) await s.DisposeAsync();
         foreach (var s in _signalings) await s.DisposeAsync();
         await Task.Delay(200); // 服务端收尾与夹具销毁竞态宽限（ClientRuntime 测试同法）
@@ -95,8 +102,9 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
 
     private sealed record SeededClient(Guid DeviceId, byte[] DeviceSecret, string RemoteCode, string Dir, IPAddress Ip);
 
-    /// <summary>种已注册设备（静态密钥对/DeviceSecret/远程码/虚拟 IP 别名）+ 客户端 state.json 与 settings。</summary>
-    private async Task<SeededClient> SeedClientAsync(string name, IPAddress ip, Group? commonGroup)
+    /// <summary>种已注册设备（静态密钥对/DeviceSecret/远程码/虚拟 IP 别名）+ 客户端 state.json 与 settings；
+    /// punchConcurrency 经 0x70 上送、服务端回填统一下发（OQ-19/TD-20）——A-5 按用例参数化 N。</summary>
+    private async Task<SeededClient> SeedClientAsync(string name, IPAddress ip, Group? commonGroup, int punchConcurrency = 1)
     {
         var deviceId = Guid.NewGuid();
         var secret = RandomGenerator.Bytes(32);
@@ -135,9 +143,9 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         {
             ServerAddrs = [$"127.0.0.1:{_port}"],
             LocalWebPort = FreePort(),
-            // M2-16：tcp 映射改走 TCP 打洞；回环恒等 NAT（无端口平移）下 N=1 直连命中——
-            // N>1 端口预测矩阵归 M2-30 NatSimulator-TCP / M2-31 A-5
-            PunchConcurrency = 1,
+            // M2-16：tcp 映射走 TCP 打洞；A-3/A-4 恒等 NAT（TcpStunStub 无端口平移）N=1 直连命中；
+            // N>1 预测矩阵归 A-5（TcpNatSimulator 端口平移，M2-31）
+            PunchConcurrency = punchConcurrency,
         });
         return new SeededClient(deviceId, secret, store.State.RemoteCode, dir, ip);
     }
@@ -160,7 +168,7 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         return group;
     }
 
-    /// <summary>启动客户端运行时（网卡替身 + 打洞 socket 绑内网别名缝）。</summary>
+    /// <summary>启动客户端运行时（网卡替身 + 打洞 socket 绑内网别名缝；诊断日志进测试产物）。</summary>
     private async Task<HttpClient> StartRuntimeAsync(SeededClient c)
     {
         var runtime = new ClientRuntime(new ClientRuntimeOptions
@@ -169,6 +177,7 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
             NicOverride = _nic,
             PunchBindOverride = c.Ip,
         });
+        runtime.Log += m => _output.WriteLine($"[{c.Ip}] {m}");
         await runtime.StartAsync();
         _runtimes.Add(runtime);
         var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{runtime.WebPort}") };
@@ -177,8 +186,9 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
     }
 
     /// <summary>NatSimulator 世界：STUN 派生 :3478（TD-07）+ 上游替身 + 双客户端 NAT 注册；
-    /// TCP 打洞（M2-16）另拉 TCP STUN 替身（同宿主 :3478/TCP，与 UDP 模拟器不同协议互不冲突）。</summary>
-    private async Task StartSimulatorAsync((IPAddress Ip, UdpNatMode Mode) a, (IPAddress Ip, UdpNatMode Mode) b)
+    /// TCP 侧默认拉 TCP STUN 应答替身（恒等 NAT——A-3/A-4 的 N=1 直连命中）；
+    /// A-5 置 tcpStub=false 改由 <see cref="StartTcpSimulatorAsync"/> 拉端口平移 NAT（同宿主 :3478/TCP 互斥）。</summary>
+    private async Task StartSimulatorAsync((IPAddress Ip, UdpNatMode Mode) a, (IPAddress Ip, UdpNatMode Mode) b, bool tcpStub = true)
     {
         _upstream = new StubStunUpstream();
         await _upstream.StartAsync();
@@ -186,8 +196,23 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         await _sim.StartAsync();
         _sim.RegisterClient(a.Ip, a.Mode, "A");
         _sim.RegisterClient(b.Ip, b.Mode, "B");
-        _tcpStun = new TcpStunStub();
-        _tcpStun.Start();
+        if (tcpStub)
+        {
+            _tcpStun = new TcpStunStub();
+            _tcpStun.Start();
+        }
+    }
+
+    /// <summary>A-5 世界：双端 SymmetricSequential TCP NAT（TD-17 导演+桥接；TD-07 派生 :3478/TCP）——
+    /// 探测分配顺序导演端口、出站 APDF 精确身份过滤、探测映射 listen 交付（TD-21）。
+    /// PortBase 独立段（默认 20000 归 TcpNatSimulatorTests 机制测试，并行类窗口监听不互撞）。
+    /// perturbB：B 首次探测后注入外来流扰动（端口预测失配 miss 场景）。</summary>
+    private async Task StartTcpSimulatorAsync(int perturbB = 0)
+    {
+        _tcpSim = new TcpNatSimulator(new TcpNatOptions { StunPort = 3478, PortBase = 20500 });
+        _tcpSim.RegisterClient(IPAddress.Parse("127.0.0.4"), TcpNatMode.SymmetricSequential, "A");
+        _tcpSim.RegisterClient(IPAddress.Parse("127.0.0.5"), TcpNatMode.SymmetricSequential, "B", perturbB);
+        await _tcpSim.StartAsync();
     }
 
     /// <summary>本机回环 echo TCP 服务（打洞目标 self:port 的载荷校验终点）。</summary>
@@ -317,14 +342,18 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
         string current = "";
-        while (!cts.IsCancellationRequested)
+        try
         {
-            var root = await GetAsync(http, "/api/mappings");
-            var items = root.GetProperty("data").GetProperty("items");
-            current = items.GetArrayLength() == 0 ? "" : items[0].GetProperty("state").GetString()!;
-            if (current == state) return current;
-            await Task.Delay(200, cts.Token);
+            while (!cts.IsCancellationRequested)
+            {
+                var root = await GetAsync(http, "/api/mappings");
+                var items = root.GetProperty("data").GetProperty("items");
+                current = items.GetArrayLength() == 0 ? "" : items[0].GetProperty("state").GetString()!;
+                if (current == state) return current;
+                await Task.Delay(200, cts.Token);
+            }
         }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested) { /* 超时走统一断言 */ }
         Assert.Fail($"等待映射状态 {state} 超时（当前 {current}）");
         return current; // 不可达
     }
@@ -525,5 +554,76 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         var direct = AssertEchoRoundtripAsync(IPAddress.Loopback, port, RandomGenerator.Bytes(2048));
         var viaTunnel = AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), port, RandomGenerator.Bytes(40 * 1024));
         await Task.WhenAll(direct, viaTunnel);
+    }
+
+    // ── A-5 TCP 打洞：SymmetricSequential 双端全序列 + N=1~5 命中率矩阵 ──
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    public async Task A5_TCPPunch_SymmetricSequential_N并发全序列直达(int n)
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone), tcpStub: false);
+        await StartTcpSimulatorAsync();
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync($"a5-{n}-a", IPAddress.Parse("127.0.0.4"), group, punchConcurrency: n);
+        var b = await SeedClientAsync($"a5-{n}-b", IPAddress.Parse("127.0.0.5"), group, punchConcurrency: n);
+        var httpA = await StartRuntimeAsync(a);
+        var httpB = await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+        await WaitPhaseAsync(httpB, "running");
+
+        // B 侧 self 目标：本机 echo 服务
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+
+        // 全序列（02 §5.2）：STUN-TCP 两段式端点互换（0x70{tcp:L'}→0x71→0x76→Ack{对端L',N 回填}）
+        // → N 并发 listen(L)+connect（统一目标 对端L'+(N−1)）→ APDF 精确身份过滤 rendezvous（TD-21）
+        // → THello1 扇出/THello2 消歧 → PTP 握手 → TcpFrameTransport 承载
+        var state = await WaitMappingStateAsync(httpA, "direct");
+        // 命中率矩阵数据行（A5-MATRIX 前缀可从测试产物聚合；M4 基准报告成文源）
+        _output.WriteLine($"A5-MATRIX|N={n}|nat=SymmetricSequential×2|state={state}|transport=tcp");
+
+        // 虚拟地址:本地端口 TCP 载荷往返（u16 定界承载；>1368B 覆盖分块 splice，02 §4.3）
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(40 * 1024));
+        // 同映射第二连接 = 同会话第二 channel（channelId 复用，02 §4.5）
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(3 * 1024));
+    }
+
+    [Fact]
+    public async Task A5_端口预测失配_打洞失败()
+    {
+        // 协议统一双方 N（TD-13/20：服务端以发起方 N 经 0x71/0x70 Ack 统一回填）→ N_A≠N_B 在真实
+        // 协议路径上不存在（M2-16 单测已按注入式不对称 N 断言 miss）。场景级失配以 NAT 时序扰动等效
+        // 呈现（TD-21 代数：扰动 s≥N−1 ⟺ 不对称必 miss 区）：B 首次探测后、Fleet 连接前被 2 条
+        // 外来流占用端口序列（N=2）——A 的预测目标 P_B+1 落在无人监听的外来映射 → listener_refused；
+        // B 的 c_k 分配端口（P_B+3 起）≠ A 侧映射目的端口 P_B+1 → 身份过滤——双侧全 miss。
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone), tcpStub: false);
+        await StartTcpSimulatorAsync(perturbB: 2);
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("a5-miss-a", IPAddress.Parse("127.0.0.4"), group, punchConcurrency: 2);
+        var b = await SeedClientAsync("a5-miss-b", IPAddress.Parse("127.0.0.5"), group, punchConcurrency: 2);
+        var httpA = await StartRuntimeAsync(a);
+        var httpB = await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+        await WaitPhaseAsync(httpB, "running");
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+
+        // 双侧预测目标均无有效交付 → 无 THello 交换 → 10s 打洞预算耗尽 → failed（02 §5.2 ⑤）
+        var state = await WaitMappingStateAsync(httpA, "failed", seconds: 40);
+        _output.WriteLine($"A5-MATRIX|N=2|nat=SymmetricSequential×2+perturbB=2|state={state}|transport=tcp");
     }
 }

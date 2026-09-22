@@ -8,7 +8,7 @@
 | 清单 | 里程碑 | 出口标准 | 状态 |
 |---|---|---|---|
 | [M1-核心链路.md](M1-核心链路.md) | M1 · 核心链路可用（两台设备注册 + 第一条 UDP 直连映射） | 验收场景 A-1~A-4 通过 | ✅ 收官（2026-09-12；M1-37 Windows 轮完、环境依赖项转 M2 穿插，见清单附录 A.3 收官口径） |
-| [M2-打洞完整与授权闭环.md](M2-打洞完整与授权闭环.md) | M2 · 打洞完整与授权闭环（TCP 打洞、中继回退、分组与远程码全量生效） | 验收场景 A-5~A-9 通过 | 🔨 进行中（2026-09-12 起；M2-03/04/05/16/30 ✅ 5/35） |
+| [M2-打洞完整与授权闭环.md](M2-打洞完整与授权闭环.md) | M2 · 打洞完整与授权闭环（TCP 打洞、中继回退、分组与远程码全量生效） | 验收场景 A-5~A-9 通过 | 🔨 进行中（2026-09-12 起；M2-03/04/05/16/30/31 ✅ 6/35） |
 | M3（待建） | 管理面与可观测 | A-10~A-12 | — |
 | M4（待建） | 交付打磨 | 交付清单齐全 | — |
 
@@ -35,3 +35,4 @@
 | 2026-09-12 | **M2-05 REKEY/WINDOW 帧协议层 ✅**（3/35）——Core/Tunnel 增 PtpRekey（81B 载荷双重 ECDH 同式派生、AEAD 通道内免握手 mac）+ PtpReceiveKeyRing（2s 排水窗、至多保留一代）+ CreditWindow（64KiB 不部分扣/回报封顶）；05 §2.3 帧值 0x09→0x0A 勘误补遗（设计 v1.11）；测试 11 项新增，全仓 386 全绿、Core 覆盖率 82.69% |
 | 2026-09-12 | **M2-16 Puncher TCP 打洞 ✅**（4/35）——客户端增 TcpPunchPlan/TcpPunchFleet（listen(L)+N 并发 connect、胜出释放其余）+ TcpFrameTransport（u16 前缀定界复用 §6.2）+ Puncher TCP 两向（THello1 扇出消歧、TunnelSession.FromEstablishedKeys）；N 通路 OQ-19 打通（0x70 上送→服务端回填→双方同 N）；proto 路由（映射 proto→打洞承载）；场景 A-3/A-4 升级 TCP 打洞真实栈全链路（TcpStunStub + N=1 恒等命中）；02 §5.2 补承载分帧条目（设计 v1.12）；测试 +30，全仓 416 全绿、Core 覆盖率 83.61% |
 | 2026-09-13 | **M2-30 NatSimulator-TCP ✅**（5/35）——新增 TcpNatSimulator（TD-17 导演+桥接：STUN-TCP 代理改写映射地址/每客户端端口子段/探测后 E+0..E+4 打洞窗口/出站归因按 accept 序分配/APDF 精确身份过滤+探测映射 listen 交付（TD-21）/miss 600ms 有界重试=SYN 重传语义/桥接幂等去重）；UdpNatSimulator 增 SymmetricSequential 与 UdpBlocked（丢弃 UDP 出站迫使 TCP 承载，FR-S-704）；测试 +10（UDP 两 Theory 扩参+背靠背 +1+UdpBlocked、TCP 6 项含 N=2 rendezvous 四元组交叉与三类 miss）；设计回流 TD-21 勘误命中代数（必 miss ⟺ |ΔN|≥2 且 min≥2——A-5 miss 断言取 (2,4)/(2,5) 类对，README v1.13）；全仓 426 全绿、Core 83.61% |
+| 2026-09-13 | **M2-31 场景 A-5 ✅**（6/35）——SymmetricSequential 双端 TCP 打洞 N=1~5 Theory 全序列命中矩阵（A5-MATRIX 数据行暂存测试产物，M4 成文）+ 40KiB/3KiB 双连接 echo；失配 miss 以 **punchPerturbation 时序扰动**等效（协议统一 N（TD-13/20）→ N_A≠N_B 不可达——原 (2,4)/(2,5) 类对口径修正，TD-21/设计 v1.14，09 §2.2/§2.3 同步）；TcpNatSimulator 场景端口段独立 20500 防并行互撞；测试 +6（集成 49→55），全仓 432 全绿、Core 82.69%、CI quick 通过 |
