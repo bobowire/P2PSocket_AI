@@ -430,6 +430,8 @@ public sealed class ControlClient : IAsyncDisposable
         MsgType.MappingDelete => PcpCodec.Decode<MappingDeleteAck>(msgpack),
         MsgType.PunchRequest => PcpCodec.Decode<PunchRequestAck>(msgpack),
         MsgType.PunchInvite => PcpCodec.Decode<PunchInvite>(msgpack), // S→C 推送（M1-26 挂载处理）
+        // S→C 方向 0x74 恒为 Grant（M2-17 分配应答/对端侧推送接续，02 §6.1②；事件面接线 M2-15）
+        MsgType.RelayAllocate => PcpCodec.Decode<RelayGrant>(msgpack),
         _ => PcpCodec.DecodeLoose(msgpack),
     };
 
