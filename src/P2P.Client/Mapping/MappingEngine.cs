@@ -4,7 +4,8 @@
 // - 背压（05 §2.3 M1 简化）：每 channel 出站在飞上限 256KiB（按 ChunkSize 分槽），满则暂停读本地 socket
 //   （TCP 窗口反压应用）；
 //   入站写队列 256KiB 有界，满则断开该 channel（本地应用不消费）；
-// - 状态机 disabled→punching→direct/failed（relay 态 M2；invalid=授权失效预留）；
+// - 状态机 disabled→punching→direct/relay/failed（M2-18：relay 态=打洞失败且回退开→中继承载；
+//   invalid=授权失效预留）；
 //   enable 前隧道复用检查：设备对隧道存活 → 直达 direct 不排队（02 §4.5 复用规则）；
 // - 隧道断链 → 该设备对映射回 punching 重新排队（02 §4.5 重建=新 sessionId）；
 // - 目标侧 self=127.0.0.1（D15）；非 self 属 M2 白名单（SEC-52 双保险的执行点）；
@@ -157,10 +158,10 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         rt.Listener = listener;
         rt.AcceptLoop = AcceptLoopAsync(rt, _cts.Token);
 
-        // 隧道复用检查（02 §4.5：设备对隧道存活 → 直接 direct，不排队打洞）
-        if (_tunnels.Get(config.PeerDeviceId) is not null)
+        // 隧道复用检查（02 §4.5：设备对隧道存活 → 复用当前承载不排队打洞——M2-18：中继会话 → relay 态）
+        if (_tunnels.Get(config.PeerDeviceId) is { } reused)
         {
-            SetState(rt, MappingState.Direct, "tunnel_reused");
+            SetState(rt, reused.ViaRelay ? MappingState.Relay : MappingState.Direct, "tunnel_reused");
             return Task.CompletedTask;
         }
         SetState(rt, MappingState.Punching, null);
@@ -339,14 +340,18 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         if (outcome.Ok && outcome.Session is not null && !outcome.Session.IsClosed)
         {
             _tunnels.Attach(outcome.Session);
+            // 承载绑定（02 §4.5）：中继承载（M2-18 回退成功）→ relay 态；直连 → direct
+            var state = outcome.Session.ViaRelay ? MappingState.Relay : MappingState.Direct;
+            var detail = outcome.Session.ViaRelay
+                ? $"relay={outcome.PeerEndpoint}"
+                : $"local={outcome.LocalEndpoint} peer={outcome.PeerEndpoint}";
             foreach (var rt in targets)
                 if (rt.State is MappingState.Punching or MappingState.Failed)
-                    SetState(rt, MappingState.Direct,
-                        $"local={outcome.LocalEndpoint} peer={outcome.PeerEndpoint}");
+                    SetState(rt, state, detail);
         }
         else
         {
-            // relay（M2）：打洞失败且设备级回退开启才进入；M1 relayAllowed 恒 false → failed
+            // 打洞失败（含回退关/回退建立失败）：failed——relay 进入条件在 Puncher 侧合成（M2-23/M2-18）
             foreach (var rt in targets)
                 if (rt.State == MappingState.Punching)
                     SetState(rt, MappingState.Failed, outcome.FailReason);
@@ -362,8 +367,9 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
 
         foreach (var rt in _mappings.Values.Where(r => r.Config.PeerDeviceId == peerDeviceId))
         {
-            if (rt.State != MappingState.Direct) continue;
-            SetState(rt, MappingState.Punching, $"reconnect: {reason}"); // 02 §4.5 重建
+            // direct/relay 态承载断链均回 punching 重新竞争（02 §4.5 重建；中继回切直连属 M2-19）
+            if (rt.State is not (MappingState.Direct or MappingState.Relay)) continue;
+            SetState(rt, MappingState.Punching, $"reconnect: {reason}");
             _scheduler.Enqueue(peerDeviceId, rt.Config.MappingId, rt.Config.Proto);
         }
     }

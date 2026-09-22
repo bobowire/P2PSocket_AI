@@ -17,10 +17,11 @@ using Xunit.Abstractions;
 namespace P2P.IntegrationTests;
 
 /// <summary>
-/// 集成场景自动化 A-1~A-5（09 §2.3；M1-35 交付 A-1~A-4、M2-31 交付 A-5 TCP 打洞命中率矩阵）。
-/// 三进程 in-proc：服务端 + 双客户端（各自独立 baseDir）；网卡以 StubNicManager 替身、虚拟 IP 用 127.0.0.x
-/// 回环别名（A-4 隔离语义在 127.0.0.0/8 内等价成立）；A-3/A-4 打洞链路经 NatSimulator（STUN 派生 :3478，TD-07），
-/// A-5 双端 SymmetricSequential 经 TcpNatSimulator（TD-17/21）。
+/// 集成场景自动化 A-1~A-5 + M2-18 中继回退（09 §2.3；M1-35 交付 A-1~A-4、M2-31 交付 A-5 TCP 打洞命中率矩阵、
+/// M2-18 交付承载绑定中继路径）。三进程 in-proc：服务端 + 双客户端（各自独立 baseDir）；网卡以 StubNicManager
+/// 替身、虚拟 IP 用 127.0.0.x 回环别名（A-4 隔离语义在 127.0.0.0/8 内等价成立）；A-3/A-4 打洞链路经
+/// NatSimulator（STUN 派生 :3478，TD-07），A-5 双端 SymmetricSequential 经 TcpNatSimulator（TD-17/21），
+/// M2-18 复用 A-5 miss 世界（打洞必败）驱动中继回退。
 /// 全运行时重组件专用集合（与 ClientRuntimeIntegrationTests 共用）：每用例拉起双 Kestrel+服务端+打洞链路，
 /// 相互串行避免与轻量类并行时叠加满载偶发（沿 M1-31 加固惯例）。
 /// </summary>
@@ -97,6 +98,7 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
             audit);
         var server = new ControlServer(_factory, _registry, router.DispatchAsync);
         await server.StartAsync(new IPEndPoint(IPAddress.Loopback, port));
+        await relay.StartAsync(0, 0); // M2-18：中继数据面双端口系统分配（Grant 端点来源）
         _signalings.Add(signaling);
         _relays.Add(relay);
         _servers.Add(server);
@@ -323,6 +325,14 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         return JsonDocument.Parse(await resp.Content.ReadAsStringAsync()).RootElement;
     }
 
+    private static async Task<JsonElement> PutAsync(HttpClient http, string path, object? body)
+    {
+        using var content = body is null ? null
+            : new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+        using var resp = await http.PutAsync(path, content);
+        return JsonDocument.Parse(await resp.Content.ReadAsStringAsync()).RootElement;
+    }
+
     private static async Task<string> GetPhaseAsync(HttpClient http)
     {
         var root = await GetAsync(http, "/api/system/state");
@@ -342,8 +352,10 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         Assert.Fail($"等待 phase={phase} 超时（当前 {current}）");
     }
 
-    /// <summary>轮询首条映射状态（打洞异步完成：direct/failed 终态或 punching 中间态）。</summary>
-    private static async Task<string> WaitMappingStateAsync(HttpClient http, string state, int seconds = 30)
+    /// <summary>轮询映射状态（打洞异步完成：direct/relay/failed 终态或 punching 中间态；
+    /// mappingId 缺省=首条，指定=按 id 精确匹配——列表按 Name+MappingId 排序，顺序不可依赖）。</summary>
+    private static async Task<string> WaitMappingStateAsync(HttpClient http, string state, int seconds = 30,
+        Guid? mappingId = null)
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
         string current = "";
@@ -353,13 +365,15 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
             {
                 var root = await GetAsync(http, "/api/mappings");
                 var items = root.GetProperty("data").GetProperty("items");
-                current = items.GetArrayLength() == 0 ? "" : items[0].GetProperty("state").GetString()!;
+                var match = items.EnumerateArray()
+                    .FirstOrDefault(i => mappingId is null || i.GetProperty("mappingId").GetGuid() == mappingId);
+                current = match.ValueKind == JsonValueKind.Undefined ? "" : match.GetProperty("state").GetString()!;
                 if (current == state) return current;
                 await Task.Delay(200, cts.Token);
             }
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested) { /* 超时走统一断言 */ }
-        Assert.Fail($"等待映射状态 {state} 超时（当前 {current}）");
+        Assert.Fail($"等待映射 {mappingId} 状态 {state} 超时（当前 {current}）");
         return current; // 不可达
     }
 
@@ -630,5 +644,111 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         // 双侧预测目标均无有效交付 → 无 THello 交换 → 10s 打洞预算耗尽 → failed（02 §5.2 ⑤）
         var state = await WaitMappingStateAsync(httpA, "failed", seconds: 40);
         _output.WriteLine($"A5-MATRIX|N=2|nat=SymmetricSequential×2+perturbB=2|state={state}|transport=tcp");
+    }
+
+    // ── M2-18 中继回退承载绑定（02 §4.5/§6、05 §4）────────────────────
+
+    /// <summary>A-5 miss 同构世界 + A 侧设备级回退开（M2-23 /api/peers）：打洞 Ack 后失败 →
+    /// 资格合成真 → 0x74 → Grant 双侧下发 → 双端 JOIN → PTP 握手即经中继（同一 TunnelSession 帧改发
+    /// relay 地址）→ 映射 relay 态且虚拟地址可访问（echo 经中继密文转发往返）。</summary>
+    [Fact]
+    public async Task M2_18_直连失败回退开_中继承载_映射relay态_虚拟地址可访问()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone), tcpStub: false);
+        await StartTcpSimulatorAsync(perturbB: 2); // 双侧预测失配 → 打洞必败（A-5 miss 同构）
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("r18-fb-a", IPAddress.Parse("127.0.0.4"), group, punchConcurrency: 2);
+        var b = await SeedClientAsync("r18-fb-b", IPAddress.Parse("127.0.0.5"), group, punchConcurrency: 2);
+        var httpA = await StartRuntimeAsync(a);
+        var httpB = await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+        await WaitPhaseAsync(httpB, "running");
+
+        // 目标设备级回退配置开启（M2-23；服务端 relay_enabled 默认开=DbInitializer）
+        var put = await PutAsync(httpA, $"/api/peers/{b.DeviceId}", new { relayFallback = true });
+        Assert.Equal(0, put.GetProperty("code").GetInt32());
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+
+        // 10s 打洞预算 → 失败 → 0x74+JOIN+中继握手（全程真实运行时，双侧 ClientRuntime 各自驱动）
+        var state = await WaitMappingStateAsync(httpA, "relay", seconds: 40);
+        _output.WriteLine($"M2-18|relay-fallback|state={state}");
+
+        // 虚拟地址经中继承载可访问：A 侧 OPEN → relay → B 连 self echo → 双向密文转发
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(40 * 1024));
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(3 * 1024));
+    }
+
+    [Fact]
+    public async Task M2_18_回退关_打洞失败映射failed()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone), tcpStub: false);
+        await StartTcpSimulatorAsync(perturbB: 2);
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("r18-off-a", IPAddress.Parse("127.0.0.4"), group, punchConcurrency: 2);
+        var b = await SeedClientAsync("r18-off-b", IPAddress.Parse("127.0.0.5"), group, punchConcurrency: 2);
+        var httpA = await StartRuntimeAsync(a);
+        var httpB = await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+        await WaitPhaseAsync(httpB, "running");
+        // 无 peers.json 条目：默认关（PRD 06 §2）——资格合成假，不触发 0x74
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+
+        // 打洞失败且无回退 → failed（02 §4.5 承载绑定：未开启 → 该设备对全部映射 failed）
+        var state = await WaitMappingStateAsync(httpA, "failed", seconds: 40);
+        _output.WriteLine($"M2-18|relay-off|state={state}");
+    }
+
+    [Fact]
+    public async Task M2_18_relay态新映射复用_不重复打洞()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone), tcpStub: false);
+        await StartTcpSimulatorAsync(perturbB: 2);
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("r18-re-a", IPAddress.Parse("127.0.0.4"), group, punchConcurrency: 2);
+        var b = await SeedClientAsync("r18-re-b", IPAddress.Parse("127.0.0.5"), group, punchConcurrency: 2);
+        var httpA = await StartRuntimeAsync(a);
+        var httpB = await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+        await WaitPhaseAsync(httpB, "running");
+        var put = await PutAsync(httpA, $"/api/peers/{b.DeviceId}", new { relayFallback = true });
+        Assert.Equal(0, put.GetProperty("code").GetInt32());
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+        await WaitMappingStateAsync(httpA, "relay", seconds: 40); // 第一条：中继建立
+
+        // 第二条映射启用 → 隧道复用检查命中（02 §4.5：relay 态会话存活 → 复用当前承载不重新打洞）
+        var localPort2 = FreePort();
+        var mapping2 = await CreateAndEnableMappingAsync(httpA, (ushort)localPort2, b.RemoteCode, (ushort)echoPort);
+        var state2 = await WaitMappingStateAsync(httpA, "relay", seconds: 5, mapping2); // 5s 内直达=复用（真打洞 ≥10s）
+        _output.WriteLine($"M2-18|relay-reuse|state2={state2}");
+
+        // 复用路径证据：明细 tunnel_reused + 打洞队列空、无进行中会话（05 §3.1 诊断口径）
+        var root = await GetAsync(httpA, "/api/mappings");
+        var item = root.GetProperty("data").GetProperty("items").EnumerateArray()
+            .Single(i => i.GetProperty("mappingId").GetGuid() == mapping2);
+        Assert.Equal("tunnel_reused", item.GetProperty("detail").GetString());
+        var diag = await GetAsync(httpA, "/api/diagnostics");
+        Assert.Equal(0, diag.GetProperty("data").GetProperty("punchQueueDepth").GetInt32());
+        Assert.Equal(JsonValueKind.Null, diag.GetProperty("data").GetProperty("currentPunchPeer").ValueKind);
+
+        // 同隧道第二 channel：第二条映射虚拟地址同样可访问
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort2, RandomGenerator.Bytes(8 * 1024));
     }
 }

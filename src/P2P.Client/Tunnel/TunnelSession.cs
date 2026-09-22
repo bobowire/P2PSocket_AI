@@ -46,6 +46,11 @@ public sealed class TunnelSession : IAsyncDisposable
     public Guid SessionId { get; }
     public Guid PeerDeviceId { get; }
     public bool IsInitiator { get; }
+
+    /// <summary>承载路径标记（02 §4.5，M2-18）：绑定 <see cref="RelayTransport"/> 即中继路径——
+    /// 映射状态机 relay 态判定与隧道复用检查的依据（加密与路径解耦：同一会话类型，帧逻辑不变）。</summary>
+    public bool ViaRelay => _transport is RelayTransport;
+
     public DateTimeOffset EstablishedAt { get; }
     public ulong SentFrames { get; private set; }
     public ulong ReceivedFrames { get; private set; }

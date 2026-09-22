@@ -6,6 +6,8 @@
 // - TCP（02 §5.2）：端口 L STUN-TCP 探测（M2-04，单事务即关）→ listen(L)+N 并发 connect
 //   （第 1 条沿用 L，目标统一 portTcp+(N−1)）→ 双方 simultaneous open → 首个完成握手帧交换的
 //   连接胜出、其余关闭；N 以 0x71/0x70 Ack 服务端回填值为准（OQ-19）；
+// - M2-18 中继回退（02 §4.5/§6.1①）：打洞 Ack 后失败且回退资格合成真 → 0x74 分配 →
+//   JOIN（先 UDP 后 TCP）→ PTP 握手即经中继（加密与路径解耦：同一 TunnelSession 帧改发 relay 地址）；
 // - 0x72 结果上报属 FR-C-404 → M2-22。
 using System.Net;
 using System.Net.Sockets;
@@ -28,6 +30,13 @@ public sealed record PunchOptions
     /// <summary>打洞 socket 绑定地址（null=Any 全接口，生产行为）。
     /// M1-35 测试缝：NatSimulator 按源 IP 识别客户端 NAT，打洞 socket 须绑定各自内网回环别名。</summary>
     public IPAddress? BindAddress { get; init; }
+
+    /// <summary>中继回退整体预算（0x74 分配 + JOIN 承载兜底 + 握手；M2-18）。须 > 打洞超时
+    /// 之外独立计量（打洞 cts 已耗尽，回退用外层令牌重新起算）。</summary>
+    public TimeSpan RelayFallbackTimeout { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>中继握手 THello1 重发步进（覆盖对端 JOIN 就绪窗口：Grant 推送+JOIN 往返）。</summary>
+    public TimeSpan RelayHandshakeResendInterval { get; init; } = TimeSpan.FromMilliseconds(200);
 }
 
 /// <summary>打洞结果（本地事件驱动映射状态机；成功带双方端点）。
@@ -85,6 +94,10 @@ public sealed class Puncher : IPuncher, IDisposable
     /// （SO_REUSEADDR 已设）；探测事务完成即关连接并释放句柄——调用方仅保留端口号 L 复用 listen。</summary>
     public delegate Task<IPEndPoint> StunTcpProbeDelegate(Socket punchSocket, CancellationToken ct);
 
+    /// <summary>0x74 中继分配缝（M2-18，02 §6.1①）：宿主接 ControlClient（RelayClient.AllocateAsync）；
+    /// 服务端错误（5002/1001/4005）以 <see cref="ControlErrorException"/> 抛出。未装配=不尝试回退。</summary>
+    public delegate Task<RelayGrant> RelayAllocator(Guid punchSessionId, CancellationToken ct);
+
     private readonly PunchRequestSender _sendPunchRequest;
     private readonly EndpointReporter _reportEndpoints;
     private readonly StunProbeDelegate _probe;
@@ -93,12 +106,14 @@ public sealed class Puncher : IPuncher, IDisposable
     private readonly ITunnelChannelHandler _handler;
     private readonly PunchOptions _options;
     private readonly Func<Guid, bool> _relayFallback; // 本地设备级回退配置（缺省恒 false=默认关，PRD 06 §2）
+    private readonly RelayAllocator? _relayAllocator; // 0x74 分配缝（缺省不回退，M2-18）
     private int _disposed;
 
     public Puncher(PunchRequestSender sendPunchRequest, EndpointReporter reportEndpoints,
         StunProbeDelegate probe, EcKeyPair staticKey,
         ITunnelChannelHandler? handler = null, PunchOptions? options = null,
-        StunTcpProbeDelegate? tcpProbe = null, Func<Guid, bool>? relayFallbackLookup = null)
+        StunTcpProbeDelegate? tcpProbe = null, Func<Guid, bool>? relayFallbackLookup = null,
+        RelayAllocator? relayAllocator = null)
     {
         _sendPunchRequest = sendPunchRequest;
         _reportEndpoints = reportEndpoints;
@@ -108,6 +123,7 @@ public sealed class Puncher : IPuncher, IDisposable
         _handler = handler ?? NullChannelHandler.Instance;
         _options = options ?? new PunchOptions();
         _relayFallback = relayFallbackLookup ?? (_ => false); // 未装配=默认关闭（与 peers.json 无条目同口径）
+        _relayAllocator = relayAllocator;
     }
 
     // ── 访问方 A（02 §5.1①④⑤ / §5.2①③④）──────────────────────────
@@ -186,7 +202,7 @@ public sealed class Puncher : IPuncher, IDisposable
             }
             catch (Exception e)
             {
-                return FailAfterAck(targetDeviceId, e, ct, relayAllowed);
+                return await FailOrFallbackAsync(ack, targetDeviceId, e, ct, relayAllowed).ConfigureAwait(false);
             }
         }
         finally
@@ -277,7 +293,7 @@ public sealed class Puncher : IPuncher, IDisposable
         }
         catch (Exception e)
         {
-            return FailAfterAck(targetDeviceId, e, ct, relayAllowed);
+            return await FailOrFallbackAsync(ack, targetDeviceId, e, ct, relayAllowed).ConfigureAwait(false);
         }
     }
 
@@ -288,6 +304,51 @@ public sealed class Puncher : IPuncher, IDisposable
                 ? "punch_timeout"
                 : $"punch_error: {e.Message}",
             relayAllowed);
+
+    /// <summary>Ack 后失败统一出口：回退资格真且 0x74 分配缝已装 → 中继回退（M2-18）；否则纯失败。</summary>
+    private async Task<PunchOutcome> FailOrFallbackAsync(PunchRequestAck ack, Guid targetDeviceId,
+        Exception e, CancellationToken ct, bool relayAllowed)
+    {
+        var fail = FailAfterAck(targetDeviceId, e, ct, relayAllowed);
+        return relayAllowed && _relayAllocator is not null
+            ? await FallbackToRelayAsync(ack, fail, ct).ConfigureAwait(false)
+            : fail;
+    }
+
+    /// <summary>中继回退（02 §4.5 承载绑定/§6.1①，M2-18）：0x74 分配（打洞会话须在服务端台账 120s 内，
+    /// 仅 Ack 后失败有会话可解析）→ JOIN（先 UDP 后 TCP 承载兜底）→ PTP 握手即经中继承载——
+    /// 同一 <see cref="TunnelSession"/> 帧改发 relay 地址，解帧逻辑不变（05 §4 加密与路径解耦）。
+    /// 回退失败并入打洞失败原因（映射态 failed）。</summary>
+    private async Task<PunchOutcome> FallbackToRelayAsync(PunchRequestAck ack, PunchOutcome fail,
+        CancellationToken ct)
+    {
+        RelayTransport? transport = null;
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(_options.RelayFallbackTimeout); // 打洞 cts 已耗尽，回退独立计量
+            var grant = await _relayAllocator!(ack.SessionId, cts.Token).ConfigureAwait(false);
+            transport = await RelayClient.JoinWithCarrierFallbackAsync(grant, ct: cts.Token).ConfigureAwait(false);
+            // THello1 周期重发覆盖对端 JOIN 就绪窗口（relay 无缓冲：对端未 JOIN 期间包丢弃，M2-07）
+            var resend = Math.Max(2, (int)(_options.RelayFallbackTimeout / _options.RelayHandshakeResendInterval));
+            var session = await TunnelSession.ConnectAsync(ack.SessionId, ack.Peer.DeviceId,
+                _staticKey, ack.Peer.StaticPubKey, transport, _handler,
+                new TunnelSessionOptions
+                {
+                    KeepaliveInterval = TimeSpan.FromSeconds(_options.KeepaliveSec),
+                    HandshakeTimeout = _options.RelayFallbackTimeout,
+                    HandshakeResendCount = resend,
+                    HandshakeResendInterval = _options.RelayHandshakeResendInterval,
+                }).ConfigureAwait(false);
+            return new PunchOutcome(true, ack.SessionId, ack.Peer.DeviceId, session,
+                null, transport.RemoteEndPoint, null);
+        }
+        catch (Exception e) when (e is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            if (transport is not null) await transport.DisposeAsync().ConfigureAwait(false);
+            return fail with { FailReason = $"{fail.FailReason ?? "punch_failed"}；relay_failed: {e.Message}" };
+        }
+    }
 
     // ── 被邀请方 B（02 §5.1③/§5.2③；05 §3.1：不进本地队列）───────────
 

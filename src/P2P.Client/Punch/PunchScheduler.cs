@@ -87,7 +87,9 @@ public sealed class PunchScheduler : IAsyncDisposable
                 }
                 lock (_gate) _currentPeer = null;
                 Log?.Invoke(outcome.Ok
-                    ? $"打洞成功 peer={outcome.PeerDeviceId} local={outcome.LocalEndpoint} peer={outcome.PeerEndpoint}"
+                    ? outcome.Session is { ViaRelay: true }
+                        ? $"中继承载建立 peer={outcome.PeerDeviceId} relay={outcome.PeerEndpoint}（打洞回退，02 §4.5）"
+                        : $"打洞成功 peer={outcome.PeerDeviceId} local={outcome.LocalEndpoint} peer={outcome.PeerEndpoint}"
                     : $"打洞失败 peer={target}：{outcome.FailReason}");
                 try { PunchCompleted?.Invoke(outcome); }
                 catch (Exception e) { Log?.Invoke($"PunchCompleted 订阅方异常：{e.Message}"); }

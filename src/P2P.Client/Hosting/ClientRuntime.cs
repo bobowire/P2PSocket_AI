@@ -17,6 +17,7 @@ using P2P.Client.Web;
 using P2P.Core.Crypto;
 using P2P.Core.Protocol;
 using P2P.Core.Stun;
+using P2P.Core.Tunnel;
 using P2P.Nic;
 using P2P.Nic.Linux;
 using P2P.Nic.Windows;
@@ -222,27 +223,145 @@ public sealed class ClientRuntime : IAsyncDisposable
             (socket, ct) => stunEp is null
                 ? throw new IOException("STUN 地址解析失败（服务端主机名不可解析，TD-07 :3478）")
                 : StunTcpProber.ProbeAsync(socket, stunEp, deviceId, deviceSecret, _control.Clock, ct: ct),
-            // 本地设备级回退配置缝（M2-23，05 §3.1）：出队执行时与 Ack.relayAllowed 合成，供 M2-18
-            relayFallbackLookup: _peers.GetRelayFallback));
+            // 本地设备级回退配置缝（M2-23，05 §3.1）：出队执行时与 Ack.relayAllowed 合成（M2-18 消费）
+            relayFallbackLookup: _peers.GetRelayFallback,
+            // 0x74 中继分配缝（M2-18，02 §6.1①）：打洞 Ack 后失败且回退资格真 → 分配 → JOIN → 中继握手
+            relayAllocator: (punchSessionId, token) =>
+                RelayClient.AllocateAsync(_control, punchSessionId, token)));
         Log?.Invoke($"打洞器已接线（STUN={stunEp?.ToString() ?? "解析失败"}，派生自控制地址 :3478，TD-07）");
     }
 
-    /// <summary>0x71 PunchInvite：被邀请方即时响应（不进本地队列，02 §5.1③）；成功会话入宿主表（02 §4.5）。</summary>
+    /// <summary>0x71 PunchInvite：被邀请方即时响应（不进本地队列，02 §5.1③）；成功会话入宿主表（02 §4.5）。
+    /// 0x74 RelayGrant（M2-18，02 §6.1② 双方下发）：被邀请侧加入中继并应答 PTP 握手（承载绑定回退路径）。</summary>
     private void OnServerPush(IPcpMessage message)
     {
-        if (message is not PunchInvite invite) return;
-        _ = HandleInviteAsync(invite);
+        switch (message)
+        {
+            case PunchInvite invite:
+                _ = HandleInviteAsync(invite);
+                break;
+            case RelayGrant grant:
+                _ = HandleRelayGrantAsync(grant);
+                break;
+        }
     }
 
     private async Task HandleInviteAsync(PunchInvite invite)
     {
+        // 服务端合成 relayAllowed（M2-07）为真才可能跟来 0x74——预记邀请上下文供中继关联
+        //（Grant 与 RespondAsync 并发到达：先记后应答，成功应答即撤销，M2-18）
+        if (invite.RelayAllowed) RememberInvite(invite);
         try
         {
             var outcome = await _scheduler.RespondAsync(invite, _cts.Token);
             if (outcome.Ok && outcome.Session is { IsClosed: false })
+            {
                 _host.Attach(outcome.Session);
+                ForgetInvite(invite.SessionId); // 握手互证成功：发起方不会再走中继
+            }
         }
         catch (Exception e) { Log?.Invoke($"[punch] 0x71 处理失败：{e.Message}"); }
+    }
+
+    // ── 被邀请侧中继回退（M2-18，02 §4.5/§6.1）──────────────────────
+
+    /// <summary>邀请上下文 TTL：对齐服务端打洞会话台账保留窗（RetainForRelay 120s，M2-07）。</summary>
+    private static readonly TimeSpan RelayInviteTtl = TimeSpan.FromSeconds(120);
+
+    /// <summary>等待 A 侧中继 THello1 的预算：覆盖其对端打洞超时 + 承载兜底 + 握手重发窗。</summary>
+    private static readonly TimeSpan RelayWaitTimeout = TimeSpan.FromSeconds(45);
+
+    private sealed record RelayInviteContext(Guid PeerDeviceId, byte[] PeerStaticPubKey);
+
+    private readonly Dictionary<Guid, (DateTimeOffset ExpiresAt, RelayInviteContext Ctx)> _relayInvites = new();
+
+    private void RememberInvite(PunchInvite invite)
+    {
+        var expiresAt = DateTimeOffset.UtcNow + RelayInviteTtl;
+        lock (_relayInvites)
+        {
+            PruneInvitesLocked();
+            _relayInvites[invite.SessionId] =
+                (expiresAt, new RelayInviteContext(invite.Peer.DeviceId, invite.Peer.StaticPubKey));
+        }
+    }
+
+    private void ForgetInvite(Guid punchSessionId)
+    {
+        lock (_relayInvites) _relayInvites.Remove(punchSessionId);
+    }
+
+    /// <summary>取出并消费邀请上下文（握手单次语义：重复 THello1 不复用）。</summary>
+    private RelayInviteContext? TakeInviteContext(Guid punchSessionId)
+    {
+        lock (_relayInvites)
+        {
+            PruneInvitesLocked();
+            return _relayInvites.Remove(punchSessionId, out var entry) ? entry.Ctx : null;
+        }
+    }
+
+    private void PruneInvitesLocked()
+    {
+        // 常规量级（设备对级）全量清理即可
+        foreach (var stale in _relayInvites.Where(kv => kv.Value.ExpiresAt < DateTimeOffset.UtcNow).ToList())
+            _relayInvites.Remove(stale.Key);
+    }
+
+    /// <summary>被邀请侧 0x74 RelayGrant：JOIN（先 UDP 后 TCP）→ 等 A 的 THello1 → 按 THello1 携带的
+    /// 打洞 sessionId 关联邀请上下文（对端身份+静态公钥——Grant 本身不含对端信息，02 §6.1②）→
+    /// PTP 握手应答 → 中继承载会话入宿主（映射态 relay 由对端 PunchCompleted 驱动，本端复用检查同样生效）。</summary>
+    private async Task HandleRelayGrantAsync(RelayGrant grant)
+    {
+        var privateKey = _state.State.StaticPrivateKey;
+        if (privateKey is null) return; // 未注册无静态键（不会收到，防御）
+        RelayTransport? transport = null;
+        try
+        {
+            using var key = EcKeyPair.FromPrivateKey(privateKey);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+            cts.CancelAfter(RelayWaitTimeout);
+            transport = await RelayClient.JoinWithCarrierFallbackAsync(grant, ct: cts.Token);
+            while (true)
+            {
+                var frame = await transport.ReceiveAsync(cts.Token);
+                if (frame is null) return; // relay 会话回收/断连（承载关闭契约）
+                if (PtpFrameCodec.ParseHeader(frame).Type != PtpFrameType.THello1) continue; // 迟到无关帧
+                RelayInviteContext? ctx;
+                try
+                {
+                    var payload = PtpFrameCodec.ReadHandshakePayload(frame); // THello1 = sessionId(16)|ephA|nonceA
+                    ctx = payload.Length < 16 ? null : TakeInviteContext(new Guid(payload.AsSpan(0, 16)));
+                }
+                catch (ProtocolException) { continue; } // 非法握手帧：跳过继续等
+                if (ctx is null)
+                {
+                    Log?.Invoke("[relay] THello1 打洞会话无邀请上下文（台账 120s 口径外），忽略");
+                    continue;
+                }
+                var session = await TunnelSession.AcceptAsync(ctx.PeerDeviceId, frame, key,
+                    ctx.PeerStaticPubKey, transport, _engine,
+                    new TunnelSessionOptions
+                    {
+                        KeepaliveInterval = TimeSpan.FromSeconds(_settings.Settings.KeepaliveSec),
+                    });
+                transport = null; // 会话接管承载（Disconnect 时释放）
+                if (!session.IsClosed)
+                {
+                    _host.Attach(session);
+                    Log?.Invoke($"中继承载建立（被动侧）peer={ctx.PeerDeviceId}");
+                }
+                return;
+            }
+        }
+        catch (Exception e) when (e is not OperationCanceledException || !_cts.IsCancellationRequested)
+        {
+            Log?.Invoke($"[relay] Grant 处理失败：{e.Message}");
+        }
+        finally
+        {
+            if (transport is not null) await transport.DisposeAsync(); // 握手未成：释放承载
+        }
     }
 
     /// <summary>STUN 端点派生：控制地址主机 + 3478（STUN 与控制同宿主，01 §5 TD-07）。</summary>

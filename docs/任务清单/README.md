@@ -8,7 +8,7 @@
 | 清单 | 里程碑 | 出口标准 | 状态 |
 |---|---|---|---|
 | [M1-核心链路.md](M1-核心链路.md) | M1 · 核心链路可用（两台设备注册 + 第一条 UDP 直连映射） | 验收场景 A-1~A-4 通过 | ✅ 收官（2026-09-12；M1-37 Windows 轮完、环境依赖项转 M2 穿插，见清单附录 A.3 收官口径） |
-| [M2-打洞完整与授权闭环.md](M2-打洞完整与授权闭环.md) | M2 · 打洞完整与授权闭环（TCP 打洞、中继回退、分组与远程码全量生效） | 验收场景 A-5~A-9 通过 | 🔨 进行中（2026-09-12 起；M2-03/04/05/06/07/16/17/23/30/31 ✅ 10/35） |
+| [M2-打洞完整与授权闭环.md](M2-打洞完整与授权闭环.md) | M2 · 打洞完整与授权闭环（TCP 打洞、中继回退、分组与远程码全量生效） | 验收场景 A-5~A-9 通过 | 🔨 进行中（2026-09-12 起；M2-03/04/05/06/07/16/17/18/23/30/31 ✅ 11/35） |
 | M3（待建） | 管理面与可观测 | A-10~A-12 | — |
 | M4（待建） | 交付打磨 | 交付清单齐全 | — |
 
@@ -40,3 +40,4 @@
 | 2026-09-22 | **M2-07 中继服务 ✅**（8/35）——RelayService（UDP 单 socket+TCP 转发对双承载、8B 会话头剥离零解密、JOIN 端槽认领[未知源保守丢弃]、0x74→Grant 双侧下发[三错误路径 5002/1001/4005]、90s 空闲回收+TCP 断连即收、per-end 写串行化）+ SignalingCoordinator relayAllowed 真实合成与会话台账 120s；02 §6.2/05 §6.1 实现注记（设计 v1.16：§6.1④ 地址更新收窄为 JOIN 认领）；测试 +12（服务端 85→97），全仓 459 全绿、Core 83.61%、CI quick 通过 |
 | 2026-09-22 | **M2-17 RelayClient ✅**（9/35）——RelayClient 静态编排（AllocateAsync 0x74 族配对 + JoinAsync）+ RelayTransport:ITunnelTransport 双承载（UDP 500ms 窗重发 JOIN/[0x02]、TCP 首帧分帧；发送附加 8B sid、接收即裸 PTP 帧；90s 空闲自关闭 watchdog 兜底）；集成测 +5（含 Grant 双侧同 sid、密文逐字节往返、1001、JOIN 超时、FakeTime 空闲自关闭）；全仓 464 全绿、Core 83.61%、CI quick 通过 |
 | 2026-09-22 | **M2-23 peers.json 与 /api/peers ✅**（10/35）——PeersStore（{deviceId→relayFallback} 默认关/原子替换/损坏自愈/非法键容错）+ PeersApi GET·PUT（04 §2.4 形状、passive 2002）+ PunchOutcome.RelayAllowed 出队合成（本地配置 AND Ack.relayAllowed，仅 Ack 后失败携带，供 M2-18）；测 +12，全仓 476 全绿、Core 83.61%、CI quick 通过 |
+| 2026-09-23 | **M2-18 承载绑定与中继路径 ✅**（11/35）——回退链内联 Puncher（Ack 后失败+资格真→0x74→JOIN 先 UDP 后 TCP→中继上 PTP 握手，THello1 200ms 重发覆盖对端 JOIN 窗）+ 被邀请侧 RelayGrant 推送→THello1 sessionId 关联邀请上下文（120s TTL）应答握手 + TunnelSession.ViaRelay 驱动映射 relay 态/复用/断链回 punching（05 §4 注记，设计 v1.17）；测 +6，全仓 482 全绿、Core 83.61%、CI quick 通过 |

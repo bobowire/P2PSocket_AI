@@ -37,6 +37,23 @@ public static class RelayClient
     public static async Task<RelayTransport> JoinAsync(RelayGrant grant, RelayCarrier carrier,
         TimeSpan? joinTimeout = null, TimeProvider? time = null, CancellationToken ct = default)
         => await RelayTransport.JoinAsync(grant, carrier, joinTimeout, time, ct).ConfigureAwait(false);
+
+    /// <summary>承载选择（02 §6.2：UDP 默认；UDP 被封场景 TCP，FR-S-704）：先 UDP、失败（JOIN 超时/
+    /// 端点缺失/承载故障）再 TCP 兜底（M2-18 客户端策略）。服务端按端独立转发（M2-07），两端承载可异构。
+    /// 外部取消（ct）不吞——传播给调用方。</summary>
+    public static async Task<RelayTransport> JoinWithCarrierFallbackAsync(RelayGrant grant,
+        TimeSpan? joinTimeout = null, TimeProvider? time = null, CancellationToken ct = default)
+    {
+        try
+        {
+            return await RelayTransport.JoinAsync(grant, RelayCarrier.Udp, joinTimeout, time, ct).ConfigureAwait(false);
+        }
+        catch (Exception e) when ((e is IOException or SocketException) && !ct.IsCancellationRequested)
+        {
+            // UDP 承载不可用：转 TCP 兜底（留待下方重试；此处不吞外部取消）
+        }
+        return await RelayTransport.JoinAsync(grant, RelayCarrier.Tcp, joinTimeout, time, ct).ConfigureAwait(false);
+    }
 }
 
 /// <summary>
@@ -61,6 +78,9 @@ public sealed class RelayTransport : ITunnelTransport
     public static readonly TimeSpan DefaultJoinTimeout = TimeSpan.FromSeconds(10);
     /// <summary>本端空闲自关闭（02 §6.2 服务端 90s 回收口径；KEEPALIVE 流量即刷新）。</summary>
     public static readonly TimeSpan IdleTimeout = TimeSpan.FromSeconds(90);
+
+    /// <summary>relay 数据面端点（Grant 派生；诊断/打洞结果明细用，M2-18）。</summary>
+    public IPEndPoint RemoteEndPoint => _relayEp;
 
     private readonly RelayCarrier _carrier;
     private readonly ulong _sid;
