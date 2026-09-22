@@ -80,12 +80,19 @@ builder.Services.AddSingleton(sp => new ControlServer(
     sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
     sp.GetRequiredService<DeviceRegistry>(),
     sp.GetRequiredService<ControlMessageRouter>().DispatchAsync));
-// stun_auth 是库开关（03 §2.8）：首次解析发生在 ServerHostService.StartAsync 步骤③（晚于数据库初始化，键必然存在）
+// stun_auth 与三速率键是库开关（03 §2.8）：首次解析发生在 ServerHostService.StartAsync 步骤③
+// （晚于数据库初始化，键必然存在；stun_rate_per_ip/per_device/circuit_pps 为四道闸 TD-18 参数）
 builder.Services.AddSingleton(sp =>
 {
     var factory = sp.GetRequiredService<IDbContextFactory<AppDbContext>>();
     using var db = factory.CreateDbContext();
-    return new StunService(factory, requireAuth: new ServerConfigStore(db).GetBool("stun_auth"));
+    var cfg = new ServerConfigStore(db);
+    return new StunService(factory, requireAuth: cfg.GetBool("stun_auth"), guard: new StunGuardOptions
+    {
+        PerIpPps = cfg.GetInt("stun_rate_per_ip"),
+        PerDeviceQps = cfg.GetInt("stun_rate_per_device"),
+        CircuitPps = cfg.GetInt("stun_circuit_pps"),
+    });
 });
 builder.Services.AddHostedService<ServerHostService>();
 

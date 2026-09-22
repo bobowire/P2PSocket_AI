@@ -25,10 +25,11 @@ public sealed class ServerHostService(IServiceProvider sp, ILogger<ServerHostSer
         await control.StartAsync(new IPEndPoint(IPAddress.Any, options.Listen.Control));
         logger.LogInformation("控制面监听 0.0.0.0:{Port}（PCP，02 §2）", options.Listen.Control);
 
-        // 3) STUN UDP（stun_auth 库开关随首次解析读取——晚于上方初始化，键必然存在）
+        // 3) STUN UDP + TCP（stun_auth 与三速率键随首次解析读取——晚于上方初始化，键必然存在）
         var stun = sp.GetRequiredService<StunService>();
-        await stun.StartAsync(options.Listen.StunUdp);
-        logger.LogInformation("STUN-R 监听 0.0.0.0:{Port}/udp（02 §3）", options.Listen.StunUdp);
+        await stun.StartAsync(options.Listen.StunUdp, options.Listen.StunTcp);
+        logger.LogInformation("STUN-R 监听 0.0.0.0:{Udp}/udp + {Tcp}/tcp（02 §3，四道闸 TD-18）",
+            options.Listen.StunUdp, options.Listen.StunTcp);
 
         // 4) 显式触发构造（后台循环随构造启动；无端口绑定，仅确认装配完整）
         _ = sp.GetRequiredService<PresenceMonitor>();
