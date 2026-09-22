@@ -19,6 +19,7 @@ public sealed class LocalApiServices : IAsyncDisposable
     public ControlClient Control { get; }
     public StateStore State { get; }
     public SettingsStore Settings { get; }
+    public PeersStore Peers { get; }
     public ClientRegistrationService Wizard { get; }
     public MappingSyncService Mappings { get; }
     public PunchScheduler Scheduler { get; }
@@ -26,11 +27,12 @@ public sealed class LocalApiServices : IAsyncDisposable
     public StatusHub Hub { get; }
 
     public LocalApiServices(ControlClient control, StateStore state, SettingsStore settings,
-        ClientRegistrationService wizard, MappingSyncService mappings, PunchScheduler scheduler)
+        PeersStore peers, ClientRegistrationService wizard, MappingSyncService mappings, PunchScheduler scheduler)
     {
         Control = control;
         State = state;
         Settings = settings;
+        Peers = peers;
         Wizard = wizard;
         Mappings = mappings;
         Scheduler = scheduler;
@@ -66,6 +68,7 @@ public static class LocalWebApi
         app.MapWizardApi(services.Control, services.Wizard, services.State, services.Settings, services.Context);
         app.MapMappingApi(services.Mappings);
         app.MapDeviceApi(services.Control);
+        app.MapPeersApi(services.Control, services.Peers); // M2-23 目标设备级配置（04 §2.4）
         app.MapDiagnosticsApi(services.Scheduler);
         app.Map("/ws/status", services.Hub.HandleAsync); // 04 §2.8 实时通道
         return app;

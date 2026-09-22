@@ -276,13 +276,15 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
         stack.Store.Load();
         stack.Settings = new SettingsStore(dir);
         stack.Settings.Load();
+        var peers = new PeersStore(dir);
+        peers.Load();
         stack.Wizard = new ClientRegistrationService(stack.Control, stack.Store, _nic);
         stack.Host = new TunnelHost();
         stack.Scheduler = new PunchScheduler(stack.Puncher);
         stack.Engine = new MappingEngine(stack.Host, stack.Scheduler, IPAddress.Loopback);
         var sync = new MappingSyncService(stack.Control, stack.Engine, stack.Store);
         stack.Api = new LocalApiServices(stack.Control, stack.Store, stack.Settings,
-            stack.Wizard, sync, stack.Scheduler);
+            peers, stack.Wizard, sync, stack.Scheduler);
 
         var webPort = FreePort();
         var builder = WebApplication.CreateBuilder();
@@ -809,6 +811,39 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
             }
         }
         catch { /* 对端断开 */ }
+    }
+
+    // ── ⑧ 目标设备级配置（M2-23，04 §2.4 /api/peers；不经控制协议、不同步服务端）──
+
+    [Fact]
+    public async Task 设备级配置端点_形状与持久化_登录登出2002()
+    {
+        var (deviceId, secret, _) = await SeedDeviceAsync("peers-dev");
+        await using var stack = await StartStackAsync((deviceId, secret, "000000"));
+
+        // GET：无条目=默认关闭（PRD 06 §2）
+        var before = await GetAsync(stack, $"/api/peers/{deviceId}");
+        Assert.Equal(ErrorCode.Ok, before.code);
+        Assert.False(before.data!.Value.GetProperty("relayFallback").GetBoolean());
+
+        // PUT true → 回显与回读一致；不经控制协议（无服务端侧状态可断言，契约即本地生效）
+        var put = await PutAsync(stack, $"/api/peers/{deviceId}", new { relayFallback = true });
+        Assert.Equal(ErrorCode.Ok, put.code);
+        Assert.True(put.data!.Value.GetProperty("relayFallback").GetBoolean());
+        var after = await GetAsync(stack, $"/api/peers/{deviceId}");
+        Assert.True(after.data!.Value.GetProperty("relayFallback").GetBoolean());
+
+        // 设备隔离：另一目标不受影响
+        var other = await GetAsync(stack, $"/api/peers/{Guid.NewGuid()}");
+        Assert.False(other.data!.Value.GetProperty("relayFallback").GetBoolean());
+
+        // passive（登出）→ 2002（04 §2.4 节仅 normal 模式）
+        var logout = await PostAsync(stack, "/api/auth/logout", null);
+        Assert.Equal(ErrorCode.Ok, logout.code);
+        var denied = await GetAsync(stack, $"/api/peers/{deviceId}");
+        Assert.Equal(ErrorCode.ForbiddenPassive, denied.code);
+        var deniedPut = await PutAsync(stack, $"/api/peers/{deviceId}", new { relayFallback = false });
+        Assert.Equal(ErrorCode.ForbiddenPassive, deniedPut.code);
     }
 }
 

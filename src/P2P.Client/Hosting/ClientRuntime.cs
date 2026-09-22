@@ -47,6 +47,7 @@ public sealed class ClientRuntime : IAsyncDisposable
     private readonly CancellationTokenSource _cts = new();
     private StateStore _state = null!;
     private SettingsStore _settings = null!;
+    private PeersStore _peers = null!;
     private ControlClient _control = null!;
     private INicManager _nic = null!;
     private TunnelHost _host = null!;
@@ -80,6 +81,9 @@ public sealed class ClientRuntime : IAsyncDisposable
         _settings.Load();
         _state = new StateStore(_options.BaseDir);
         _state.Load();
+        _peers = new PeersStore(_options.BaseDir); // M2-23 目标设备级回退配置（损坏自愈，不拒启）
+        _peers.Load();
+        _peers.Recovered += m => Log?.Invoke($"[peers] {m}");
 
         var addrs = _settings.Settings.ServerAddrs;
         if (addrs.Length == 0)
@@ -105,7 +109,7 @@ public sealed class ClientRuntime : IAsyncDisposable
         _engine.Log += m => Log?.Invoke($"[engine] {m}");
         _sync = new MappingSyncService(_control, _engine, _state);
         _wizard = new ClientRegistrationService(_control, _state, _nic);
-        _api = new LocalApiServices(_control, _state, _settings, _wizard, _sync, _scheduler);
+        _api = new LocalApiServices(_control, _state, _settings, _peers, _wizard, _sync, _scheduler);
         _control.ServerPush += OnServerPush; // 0x71 PunchInvite → 被邀请方打洞（02 §5.1③）
 
         // ③ 本地 Web（两种分支都启：向导也经它完成注册）
@@ -217,7 +221,9 @@ public sealed class ClientRuntime : IAsyncDisposable
             // STUN-TCP 探测缝（M2-04 StunTcpProber，TCP 打洞 M2-16；单事务即关、端口 L 由调用方复用 listen）
             (socket, ct) => stunEp is null
                 ? throw new IOException("STUN 地址解析失败（服务端主机名不可解析，TD-07 :3478）")
-                : StunTcpProber.ProbeAsync(socket, stunEp, deviceId, deviceSecret, _control.Clock, ct: ct)));
+                : StunTcpProber.ProbeAsync(socket, stunEp, deviceId, deviceSecret, _control.Clock, ct: ct),
+            // 本地设备级回退配置缝（M2-23，05 §3.1）：出队执行时与 Ack.relayAllowed 合成，供 M2-18
+            relayFallbackLookup: _peers.GetRelayFallback));
         Log?.Invoke($"打洞器已接线（STUN={stunEp?.ToString() ?? "解析失败"}，派生自控制地址 :3478，TD-07）");
     }
 

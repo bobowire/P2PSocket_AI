@@ -30,7 +30,10 @@ public sealed record PunchOptions
     public IPAddress? BindAddress { get; init; }
 }
 
-/// <summary>打洞结果（本地事件驱动映射状态机；成功带双方端点）。</summary>
+/// <summary>打洞结果（本地事件驱动映射状态机；成功带双方端点）。
+/// <see cref="RelayAllowed"/>（M2-23）：失败结果的中继回退资格 = 本地 peers.json 设备级配置 AND
+/// 服务端 PunchRequestAck.relayAllowed（05 §3.1，Puncher 出队执行时合成；消费方 M2-18 走 0x74）。
+/// 仅 Ack 后失败（会话两段式完成、服务端台账在册）携带 true；Ack 前失败无会话不可中继。</summary>
 public sealed record PunchOutcome(
     bool Ok,
     Guid SessionId,
@@ -38,7 +41,8 @@ public sealed record PunchOutcome(
     TunnelSession? Session,
     IPEndPoint? LocalEndpoint,
     IPEndPoint? PeerEndpoint,
-    string? FailReason)
+    string? FailReason,
+    bool RelayAllowed = false)
 {
     public static PunchOutcome Success(Guid sessionId, Guid peerDeviceId, TunnelSession? session,
         IPEndPoint local, IPEndPoint peer)
@@ -88,12 +92,13 @@ public sealed class Puncher : IPuncher, IDisposable
     private readonly EcKeyPair _staticKey; // 宿主所有（随 state 落盘重建），Puncher 不释放
     private readonly ITunnelChannelHandler _handler;
     private readonly PunchOptions _options;
+    private readonly Func<Guid, bool> _relayFallback; // 本地设备级回退配置（缺省恒 false=默认关，PRD 06 §2）
     private int _disposed;
 
     public Puncher(PunchRequestSender sendPunchRequest, EndpointReporter reportEndpoints,
         StunProbeDelegate probe, EcKeyPair staticKey,
         ITunnelChannelHandler? handler = null, PunchOptions? options = null,
-        StunTcpProbeDelegate? tcpProbe = null)
+        StunTcpProbeDelegate? tcpProbe = null, Func<Guid, bool>? relayFallbackLookup = null)
     {
         _sendPunchRequest = sendPunchRequest;
         _reportEndpoints = reportEndpoints;
@@ -102,6 +107,7 @@ public sealed class Puncher : IPuncher, IDisposable
         _staticKey = staticKey;
         _handler = handler ?? NullChannelHandler.Instance;
         _options = options ?? new PunchOptions();
+        _relayFallback = relayFallbackLookup ?? (_ => false); // 未装配=默认关闭（与 peers.json 无条目同口径）
     }
 
     // ── 访问方 A（02 §5.1①④⑤ / §5.2①③④）──────────────────────────
@@ -117,8 +123,8 @@ public sealed class Puncher : IPuncher, IDisposable
         try
         {
             return proto == "tcp"
-                ? await InitiateTcpAsync(targetDeviceId, triggerMappingId, punchCts.Token)
-                : await InitiateUdpAsync(targetDeviceId, triggerMappingId, punchCts.Token);
+                ? await InitiateTcpAsync(targetDeviceId, triggerMappingId, punchCts.Token, ct)
+                : await InitiateUdpAsync(targetDeviceId, triggerMappingId, punchCts.Token, ct);
         }
         catch (Exception e)
         {
@@ -130,7 +136,7 @@ public sealed class Puncher : IPuncher, IDisposable
     }
 
     private async Task<PunchOutcome> InitiateUdpAsync(Guid targetDeviceId, Guid? triggerMappingId,
-        CancellationToken punchCt)
+        CancellationToken punchCt, CancellationToken ct)
     {
         var socket = CreatePunchSocket(_options.BindAddress);
         UdpPunchTransport? transport = null; // 接管 socket 后的释放责任
@@ -157,21 +163,31 @@ public sealed class Puncher : IPuncher, IDisposable
                 return PunchOutcome.Failure(targetDeviceId, $"server_{e.Code}: {e.HttpLikeMsg}");
             }
 
+            // 回退资格合成（05 §3.1，M2-23 供 M2-18）：本地设备级配置 AND 服务端中继开关
+            var relayAllowed = _relayFallback(targetDeviceId) && ack.RelayAllowed;
+
             // ④ 收 Ack → 对 B 端点连发 THello1（10ms×20，NAT 窗口容丢）→ PTP 握手
-            var peerEp = ParseEndpoint(ack.PeerEndpoints.Udp)
-                ?? throw new IOException("PunchRequest Ack 未携带对端 UDP 端点");
-            transport = new UdpPunchTransport(socket, peerEp);
-            var session = await TunnelSession.ConnectAsync(ack.SessionId, ack.Peer.DeviceId,
-                _staticKey, ack.Peer.StaticPubKey, transport, _handler,
-                new TunnelSessionOptions
-                {
-                    KeepaliveInterval = TimeSpan.FromSeconds(_options.KeepaliveSec),
-                    HandshakeTimeout = _options.PunchTimeout,
-                    HandshakeResendCount = _options.BurstCount,
-                    HandshakeResendInterval = _options.BurstInterval,
-                });
-            established = true; // 成功：socket 归会话（Disconnect 时 transport 释放）
-            return PunchOutcome.Success(ack.SessionId, ack.Peer.DeviceId, session, local, peerEp);
+            try
+            {
+                var peerEp = ParseEndpoint(ack.PeerEndpoints.Udp)
+                    ?? throw new IOException("PunchRequest Ack 未携带对端 UDP 端点");
+                transport = new UdpPunchTransport(socket, peerEp);
+                var session = await TunnelSession.ConnectAsync(ack.SessionId, ack.Peer.DeviceId,
+                    _staticKey, ack.Peer.StaticPubKey, transport, _handler,
+                    new TunnelSessionOptions
+                    {
+                        KeepaliveInterval = TimeSpan.FromSeconds(_options.KeepaliveSec),
+                        HandshakeTimeout = _options.PunchTimeout,
+                        HandshakeResendCount = _options.BurstCount,
+                        HandshakeResendInterval = _options.BurstInterval,
+                    });
+                established = true; // 成功：socket 归会话（Disconnect 时 transport 释放）
+                return PunchOutcome.Success(ack.SessionId, ack.Peer.DeviceId, session, local, peerEp);
+            }
+            catch (Exception e)
+            {
+                return FailAfterAck(targetDeviceId, e, ct, relayAllowed);
+            }
         }
         finally
         {
@@ -184,7 +200,7 @@ public sealed class Puncher : IPuncher, IDisposable
     /// listen(L)+N 并发 connect（目标 portTcp+(N−1)）→ 全部候选连接扇出 THello1、首条 THello2
     /// 到达的连接胜出（对端仅在收到 THello1 的连接上应答，天然消歧，02 §5.2④）。</summary>
     private async Task<PunchOutcome> InitiateTcpAsync(Guid targetDeviceId, Guid? triggerMappingId,
-        CancellationToken punchCt)
+        CancellationToken punchCt, CancellationToken ct)
     {
         // ① 专用本地端口 L → STUN-TCP 探测（M2-04：事务即关、句柄由探测方释放，仅保留端口号 L）
         var portL = 0;
@@ -215,45 +231,63 @@ public sealed class Puncher : IPuncher, IDisposable
             return PunchOutcome.Failure(targetDeviceId, $"server_{e.Code}: {e.HttpLikeMsg}");
         }
 
-        var peerMapped = ParseEndpoint(ack.PeerEndpoints.Tcp)
-            ?? throw new IOException("PunchRequest Ack 未携带对端 TCP 端点");
-        var n = PunchPolicy.Normalize(ack.PunchCount); // OQ-19：以服务端回填 N 为准
-        var target = TcpPunchPlan.TargetEndpoint(peerMapped, n);
+        // 回退资格合成（05 §3.1，M2-23 供 M2-18）：本地设备级配置 AND 服务端中继开关
+        var relayAllowed = _relayFallback(targetDeviceId) && ack.RelayAllowed;
 
-        // ③④ listen(L) + N 并发 connect → 候选连接扇出 THello1 → 首条 THello2 的连接胜出
-        using var initiator = PtpHandshake.StartInitiator(ack.SessionId, _staticKey, ack.Peer.StaticPubKey);
-        var fleet = TcpPunchFleet.Create(_options.BindAddress, portL, target, n, PtpFrameType.THello2,
-            onConnection: t => t.SendAsync(initiator.THello1Wire, punchCt)); // 建立即发首帧
         try
         {
-            using var burstCts = CancellationTokenSource.CreateLinkedTokenSource(punchCt);
-            var burst = TcpBurstAsync(fleet, initiator.THello1Wire, burstCts.Token); // 周期补发（SYN 重传窗口容丢）
+            var peerMapped = ParseEndpoint(ack.PeerEndpoints.Tcp)
+                ?? throw new IOException("PunchRequest Ack 未携带对端 TCP 端点");
+            var n = PunchPolicy.Normalize(ack.PunchCount); // OQ-19：以服务端回填 N 为准
+            var target = TcpPunchPlan.TargetEndpoint(peerMapped, n);
+
+            // ③④ listen(L) + N 并发 connect → 候选连接扇出 THello1 → 首条 THello2 的连接胜出
+            using var initiator = PtpHandshake.StartInitiator(ack.SessionId, _staticKey, ack.Peer.StaticPubKey);
+            var fleet = TcpPunchFleet.Create(_options.BindAddress, portL, target, n, PtpFrameType.THello2,
+                onConnection: t => t.SendAsync(initiator.THello1Wire, punchCt)); // 建立即发首帧
             try
             {
-                var (winner, tHello2) = await fleet.WaitFrameAsync(punchCt);
-                var (tConfirm, keys) = initiator.HandleTHello2(tHello2);
-                var transport = fleet.Release(winner); // 胜出连接移交会话；其余随池销毁（02 §5.2④）
-                await transport.SendAsync(tConfirm, punchCt);
-                var session = TunnelSession.FromEstablishedKeys(ack.SessionId, ack.Peer.DeviceId, true,
-                    keys, transport, _handler, new TunnelSessionOptions
-                    {
-                        KeepaliveInterval = TimeSpan.FromSeconds(_options.KeepaliveSec),
-                        HandshakeTimeout = _options.PunchTimeout,
-                    });
-                return PunchOutcome.Success(ack.SessionId, ack.Peer.DeviceId, session,
-                    winner.LocalEndPoint!, winner.RemoteEndPoint!);
+                using var burstCts = CancellationTokenSource.CreateLinkedTokenSource(punchCt);
+                var burst = TcpBurstAsync(fleet, initiator.THello1Wire, burstCts.Token); // 周期补发（SYN 重传窗口容丢）
+                try
+                {
+                    var (winner, tHello2) = await fleet.WaitFrameAsync(punchCt);
+                    var (tConfirm, keys) = initiator.HandleTHello2(tHello2);
+                    var transport = fleet.Release(winner); // 胜出连接移交会话；其余随池销毁（02 §5.2④）
+                    await transport.SendAsync(tConfirm, punchCt);
+                    var session = TunnelSession.FromEstablishedKeys(ack.SessionId, ack.Peer.DeviceId, true,
+                        keys, transport, _handler, new TunnelSessionOptions
+                        {
+                            KeepaliveInterval = TimeSpan.FromSeconds(_options.KeepaliveSec),
+                            HandshakeTimeout = _options.PunchTimeout,
+                        });
+                    return PunchOutcome.Success(ack.SessionId, ack.Peer.DeviceId, session,
+                        winner.LocalEndPoint!, winner.RemoteEndPoint!);
+                }
+                finally
+                {
+                    burstCts.Cancel();
+                    try { await burst; } catch { /* 补发尽力而为 */ }
+                }
             }
             finally
             {
-                burstCts.Cancel();
-                try { await burst; } catch { /* 补发尽力而为 */ }
+                await fleet.DisposeAsync(); // 幂等：成功路径已 Release 胜出，仅关其余 N−1 与 listener
             }
         }
-        finally
+        catch (Exception e)
         {
-            await fleet.DisposeAsync(); // 幂等：成功路径已 Release 胜出，仅关其余 N−1 与 listener
+            return FailAfterAck(targetDeviceId, e, ct, relayAllowed);
         }
     }
+
+    /// <summary>Ack 后失败（打洞/握手阶段）：失败语义同外层（超时/错误二分），并携带回退资格（05 §3.1）。</summary>
+    private PunchOutcome FailAfterAck(Guid targetDeviceId, Exception e, CancellationToken ct, bool relayAllowed)
+        => new(false, Guid.Empty, targetDeviceId, null, null, null,
+            e is OperationCanceledException && !ct.IsCancellationRequested
+                ? "punch_timeout"
+                : $"punch_error: {e.Message}",
+            relayAllowed);
 
     // ── 被邀请方 B（02 §5.1③/§5.2③；05 §3.1：不进本地队列）───────────
 

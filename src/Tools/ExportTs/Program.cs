@@ -30,6 +30,8 @@ var settings = new SettingsStore(temp);
 await settings.SaveAsync(new ClientSettings { ServerAddrs = ["127.0.0.1:1"], LocalWebPort = 1 });
 var state = new StateStore(temp);
 state.Load();
+var peers = new PeersStore(temp);
+peers.Load();
 await using var control = new ControlClient(["127.0.0.1:1"], new ControlClientOptions(),
     deviceId: null, deviceSecret: null);
 await using var host = new TunnelHost();
@@ -37,7 +39,7 @@ var scheduler = new PunchScheduler(new NullPuncher());
 await using var engine = new MappingEngine(host, scheduler, IPAddress.Loopback);
 var sync = new MappingSyncService(control, engine, state);
 var wizard = new ClientRegistrationService(control, state, new NullNicManager());
-await using var api = new LocalApiServices(control, state, settings, wizard, sync, scheduler);
+await using var api = new LocalApiServices(control, state, settings, peers, wizard, sync, scheduler);
 
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions { ContentRootPath = temp });
 var app = builder.Build();
