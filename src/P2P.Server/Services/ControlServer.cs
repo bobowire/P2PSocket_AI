@@ -69,7 +69,8 @@ public sealed class ControlServer : IAsyncDisposable
             catch (ObjectDisposedException) { break; }
             client.NoDelay = true; // 02 §2.1：控制信道低延迟优先
             var session = new ControlSession(client.GetStream(), _dbFactory, _registry, _dispatcher,
-                _options, _time, () => Interlocked.Increment(ref _hmacFailures));
+                _options, _time, () => Interlocked.Increment(ref _hmacFailures),
+                (IPEndPoint)client.Client.RemoteEndPoint!, (IPEndPoint)client.Client.LocalEndPoint!);
             _sessions.TryAdd(session, 0);
             _ = WatchAsync(session); // 读循环自管理生命周期；结束后移出跟踪表
         }

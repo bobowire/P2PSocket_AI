@@ -75,6 +75,12 @@ builder.Services.AddSingleton(sp => new PresenceMonitor(
     sp.GetRequiredService<DeviceRegistry>(),
     sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
     timeout: TimeSpan.FromSeconds(options.Heartbeat.TimeoutSec)));
+// 中继（02 §6，M2-07）：对端解析走 SignalingCoordinator 结束会话台账（打洞完成/超时后 120s 内可分配）
+builder.Services.AddSingleton(sp => new RelayService(
+    sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+    sp.GetRequiredService<DeviceRegistry>(),
+    sp.GetRequiredService<SignalingCoordinator>().ResolveRelayPeers,
+    new RelayServiceOptions { IdleTimeout = TimeSpan.FromSeconds(options.Relay.IdleTimeoutSec) }));
 builder.Services.AddSingleton<ControlMessageRouter>();
 builder.Services.AddSingleton(sp => new ControlServer(
     sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),

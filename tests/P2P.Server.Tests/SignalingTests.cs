@@ -21,6 +21,7 @@ public sealed class SignalingTests : IAsyncLifetime
     private readonly List<TestPcpClient> _clients = [];
     private ControlServer _server = null!;
     private SignalingCoordinator _signaling = null!;
+    private RelayService _relay = null!;
     private FakeTimeProvider _time = null!;
 
     public Task InitializeAsync()
@@ -33,12 +34,14 @@ public sealed class SignalingTests : IAsyncLifetime
 
         var audit = new AuditLogger(factory, _time);
         _signaling = new SignalingCoordinator(factory, _registry, new Authorizer(factory), audit, _time);
+        _relay = new RelayService(factory, _registry, _signaling.ResolveRelayPeers, time: _time);
         var router = new ControlMessageRouter(
             new RegistrationService(factory, _registry, audit, _time),
             new UserService(factory, audit, _time),
             new GroupService(factory, _registry, _time),
             _signaling,
             new MappingService(factory, audit),
+            _relay,
             audit);
         _server = new ControlServer(factory, _registry, router.DispatchAsync, time: _time);
         return _server.StartAsync(new IPEndPoint(IPAddress.Loopback, 0));
@@ -48,6 +51,7 @@ public sealed class SignalingTests : IAsyncLifetime
     {
         foreach (var c in _clients) await c.DisposeAsync();
         await _server.DisposeAsync();
+        await _relay.DisposeAsync();
         await _signaling.DisposeAsync();
         _connection.Dispose();
     }
@@ -100,7 +104,7 @@ public sealed class SignalingTests : IAsyncLifetime
         Assert.Equal(aEndpoints.Udp!.Host, invite.PeerEndpoints.Udp!.Host);
         Assert.Equal(aEndpoints.Udp.Port, invite.PeerEndpoints.Udp.Port);
         Assert.Equal(PunchPolicy.DefaultConcurrency, invite.PunchCount); // 未携带 → 缺省 3（OQ-19）
-        Assert.False(invite.RelayAllowed);
+        Assert.True(invite.RelayAllowed); // 种子 relay_enabled=1 → 真实合成（M2-07）
 
         // B 回 0x76（即时 STUN 所得端点）
         var bEndpoints = UdpOnly("198.51.100.20", 50001);
@@ -114,6 +118,31 @@ public sealed class SignalingTests : IAsyncLifetime
         Assert.Equal("target", ack.Peer.DeviceName);
         Assert.Equal(bEndpoints.Udp!.Host, ack.PeerEndpoints.Udp!.Host);
         Assert.Equal(bEndpoints.Udp.Port, ack.PeerEndpoints.Udp.Port);
+        Assert.True(ack.RelayAllowed);
+    }
+
+    // ── M2-07：relay_enabled=0 → relayAllowed=false 全链路 ─────────────
+
+    [Fact]
+    public async Task Punch_RelayDisabled_FlagFalseInInviteAndAck()
+    {
+        await using (var db = CreateDb())
+        {
+            db.ServerConfig.Single(c => c.Key == "relay_enabled").Value = "0";
+            await db.SaveChangesAsync();
+        }
+
+        var (a, _, _) = await RegisterAsync("relay-off-a");
+        var (b, bId, _) = await RegisterAsync("relay-off-b");
+
+        await a.SendAsync(new PunchRequest(a.NextSeq(), a.Now(), MsgType.PunchRequest,
+            bId, null, "udp", null, null));
+        var invite = await b.ReceiveAsync<PunchInvite>() ?? throw new IOException("B 未收到 PunchInvite");
+        Assert.False(invite.RelayAllowed);
+
+        await b.SendAsync(new PunchEndpoint(b.NextSeq(), b.Now(), MsgType.PunchEndpoint,
+            invite.SessionId, UdpOnly("198.51.100.30", 50002)));
+        var ack = await a.ReceiveAsync<PunchRequestAck>() ?? throw new IOException("A 未收到延后 Ack");
         Assert.False(ack.RelayAllowed);
     }
 

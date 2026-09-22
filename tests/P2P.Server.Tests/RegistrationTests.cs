@@ -21,6 +21,7 @@ public sealed class RegistrationTests : IAsyncLifetime
     private ControlServer _server = null!;
     private RegistrationService _registration = null!;
     private SignalingCoordinator _signaling = null!;
+    private RelayService _relay = null!;
     private FakeTimeProvider _time = null!;
 
     public Task InitializeAsync()
@@ -34,15 +35,17 @@ public sealed class RegistrationTests : IAsyncLifetime
         var audit = new AuditLogger(factory, _time);
         _registration = new RegistrationService(factory, _registry, audit, _time);
         _signaling = new SignalingCoordinator(factory, _registry, new Authorizer(factory), audit, _time);
+        _relay = new RelayService(factory, _registry, _signaling.ResolveRelayPeers, time: _time);
         var router = new ControlMessageRouter(_registration, new UserService(factory, audit, _time),
             new GroupService(factory, _registry, _time), _signaling,
-            new MappingService(factory, audit), audit);
+            new MappingService(factory, audit), _relay, audit);
         _server = new ControlServer(factory, _registry, router.DispatchAsync, time: _time);
         return _server.StartAsync(new IPEndPoint(IPAddress.Loopback, 0));
     }
 
     public async Task DisposeAsync()
     {
+        await _relay.DisposeAsync();
         foreach (var c in _clients) await c.DisposeAsync();
         await _server.DisposeAsync();
         await _signaling.DisposeAsync();

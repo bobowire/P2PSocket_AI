@@ -25,6 +25,7 @@ public sealed class ClientRuntimeIntegrationTests : IAsyncLifetime
     private readonly SqliteConnection _connection = new("Data Source=:memory:");
     private readonly DeviceRegistry _registry = new();
     private readonly List<SignalingCoordinator> _signalings = [];
+    private readonly List<RelayService> _relays = [];
     private readonly List<ControlServer> _servers = [];
     private readonly StubNicManager _nic = new();
     private StubFactory _factory = null!;
@@ -46,6 +47,7 @@ public sealed class ClientRuntimeIntegrationTests : IAsyncLifetime
     public async Task DisposeAsync()
     {
         foreach (var s in _servers) await s.DisposeAsync();
+        foreach (var r in _relays) await r.DisposeAsync();
         foreach (var s in _signalings) await s.DisposeAsync();
         await Task.Delay(200); // 服务端收尾与夹具销毁竞态宽限（LocalWebApi 测试同法）
         try { _connection.Dispose(); }
@@ -60,16 +62,19 @@ public sealed class ClientRuntimeIntegrationTests : IAsyncLifetime
     {
         var audit = new AuditLogger(_factory);
         var signaling = new SignalingCoordinator(_factory, _registry, new Authorizer(_factory), audit);
+        var relay = new RelayService(_factory, _registry, signaling.ResolveRelayPeers);
         var router = new ControlMessageRouter(
             new RegistrationService(_factory, _registry, audit),
             new UserService(_factory, audit),
             new GroupService(_factory, _registry),
             signaling,
             new MappingService(_factory, audit),
+            relay,
             audit);
         var server = new ControlServer(_factory, _registry, router.DispatchAsync);
         await server.StartAsync(new IPEndPoint(IPAddress.Loopback, port));
         _signalings.Add(signaling);
+        _relays.Add(relay);
         _servers.Add(server);
         return server;
     }

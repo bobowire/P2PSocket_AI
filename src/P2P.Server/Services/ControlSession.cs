@@ -1,4 +1,5 @@
 using System.IO.Pipelines;
+using System.Net;
 using System.Threading.Channels;
 using Microsoft.EntityFrameworkCore;
 using P2P.Core.Crypto;
@@ -52,7 +53,8 @@ public sealed class ControlSession : IAsyncDisposable
 
     public ControlSession(Stream stream, IDbContextFactory<AppDbContext> dbFactory, DeviceRegistry registry,
         Func<ControlSession, IPcpMessage, Task> dispatcher, ControlSessionOptions? options = null,
-        TimeProvider? time = null, Action? onHmacFailure = null)
+        TimeProvider? time = null, Action? onHmacFailure = null,
+        IPEndPoint? remoteEndPoint = null, IPEndPoint? localEndPoint = null)
     {
         _stream = stream;
         _reader = PipeReader.Create(stream);
@@ -63,6 +65,8 @@ public sealed class ControlSession : IAsyncDisposable
         _options = options ?? new ControlSessionOptions();
         _time = time ?? TimeProvider.System;
         _onHmacFailure = onHmacFailure;
+        RemoteEndPoint = remoteEndPoint;
+        LocalEndPoint = localEndPoint;
         LastSeen = _time.GetLocalNow();
         _runLoop = RunAsync(_cts.Token);
         _sendLoop = SendLoopAsync(_cts.Token);
@@ -88,6 +92,12 @@ public sealed class ControlSession : IAsyncDisposable
 
     /// <summary>会话登录态用户（未登录/登出为 null；设备 owner 绑定持久在库）。</summary>
     public Guid? OwnerUserId { get; set; }
+
+    /// <summary>连接对端端点（RelayService 端槽认领的源 IP 偏好，M2-07）。</summary>
+    public IPEndPoint? RemoteEndPoint { get; }
+
+    /// <summary>连接本地侧端点（中继端点派生：客户端经哪个接口到达即回哪个地址，M2-07）。</summary>
+    public IPEndPoint? LocalEndPoint { get; }
 
     /// <summary>下一出站 seq（处理器构造回复消息头用；信令推送与读循环并发，原子递增）。</summary>
     public uint NextSeq() => (uint)Interlocked.Increment(ref _selfSeqInt);
@@ -204,7 +214,7 @@ public sealed class ControlSession : IAsyncDisposable
             or MsgType.UserLogout or MsgType.Heartbeat or MsgType.DeviceList or MsgType.GroupCreate
             or MsgType.GroupUpdate or MsgType.GroupDissolve or MsgType.MappingUpsert or MsgType.MappingDelete
             or MsgType.MappingStatus or MsgType.PunchRequest or MsgType.PunchInvite or MsgType.PunchResult
-            or MsgType.PunchEndpoint or MsgType.Error;
+            or MsgType.PunchEndpoint or MsgType.RelayAllocate or MsgType.Error;
 
     private static IPcpMessage DecodeTyped(byte[] msgpack, byte msgType) => msgType switch
     {
@@ -223,6 +233,7 @@ public sealed class ControlSession : IAsyncDisposable
         MsgType.MappingStatus => PcpCodec.Decode<MappingStatus>(msgpack),
         MsgType.PunchRequest => PcpCodec.Decode<PunchRequest>(msgpack),
         MsgType.PunchEndpoint => PcpCodec.Decode<PunchEndpoint>(msgpack),
+        MsgType.RelayAllocate => PcpCodec.Decode<RelayAllocate>(msgpack),
         MsgType.Error => PcpCodec.Decode<ErrorMessage>(msgpack),
         _ => PcpCodec.DecodeLoose(msgpack),
     };

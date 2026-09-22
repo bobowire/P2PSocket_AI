@@ -8,14 +8,20 @@ namespace P2P.Server.Services;
 /// 打洞信令协调（02 §5.1、05 §5，OQ-11/18/TD-19）：
 /// 0x70（含发起方端点）→ L1/L2 授权 → ① 向 B 下发 PunchInvite → 收 B 的 0x76 →
 /// ② 向 A 下发延后 Ack（B 端点）。per-device 至多一个活跃会话：并发申请排队、同对去重。
-/// B 离线 → 4005；0x76 超 10s 未达 → 5001 失败收尾；M1 relayAllowed 恒 false（中继 M2）。
+/// B 离线 → 4005；0x76 超 10s 未达 → 5001 失败收尾。
+/// relayAllowed 真实合成（M2-07）：= server_config relay_enabled（全局开关）AND 中继限速余量
+/// （余量判断 M3 前恒真）——0x71/0x70 Ack 随会话携带，客户端 Puncher 出队时与本地 peers.json 合成。
 /// 并发路数 N（OQ-19/TD-20，M2-16）：取 0x70 punchConcurrency 经 PunchPolicy.Normalize 校验
 /// （1~5 缺省 3），经 0x71/0x70 Ack 的 PunchCount 统一回填——双方该次打洞执行同一 N（02 §5.2②）。
+/// 会话台账（M2-07）：结束后短期保留 sessionId → (A,B) 设备对，供 0x74 RelayAllocate 解析对端。
 /// 0x72 PunchResult 处理属 FR-C-404 → M2。
 /// </summary>
 public sealed class SignalingCoordinator : IAsyncDisposable
 {
     public static readonly TimeSpan SessionTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>打洞会话台账保留期：覆盖打洞执行超时（10s）与失败上报/中继申请的到达余量。</summary>
+    public static readonly TimeSpan RelayLedgerTtl = TimeSpan.FromSeconds(120);
 
     private readonly IDbContextFactory<AppDbContext> _dbFactory;
     private readonly DeviceRegistry _registry;
@@ -25,6 +31,7 @@ public sealed class SignalingCoordinator : IAsyncDisposable
     private readonly TimeSpan _sessionTimeout; // appsettings punch.timeoutSec（08 §5.1）
     private readonly object _gate = new();
     private readonly Dictionary<Guid, PunchSession> _sessions = [];   // sessionId → 活跃会话
+    private readonly Dictionary<Guid, (Guid InitiatorId, Guid TargetId, DateTimeOffset ExpiresAt)> _relayLedger = []; // 结束会话台账（0x74 对端解析）
     private readonly Queue<(ControlSession Session, PunchRequest Msg)> _pending = new(); // 排队申请
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _reaper;
@@ -53,6 +60,7 @@ public sealed class SignalingCoordinator : IAsyncDisposable
         public required PeerInfo TargetInfo { get; init; }
         public required EndpointPair RequesterEndpoints { get; init; }
         public required byte PunchCount { get; init; }
+        public required bool RelayAllowed { get; init; }               // relay_enabled 合成（M2-07）
         public required DateTimeOffset CreatedAt { get; init; }
     }
 
@@ -118,6 +126,8 @@ public sealed class SignalingCoordinator : IAsyncDisposable
             RequesterEndpoints = msg.RequesterEndpoints ?? new EndpointPair(null, null),
             // OQ-19/TD-20（M2-16）：取发起方请求值（越界/缺省 → 3，容忍哲学），Ack/Invite 统一回填
             PunchCount = PunchPolicy.Normalize(msg.PunchConcurrency),
+            // M2-07：全局开关 AND 限速余量（余量判断 M3 前恒真）——与设备级 peers.json 在客户端合成（05 §3.1）
+            RelayAllowed = new ServerConfigStore(db).GetBool("relay_enabled"),
             CreatedAt = _time.GetLocalNow(),
         };
 
@@ -132,9 +142,9 @@ public sealed class SignalingCoordinator : IAsyncDisposable
             _sessions[s.SessionId] = s;
         }
 
-        // ① 第一段：向 B 下发 PunchInvite（A 信息/端点/N/relayAllowed=false，02 §5.1②）
+        // ① 第一段：向 B 下发 PunchInvite（A 信息/端点/N/relayAllowed，02 §5.1②）
         var invite = new PunchInvite(s.Target.NextSeq(), s.Target.ServerTimestamp(), MsgType.PunchInvite,
-            s.SessionId, s.InitiatorInfo, s.RequesterEndpoints, s.PunchCount, RelayAllowed: false);
+            s.SessionId, s.InitiatorInfo, s.RequesterEndpoints, s.PunchCount, s.RelayAllowed);
         await SafePushAsync(s.Target, invite); // B 中途掉线：由 reaper 超时收尾
     }
 
@@ -148,15 +158,32 @@ public sealed class SignalingCoordinator : IAsyncDisposable
             if (!_sessions.TryGetValue(msg.SessionId, out s)) return; // 迟到上报：会话已收尾
             if (s.TargetId != session.DeviceId) return;               // 仅被邀请方可上报本会话
             _sessions.Remove(msg.SessionId); // 端点就绪 → 会话完成
+            RetainForRelayNoLock(s); // 台账：0x74 打洞失败后解析对端（M2-07）
         }
 
         // ② 第二段：向 A 下发延后 Ack（B 信息 + B 端点；OQ-18/TD-19）
         var ack = new PunchRequestAck(s.Initiator.NextSeq(), s.Initiator.ServerTimestamp(),
-            MsgType.PunchRequest, s.SessionId, s.TargetInfo, msg.Endpoints, s.PunchCount, RelayAllowed: false);
+            MsgType.PunchRequest, s.SessionId, s.TargetInfo, msg.Endpoints, s.PunchCount, s.RelayAllowed);
         await SafePushAsync(s.Initiator, ack); // A 中途掉线：无接收方，静默
 
         await ProcessQueueAsync();
     }
+
+    /// <summary>0x74 中继分配的设备对解析（02 §6.1①，M2-07）：打洞会话结束后台账短期保留。</summary>
+    public (Guid InitiatorId, Guid TargetId)? ResolveRelayPeers(Guid punchSessionId)
+    {
+        lock (_gate)
+        {
+            if (_relayLedger.TryGetValue(punchSessionId, out var r)
+                && r.ExpiresAt > _time.GetLocalNow())
+                return (r.InitiatorId, r.TargetId);
+            return null;
+        }
+    }
+
+    /// <summary>结束会话入台账（须持锁）：完成与超时两路径共用。</summary>
+    private void RetainForRelayNoLock(PunchSession s)
+        => _relayLedger[s.SessionId] = (s.InitiatorId, s.TargetId, _time.GetLocalNow() + RelayLedgerTtl);
 
     /// <summary>排队申请推进：A、B 均空闲者依次启动。</summary>
     private async Task ProcessQueueAsync()
@@ -218,7 +245,14 @@ public sealed class SignalingCoordinator : IAsyncDisposable
                 {
                     foreach (var s in _sessions.Values.Where(s => now - s.CreatedAt > _sessionTimeout))
                         expired.Add(s);
-                    foreach (var s in expired) _sessions.Remove(s.SessionId);
+                    foreach (var s in expired)
+                    {
+                        _sessions.Remove(s.SessionId);
+                        RetainForRelayNoLock(s); // 超时收尾同样可中继（0x76 未达≠不可回退，M2-07）
+                    }
+                    foreach (var stale in _relayLedger.Where(kv => kv.Value.ExpiresAt <= now)
+                                 .Select(kv => kv.Key).ToList())
+                        _relayLedger.Remove(stale);
                 }
                 foreach (var s in expired)
                     await SafeErrorAsync(s.Initiator, ErrorCode.PunchFailed, "invite_timeout");

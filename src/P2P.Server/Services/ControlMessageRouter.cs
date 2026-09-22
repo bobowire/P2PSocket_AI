@@ -5,7 +5,8 @@ namespace P2P.Server.Services;
 /// <summary>
 /// 控制消息分发器（05 §5）：ControlSession 完成帧校验后按 msgType 路由到处理器。
 /// passive 主动类拦截（02 §2.5，SEC-51）在路由入口统一执行。
-/// M1-14~17 挂载注册/用户/分组/信令族；M1-28 挂载映射 0x60/0x61（0x62 状态上报 → M2）。
+/// M1-14~17 挂载注册/用户/分组/信令族；M1-28 挂载映射 0x60/0x61（0x62 状态上报 → M2）；
+/// M2-07 挂载中继 0x74 RelayAllocate。
 /// </summary>
 public sealed class ControlMessageRouter
 {
@@ -14,16 +15,19 @@ public sealed class ControlMessageRouter
     private readonly GroupService _group;
     private readonly SignalingCoordinator _signaling;
     private readonly MappingService _mappings;
+    private readonly RelayService _relay;
     private readonly AuditLogger _audit;
 
     public ControlMessageRouter(RegistrationService registration, UserService user,
-        GroupService group, SignalingCoordinator signaling, MappingService mappings, AuditLogger audit)
+        GroupService group, SignalingCoordinator signaling, MappingService mappings,
+        RelayService relay, AuditLogger audit)
     {
         _registration = registration;
         _user = user;
         _group = group;
         _signaling = signaling;
         _mappings = mappings;
+        _relay = relay;
         _audit = audit;
     }
 
@@ -74,6 +78,9 @@ public sealed class ControlMessageRouter
                 break;
             case PunchEndpoint punchEndpoint:
                 await _signaling.HandlePunchEndpointAsync(session, punchEndpoint);
+                break;
+            case RelayAllocate relayAllocate:
+                await _relay.HandleAllocateAsync(session, relayAllocate);
                 break;
             case MappingUpsert mappingUpsert:
                 await _mappings.HandleUpsertAsync(session, mappingUpsert);

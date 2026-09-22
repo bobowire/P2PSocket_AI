@@ -24,6 +24,7 @@ public sealed class RegistrationIntegrationTests : IAsyncLifetime
     private readonly string _stateDir = Path.Combine(Path.GetTempPath(), "p2p-it-" + Guid.NewGuid().ToString("N"));
     private ControlServer _server = null!;
     private SignalingCoordinator _signaling = null!;
+    private RelayService _relay = null!;
     private StubFactory _factory = null!;
     private int _port;
 
@@ -35,12 +36,14 @@ public sealed class RegistrationIntegrationTests : IAsyncLifetime
             DbInitializer.Initialize(init);
         var audit = new AuditLogger(_factory);
         _signaling = new SignalingCoordinator(_factory, _registry, new Authorizer(_factory), audit);
+        _relay = new RelayService(_factory, _registry, _signaling.ResolveRelayPeers);
         var router = new ControlMessageRouter(
             new RegistrationService(_factory, _registry, audit),
             new UserService(_factory, audit),
             new GroupService(_factory, _registry),
             _signaling,
             new MappingService(_factory, audit),
+            _relay,
             audit);
         _server = new ControlServer(_factory, _registry, router.DispatchAsync);
         await _server.StartAsync(new IPEndPoint(IPAddress.Loopback, 0));
@@ -50,6 +53,7 @@ public sealed class RegistrationIntegrationTests : IAsyncLifetime
     public async Task DisposeAsync()
     {
         await _server.DisposeAsync();
+        await _relay.DisposeAsync();
         await _signaling.DisposeAsync();
         _connection.Dispose();
         if (Directory.Exists(_stateDir)) Directory.Delete(_stateDir, true);

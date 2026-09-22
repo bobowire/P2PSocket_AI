@@ -20,6 +20,7 @@ public sealed class MappingTests : IAsyncLifetime
     private readonly List<TestPcpClient> _clients = [];
     private ControlServer _server = null!;
     private SignalingCoordinator _signaling = null!;
+    private RelayService _relay = null!;
     private StubFactory _factory = null!;
 
     public async Task InitializeAsync()
@@ -31,12 +32,14 @@ public sealed class MappingTests : IAsyncLifetime
 
         var audit = new AuditLogger(_factory);
         _signaling = new SignalingCoordinator(_factory, _registry, new Authorizer(_factory), audit);
+        _relay = new RelayService(_factory, _registry, _signaling.ResolveRelayPeers);
         var router = new ControlMessageRouter(
             new RegistrationService(_factory, _registry, audit),
             new UserService(_factory, audit),
             new GroupService(_factory, _registry),
             _signaling,
             new MappingService(_factory, audit),
+            _relay,
             audit);
         _server = new ControlServer(_factory, _registry, router.DispatchAsync);
         await _server.StartAsync(new IPEndPoint(IPAddress.Loopback, 0));
@@ -44,6 +47,7 @@ public sealed class MappingTests : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
+        await _relay.DisposeAsync();
         foreach (var c in _clients) await c.DisposeAsync();
         await _server.DisposeAsync();
         await _signaling.DisposeAsync();

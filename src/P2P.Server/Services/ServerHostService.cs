@@ -6,8 +6,8 @@ namespace P2P.Server.Services;
 
 /// <summary>
 /// 服务端启动编排（01 §3.1 单进程多服务；IHostedService）：
-/// 启动序：数据库迁移+种子 → 控制面监听 → STUN UDP → （构造即运行的监视器/信令 reaper 已随后就绪）。
-/// 停机逆序：STUN → 控制面（关闭全部会话）→ 监视器 → 信令。
+/// 启动序：数据库迁移+种子 → 控制面监听 → STUN UDP → 中继 UDP/TCP → （构造即运行的监视器/信令 reaper 已随后就绪）。
+/// 停机逆序：中继 → STUN → 控制面（关闭全部会话）→ 监视器 → 信令。
 /// </summary>
 public sealed class ServerHostService(IServiceProvider sp, ILogger<ServerHostService> logger, ServerOptions options)
     : IHostedService
@@ -31,6 +31,12 @@ public sealed class ServerHostService(IServiceProvider sp, ILogger<ServerHostSer
         logger.LogInformation("STUN-R 监听 0.0.0.0:{Udp}/udp + {Tcp}/tcp（02 §3，四道闸 TD-18）",
             options.Listen.StunUdp, options.Listen.StunTcp);
 
+        // 3.5) 中继双承载（listen.relayPorts[0]=UDP、[1]=TCP，02 §6；relay_enabled 关仅拒分配不停端口）
+        var relay = sp.GetRequiredService<RelayService>();
+        await relay.StartAsync(options.Listen.RelayPorts[0], options.Listen.RelayPorts[1]);
+        logger.LogInformation("中继监听 0.0.0.0:{Udp}/udp + {Tcp}/tcp（空闲回收 {Idle}s，TD-11 零解密）",
+            options.Listen.RelayPorts[0], options.Listen.RelayPorts[1], options.Relay.IdleTimeoutSec);
+
         // 4) 显式触发构造（后台循环随构造启动；无端口绑定，仅确认装配完整）
         _ = sp.GetRequiredService<PresenceMonitor>();
         _ = sp.GetRequiredService<SignalingCoordinator>();
@@ -41,6 +47,8 @@ public sealed class ServerHostService(IServiceProvider sp, ILogger<ServerHostSer
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         logger.LogInformation("服务端停机中……");
+
+        await sp.GetRequiredService<RelayService>().DisposeAsync();
 
         var stun = sp.GetRequiredService<StunService>();
         await stun.DisposeAsync();
