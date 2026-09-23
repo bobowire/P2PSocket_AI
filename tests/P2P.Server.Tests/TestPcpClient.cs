@@ -38,6 +38,8 @@ internal sealed class TestPcpClient : IAsyncDisposable
     public byte[] ConnMacKey { get; private set; } = [];
     /// <summary>自此服务端入站消息全部签名（ProofAck(true)/RegisterAck 后手动置位）。</summary>
     public bool IncomingSigned { get; set; }
+    /// <summary>消息时间戳时钟（默认系统真实时钟）：假时钟夹具注入后与服务端 TsWindow 对齐（M2-19）。</summary>
+    public TimeProvider? Time { get; set; }
 
     public static async Task<TestPcpClient> ConnectAsync(IPEndPoint endpoint)
     {
@@ -48,7 +50,7 @@ internal sealed class TestPcpClient : IAsyncDisposable
     }
 
     public uint NextSeq() => ++_seq;
-    public ulong Now() => (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    public ulong Now() => (ulong)(Time?.GetLocalNow() ?? DateTimeOffset.UtcNow).ToUnixTimeMilliseconds();
 
     public async Task SendAsync<T>(T message, bool sign = true, byte[]? keyOverride = null)
         where T : class, IPcpMessage

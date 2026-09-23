@@ -129,6 +129,7 @@ public sealed class RelayService : IAsyncDisposable
             _table[sid] = new RelayEntry
             {
                 RelaySessionId = sid,
+                PunchSessionId = msg.SessionId, // M2-19：0x73 回切按打洞会话反查活中继（台账 120s 外的解析兜底）
                 A = new RelayEnd { DeviceId = p.InitiatorId, ControlIp = session.RemoteEndPoint?.Address ?? IPAddress.Any },
                 B = new RelayEnd { DeviceId = p.TargetId, ControlIp = target.RemoteEndPoint?.Address ?? IPAddress.Any },
                 CreatedAt = _time.GetLocalNow(),
@@ -138,6 +139,17 @@ public sealed class RelayService : IAsyncDisposable
 
         await SafePushAsync(session, BuildGrant(session, sid)); // A（申请方）
         await SafePushAsync(target, BuildGrant(target, sid));   // B（对端，02 §6.1② 双方下发）
+    }
+
+    /// <summary>按打洞 sessionId 反查活跃中继会话的设备对（M2-19 回切，02 §6.2）：SignalingCoordinator
+    /// 处理 0x73 时台账（120s）已过期的兜底——中继会话存活期间设备对始终可解析。</summary>
+    public (Guid InitiatorId, Guid TargetId)? ResolveActiveRelay(Guid punchSessionId)
+    {
+        lock (_gate)
+        {
+            var entry = _table.Values.FirstOrDefault(e => e.PunchSessionId == punchSessionId);
+            return entry is null ? null : (entry.A.DeviceId, entry.B.DeviceId);
+        }
     }
 
     /// <summary>RelayGrant 端点派生：本控制连接的本地侧地址（客户端经哪块网卡到达即回哪个地址）。</summary>
@@ -446,6 +458,7 @@ public sealed class RelayService : IAsyncDisposable
     private sealed class RelayEntry
     {
         public required ulong RelaySessionId { get; init; }
+        public required Guid PunchSessionId { get; init; } // 触发分配的打洞会话（M2-19 回切反查）
         public required RelayEnd A { get; init; } // 访问方（0x74 发起侧）
         public required RelayEnd B { get; init; } // 服务方
         public required DateTimeOffset CreatedAt { get; init; }

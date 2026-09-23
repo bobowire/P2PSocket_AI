@@ -13,6 +13,8 @@ namespace P2P.Server.Tests;
 /// <summary>
 /// 两段式打洞信令测试（02 §5.1、OQ-18/TD-19；完成判定：授权通过全链路、L2 拒 4001+审计、
 /// 同目标并发排队、B 端点上报前 Ack 不下发、B 离线 4005、超时 5001）。
+/// M2-19 增 0x73 PunchRetry 回切协调（台账命中双端通知/活中继反查兜底/非发起方 1001/
+/// 未知会话 1001/目标离线 4005）。
 /// </summary>
 public sealed class SignalingTests : IAsyncLifetime
 {
@@ -33,8 +35,12 @@ public sealed class SignalingTests : IAsyncLifetime
         _time = new FakeTimeProvider(DateTimeOffset.UtcNow);
 
         var audit = new AuditLogger(factory, _time);
-        _signaling = new SignalingCoordinator(factory, _registry, new Authorizer(factory), audit, _time);
-        _relay = new RelayService(factory, _registry, _signaling.ResolveRelayPeers, time: _time);
+        // 活中继反查缝（M2-19 回切）：闭包捕获字段延迟解环——_relay 构造依赖 _signaling 台账委托
+        _signaling = new SignalingCoordinator(factory, _registry, new Authorizer(factory), audit, _time,
+            activeRelayLookup: id => _relay?.ResolveActiveRelay(id));
+        _relay = new RelayService(factory, _registry, _signaling.ResolveRelayPeers,
+            new RelayServiceOptions { IdleTimeout = TimeSpan.FromHours(1) }, // 台账过期用例推进假时钟 121s：中继条目须存活
+            time: _time);
         var router = new ControlMessageRouter(
             new RegistrationService(factory, _registry, audit, _time),
             new UserService(factory, audit, _time),
@@ -59,10 +65,12 @@ public sealed class SignalingTests : IAsyncLifetime
     private AppDbContext CreateDb() => new(
         new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options);
 
-    /// <summary>注册设备（默认组成员 → 双方可见，02 §2.4）。</summary>
+    /// <summary>注册设备（默认组成员 → 双方可见，02 §2.4）。时间戳对齐假时钟（M2-19 回切用例
+    /// Advance 121s 后 0x73 仍须落在 TsWindow 内——真实时钟会偏出 ±30s 被拒 5005）。</summary>
     private async Task<(TestPcpClient Client, Guid DeviceId, string MacCode)> RegisterAsync(string name)
     {
         var client = await TestPcpClient.ConnectAsync(_server.LocalEndPoint!);
+        client.Time = _time;
         _clients.Add(client);
         await client.HelloAsync(deviceId: null);
         var key = EcKeyPair.Generate();
@@ -285,5 +293,96 @@ public sealed class SignalingTests : IAsyncLifetime
         _time.Advance(TimeSpan.FromSeconds(11)); // 超过 10s 会话超时
         var error = await a.ReceiveAsync<ErrorMessage>();
         Assert.Equal(ErrorCode.PunchFailed, error!.Code);
+    }
+
+    // ── M2-19：0x73 PunchRetry 回切协调（02 §6.2/OQ-7）────────────────
+
+    /// <summary>两段式打到台账在册（供 0x73 用例取 sessionId；A 收延后 Ack）。</summary>
+    private async Task<Guid> PunchToLedgerAsync(TestPcpClient a, TestPcpClient b, Guid bId)
+    {
+        await a.SendAsync(new PunchRequest(a.NextSeq(), a.Now(), MsgType.PunchRequest,
+            bId, null, "udp", UdpOnly("203.0.113.10", 50000), null));
+        var invite = await b.ReceiveAsync<PunchInvite>() ?? throw new IOException("B 未收到 PunchInvite");
+        await b.SendAsync(new PunchEndpoint(b.NextSeq(), b.Now(), MsgType.PunchEndpoint,
+            invite.SessionId, UdpOnly("198.51.100.20", 50001)));
+        var ack = await a.ReceiveAsync<PunchRequestAck>() ?? throw new IOException("A 未收到延后 Ack");
+        return ack.SessionId;
+    }
+
+    [Fact]
+    public async Task Retry_LedgerHit_BothEndsNotifiedWithOriginalSessionId()
+    {
+        var (a, _, _) = await RegisterAsync("retry-a");
+        var (b, bId, _) = await RegisterAsync("retry-b");
+        var sessionId = await PunchToLedgerAsync(a, b, bId);
+
+        await a.SendAsync(new PunchRetry(a.NextSeq(), a.Now(), MsgType.PunchRetry, sessionId));
+
+        // A 侧同族 0x73 应答（受理回执）+ B 侧推送（重打预备通知）：载荷均为原 sessionId（02 §6.2）
+        var ackA = await a.ReceiveAsync<PunchRetry>() ?? throw new IOException("A 未收到回切应答");
+        Assert.Equal(sessionId, ackA.SessionId);
+        var pushB = await b.ReceiveAsync<PunchRetry>() ?? throw new IOException("B 未收到重打通知");
+        Assert.Equal(sessionId, pushB.SessionId);
+    }
+
+    [Fact]
+    public async Task Retry_LedgerExpired_ActiveRelayFallback_StillResolved()
+    {
+        var (a, _, _) = await RegisterAsync("relay-lookup-a");
+        var (b, bId, _) = await RegisterAsync("relay-lookup-b");
+        var sessionId = await PunchToLedgerAsync(a, b, bId);
+
+        // 中继会话建立（0x74：分配即记录 PunchSessionId，M2-19 反查依据）
+        await a.SendAsync(new RelayAllocate(a.NextSeq(), a.Now(), MsgType.RelayAllocate, sessionId));
+        _ = await a.ReceiveAsync<RelayGrant>();
+        _ = await b.ReceiveAsync<RelayGrant>();
+
+        _time.Advance(TimeSpan.FromSeconds(121)); // 台账（120s）过期；中继条目存活（IdleTimeout=1h）
+
+        await a.SendAsync(new PunchRetry(a.NextSeq(), a.Now(), MsgType.PunchRetry, sessionId));
+        var ackA = await a.ReceiveAsync<PunchRetry>() ?? throw new IOException("活中继反查未生效");
+        Assert.Equal(sessionId, ackA.SessionId);
+        _ = await b.ReceiveAsync<PunchRetry>();
+    }
+
+    [Fact]
+    public async Task Retry_NonInitiator_Rejected1001()
+    {
+        var (a, _, _) = await RegisterAsync("retry-ni-a");
+        var (b, bId, _) = await RegisterAsync("retry-ni-b");
+        var sessionId = await PunchToLedgerAsync(a, b, bId);
+
+        // 被邀请方（非发起方）不可触发回切协调：1001（防双端同时重打，02 §6.2）
+        await b.SendAsync(new PunchRetry(b.NextSeq(), b.Now(), MsgType.PunchRetry, sessionId));
+        var error = await b.ReceiveAsync<ErrorMessage>();
+        Assert.Equal(ErrorCode.BadRequest, error!.Code);
+    }
+
+    [Fact]
+    public async Task Retry_UnknownSession_Rejected1001()
+    {
+        var (a, _, _) = await RegisterAsync("retry-unk-a");
+
+        await a.SendAsync(new PunchRetry(a.NextSeq(), a.Now(), MsgType.PunchRetry, Guid.NewGuid()));
+        var error = await a.ReceiveAsync<ErrorMessage>();
+        Assert.Equal(ErrorCode.BadRequest, error!.Code);
+    }
+
+    [Fact]
+    public async Task Retry_TargetOffline_Gets4005()
+    {
+        var (a, _, _) = await RegisterAsync("retry-off-a");
+        var (b, bId, _) = await RegisterAsync("retry-off-b");
+        var sessionId = await PunchToLedgerAsync(a, b, bId);
+        await b.DisposeAsync();
+        _clients.Remove(b);
+
+        var deadline = Environment.TickCount + 5000;
+        while (_registry.IsOnline(bId) && Environment.TickCount < deadline)
+            await Task.Delay(20);
+
+        await a.SendAsync(new PunchRetry(a.NextSeq(), a.Now(), MsgType.PunchRetry, sessionId));
+        var error = await a.ReceiveAsync<ErrorMessage>();
+        Assert.Equal(ErrorCode.TargetOffline, error!.Code);
     }
 }

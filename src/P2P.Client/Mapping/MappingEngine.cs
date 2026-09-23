@@ -8,6 +8,8 @@
 //   invalid=授权失效预留）；
 //   enable 前隧道复用检查：设备对隧道存活 → 直达 direct 不排队（02 §4.5 复用规则）；
 // - 隧道断链 → 该设备对映射回 punching 重新排队（02 §4.5 重建=新 sessionId）；
+// - M2-19 回切：直连会话挂入替换中继会话 → relay 态映射翻 direct（TunnelHost 排水窗内
+//   旧会话在途帧照常送达，channel 随旧会话关闭收尾——先排水后切换，NET-75）；
 // - 目标侧 self=127.0.0.1（D15）；非 self 属 M2 白名单（SEC-52 双保险的执行点）；
 // - UDP 映射（05 §2.4/FR-C-303/TD-15）→ M2。
 using System.Collections.Concurrent;
@@ -101,6 +103,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         _options = options ?? new MappingEngineOptions();
         _scheduler.PunchCompleted += OnPunchCompleted;
         _tunnels.SessionDisconnected += OnTunnelDisconnected;
+        _tunnels.SessionAttached += OnTunnelAttached;
     }
 
     /// <summary>更新监听绑定地址（01 §3.2 监听绑虚拟 IP）。向导路径冷启动时 VirtualIp 尚空、
@@ -358,19 +361,31 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         }
     }
 
-    private void OnTunnelDisconnected(Guid peerDeviceId, string reason)
+    /// <summary>会话挂入（M2-19）：本端无打洞结果的 Attach 路径（被邀请方应答/中继回退被动侧）——
+    /// 直连会话替换中继会话即回切完成，relay 态映射翻 direct（访问方重打路径经 OnPunchCompleted
+    /// 携带明细；此处统一兜底两侧，Punching/Failed 的常规翻牌仍由打洞结果驱动）。</summary>
+    private void OnTunnelAttached(TunnelSession session)
     {
-        foreach (var entry in _channels.Values.Where(e => e.Session.PeerDeviceId == peerDeviceId).ToList())
+        if (session.ViaRelay) return; // 中继会话挂入：relay 进入条件由打洞结果合成（M2-23/M2-18）
+        foreach (var rt in _mappings.Values.Where(r => r.Config.PeerDeviceId == session.PeerDeviceId))
+            if (rt.State == MappingState.Relay)
+                SetState(rt, MappingState.Direct, "relay_to_direct"); // 旧中继会话排水窗内收尾（NET-75）
+    }
+
+    private void OnTunnelDisconnected(TunnelSession session, string reason)
+    {
+        // 排水期新旧会话并存（M2-19）：只清理本会话的 channel（新会话的 channel 不受旧会话关闭影响）
+        foreach (var entry in _channels.Values.Where(e => e.Session == session).ToList())
             _ = CloseEntryAsync(entry, notifyPeer: false); // 会话已亡：只清本地
 
-        if (_tunnels.Get(peerDeviceId) is not null) return; // 已有新隧道（替换场景）：不回打
+        if (_tunnels.Get(session.PeerDeviceId) is not null) return; // 已有新隧道（替换场景）：不回打
 
-        foreach (var rt in _mappings.Values.Where(r => r.Config.PeerDeviceId == peerDeviceId))
+        foreach (var rt in _mappings.Values.Where(r => r.Config.PeerDeviceId == session.PeerDeviceId))
         {
-            // direct/relay 态承载断链均回 punching 重新竞争（02 §4.5 重建；中继回切直连属 M2-19）
+            // direct/relay 态承载断链均回 punching 重新竞争（02 §4.5 重建=新 sessionId）
             if (rt.State is not (MappingState.Direct or MappingState.Relay)) continue;
             SetState(rt, MappingState.Punching, $"reconnect: {reason}");
-            _scheduler.Enqueue(peerDeviceId, rt.Config.MappingId, rt.Config.Proto);
+            _scheduler.Enqueue(session.PeerDeviceId, rt.Config.MappingId, rt.Config.Proto);
         }
     }
 
@@ -491,6 +506,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
         _scheduler.PunchCompleted -= OnPunchCompleted;
         _tunnels.SessionDisconnected -= OnTunnelDisconnected;
+        _tunnels.SessionAttached -= OnTunnelAttached;
         foreach (var rt in _mappings.Values.ToList())
             await TeardownAsync(rt, MappingState.Disabled, "engine_disposed");
         _mappings.Clear();

@@ -14,6 +14,8 @@ namespace P2P.Server.Services;
 /// 并发路数 N（OQ-19/TD-20，M2-16）：取 0x70 punchConcurrency 经 PunchPolicy.Normalize 校验
 /// （1~5 缺省 3），经 0x71/0x70 Ack 的 PunchCount 统一回填——双方该次打洞执行同一 N（02 §5.2②）。
 /// 会话台账（M2-07）：结束后短期保留 sessionId → (A,B) 设备对，供 0x74 RelayAllocate 解析对端。
+/// 0x73 PunchRetry 回切协调（M2-19，02 §6.2/OQ-7）：台账 → 活中继反查解析设备对 →
+/// 校验访问方=原发起方 → 向双端下发 0x73（通知重打；A 侧应答兼受理回执，随后走全新 0x70）。
 /// 0x72 PunchResult 处理属 FR-C-404 → M2。
 /// </summary>
 public sealed class SignalingCoordinator : IAsyncDisposable
@@ -29,6 +31,7 @@ public sealed class SignalingCoordinator : IAsyncDisposable
     private readonly AuditLogger _audit;
     private readonly TimeProvider _time;
     private readonly TimeSpan _sessionTimeout; // appsettings punch.timeoutSec（08 §5.1）
+    private readonly Func<Guid, (Guid InitiatorId, Guid TargetId)?>? _activeRelayLookup; // 活中继反查（M2-19，RelayService）
     private readonly object _gate = new();
     private readonly Dictionary<Guid, PunchSession> _sessions = [];   // sessionId → 活跃会话
     private readonly Dictionary<Guid, (Guid InitiatorId, Guid TargetId, DateTimeOffset ExpiresAt)> _relayLedger = []; // 结束会话台账（0x74 对端解析）
@@ -38,7 +41,8 @@ public sealed class SignalingCoordinator : IAsyncDisposable
     private int _disposed; // 宿主 StopAsync 与容器释放各调一次（幂等）
 
     public SignalingCoordinator(IDbContextFactory<AppDbContext> dbFactory, DeviceRegistry registry,
-        Authorizer authorizer, AuditLogger audit, TimeProvider? time = null, TimeSpan? sessionTimeout = null)
+        Authorizer authorizer, AuditLogger audit, TimeProvider? time = null, TimeSpan? sessionTimeout = null,
+        Func<Guid, (Guid InitiatorId, Guid TargetId)?>? activeRelayLookup = null)
     {
         _dbFactory = dbFactory;
         _registry = registry;
@@ -46,6 +50,7 @@ public sealed class SignalingCoordinator : IAsyncDisposable
         _audit = audit;
         _time = time ?? TimeProvider.System;
         _sessionTimeout = sessionTimeout ?? SessionTimeout;
+        _activeRelayLookup = activeRelayLookup; // 台账（120s）外的回切解析兜底：中继会话存活即设备对在册
         _reaper = ReaperAsync(_cts.Token);
     }
 
@@ -179,6 +184,36 @@ public sealed class SignalingCoordinator : IAsyncDisposable
                 return (r.InitiatorId, r.TargetId);
             return null;
         }
+    }
+
+    // ── 0x73 PunchRetry 回切协调（M2-19，02 §6.2/OQ-7）───────────────
+
+    /// <summary>中继回切直连（OQ-7）：访问方 60s 周期请求协调重打。台账 → 活中继反查解析设备对，
+    /// 校验申请方=原发起方；通过则向双端下发 0x73{原 sessionId}（A 侧同族应答=受理回执，
+    /// B 侧推送=重打预备通知——实际端点交换与打洞由 A 随后的全新 0x70 驱动，02 §5.1 两段式不变）。</summary>
+    public async Task HandlePunchRetryAsync(ControlSession session, PunchRetry msg)
+    {
+        var peers = ResolveRelayPeers(msg.SessionId)
+            ?? _activeRelayLookup?.Invoke(msg.SessionId);
+        if (peers is not { } p || p.InitiatorId != session.DeviceId)
+        {
+            // 台账与活中继均无此会话/非发起方申请：1001——客户端退化为全新 0x70（等效回切路径）
+            await SafeErrorAsync(session, ErrorCode.BadRequest, "session_unknown");
+            return;
+        }
+
+        var target = _registry.TryGet(p.TargetId);
+        if (target is null)
+        {
+            await SafeErrorAsync(session, ErrorCode.TargetOffline, "target_offline");
+            return;
+        }
+
+        // 通知双端重打（02 §6.2：载荷均为原 sessionId）：A 的应答走同族 0x73（请求-应答配对，02 §2.4）
+        await SafePushAsync(session, new PunchRetry(session.NextSeq(), session.ServerTimestamp(),
+            MsgType.PunchRetry, msg.SessionId));
+        await SafePushAsync(target, new PunchRetry(target.NextSeq(), target.ServerTimestamp(),
+            MsgType.PunchRetry, msg.SessionId));
     }
 
     /// <summary>结束会话入台账（须持锁）：完成与超时两路径共用。</summary>

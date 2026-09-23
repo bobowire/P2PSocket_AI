@@ -6,7 +6,7 @@ namespace P2P.Server.Services;
 /// 控制消息分发器（05 §5）：ControlSession 完成帧校验后按 msgType 路由到处理器。
 /// passive 主动类拦截（02 §2.5，SEC-51）在路由入口统一执行。
 /// M1-14~17 挂载注册/用户/分组/信令族；M1-28 挂载映射 0x60/0x61（0x62 状态上报 → M2）；
-/// M2-07 挂载中继 0x74 RelayAllocate。
+/// M2-07 挂载中继 0x74 RelayAllocate；M2-19 挂载回切 0x73 PunchRetry。
 /// </summary>
 public sealed class ControlMessageRouter
 {
@@ -78,6 +78,9 @@ public sealed class ControlMessageRouter
                 break;
             case PunchEndpoint punchEndpoint:
                 await _signaling.HandlePunchEndpointAsync(session, punchEndpoint);
+                break;
+            case PunchRetry punchRetry: // 0x73 中继回切协调（M2-19，02 §6.2/OQ-7）
+                await _signaling.HandlePunchRetryAsync(session, punchRetry);
                 break;
             case RelayAllocate relayAllocate:
                 await _relay.HandleAllocateAsync(session, relayAllocate);

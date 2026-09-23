@@ -17,11 +17,12 @@ using Xunit.Abstractions;
 namespace P2P.IntegrationTests;
 
 /// <summary>
-/// 集成场景自动化 A-1~A-5 + M2-18 中继回退（09 §2.3；M1-35 交付 A-1~A-4、M2-31 交付 A-5 TCP 打洞命中率矩阵、
-/// M2-18 交付承载绑定中继路径）。三进程 in-proc：服务端 + 双客户端（各自独立 baseDir）；网卡以 StubNicManager
+/// 集成场景自动化 A-1~A-5 + M2-18 中继回退 + M2-19 中继回切直连（09 §2.3；M1-35 交付 A-1~A-4、
+/// M2-31 交付 A-5 TCP 打洞命中率矩阵、M2-18 交付承载绑定中继路径、M2-19 交付回切排水切换）。
+/// 三进程 in-proc：服务端 + 双客户端（各自独立 baseDir）；网卡以 StubNicManager
 /// 替身、虚拟 IP 用 127.0.0.x 回环别名（A-4 隔离语义在 127.0.0.0/8 内等价成立）；A-3/A-4 打洞链路经
 /// NatSimulator（STUN 派生 :3478，TD-07），A-5 双端 SymmetricSequential 经 TcpNatSimulator（TD-17/21），
-/// M2-18 复用 A-5 miss 世界（打洞必败）驱动中继回退。
+/// M2-18 复用 A-5 miss 世界（打洞必败）驱动中继回退，M2-19 借其扰动一次性在重打时耗尽驱动回切命中。
 /// 全运行时重组件专用集合（与 ClientRuntimeIntegrationTests 共用）：每用例拉起双 Kestrel+服务端+打洞链路，
 /// 相互串行避免与轻量类并行时叠加满载偶发（沿 M1-31 加固惯例）。
 /// </summary>
@@ -175,14 +176,16 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         return group;
     }
 
-    /// <summary>启动客户端运行时（网卡替身 + 打洞 socket 绑内网别名缝；诊断日志进测试产物）。</summary>
-    private async Task<HttpClient> StartRuntimeAsync(SeededClient c)
+    /// <summary>启动客户端运行时（网卡替身 + 打洞 socket 绑内网别名缝；诊断日志进测试产物；
+    /// relayRetryInterval：M2-19 回切 60s 周期的缩短缝——周期机制本身驱动回切，间接验证触发）。</summary>
+    private async Task<HttpClient> StartRuntimeAsync(SeededClient c, TimeSpan? relayRetryInterval = null)
     {
         var runtime = new ClientRuntime(new ClientRuntimeOptions
         {
             BaseDir = c.Dir,
             NicOverride = _nic,
             PunchBindOverride = c.Ip,
+            RelayRetryIntervalOverride = relayRetryInterval,
         });
         runtime.Log += m => _output.WriteLine($"[{c.Ip}] {m}");
         await runtime.StartAsync();
@@ -750,5 +753,102 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
 
         // 同隧道第二 channel：第二条映射虚拟地址同样可访问
         await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort2, RandomGenerator.Bytes(8 * 1024));
+    }
+
+    // ── M2-19 中继回切直连（02 §6.2/OQ-7/NET-75）──────────────────────
+
+    /// <summary>A-5 miss 同构世界（扰动一次性）+ 回退开 → relay 态；60s 周期缩短 3s（测试缝）驱动回切
+    /// 协调（0x73 → 全新 0x70）→ 重打时扰动已耗尽 → SymmetricSequential×2 同 N=2 干净命中 → 直连会话
+    /// 替换中继（排水窗 2s，NET-75）→ 映射 relay→direct。序号载荷校验：relay 承载上持续写递增序号，
+    /// echo 回程连续无缺无重无乱序直至断连止；新连接走新直连路径完整往返。</summary>
+    [Fact]
+    public async Task M2_19_中继回切直连_周期触发重打命中_排水切换序号不丢不乱()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone), tcpStub: false);
+        await StartTcpSimulatorAsync(perturbB: 2); // 首打 miss；扰动一次性——重打时已耗尽 → 命中
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("r19-a", IPAddress.Parse("127.0.0.4"), group, punchConcurrency: 2);
+        var b = await SeedClientAsync("r19-b", IPAddress.Parse("127.0.0.5"), group, punchConcurrency: 2);
+        var httpA = await StartRuntimeAsync(a, relayRetryInterval: TimeSpan.FromSeconds(3));
+        var httpB = await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+        await WaitPhaseAsync(httpB, "running");
+
+        var put = await PutAsync(httpA, $"/api/peers/{b.DeviceId}", new { relayFallback = true });
+        Assert.Equal(0, put.GetProperty("code").GetInt32());
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+
+        // ① 首打 miss + 回退开 → 中继承载（relay 态，M2-18 路径）
+        await WaitMappingStateAsync(httpA, "relay", seconds: 40);
+
+        // ② 序号载荷流（NET-75）：relay 承载上 100ms 一笔递增序号，echo 回程收集至断连
+        using var seqClient = new TcpClient();
+        await seqClient.ConnectAsync(IPAddress.Parse("127.0.0.4"), localPort);
+        var seqStream = seqClient.GetStream();
+        using var writeCts = new CancellationTokenSource(TimeSpan.FromSeconds(120)); // 失败路径防挂起
+        var writeTask = Task.Run(async () =>
+        {
+            var seq = 0;
+            try
+            {
+                while (true)
+                {
+                    await seqStream.WriteAsync(Encoding.ASCII.GetBytes($"{seq}\n"), writeCts.Token);
+                    seq++;
+                    await Task.Delay(100, writeCts.Token);
+                }
+            }
+            catch { /* 断连止（排水窗到期旧中继会话关闭） */ }
+        });
+        var readTask = Task.Run(async () =>
+        {
+            List<int> seqs = [];
+            var pending = new StringBuilder();
+            var buf = new byte[4096];
+            try
+            {
+                while (true)
+                {
+                    var n = await seqStream.ReadAsync(buf);
+                    if (n == 0) break; // 旧会话关闭 → channel 收尾 FIN
+                    pending.Append(Encoding.ASCII.GetString(buf, 0, n));
+                    while (true)
+                    {
+                        var line = pending.ToString();
+                        var nl = line.IndexOf('\n');
+                        if (nl < 0) break;
+                        if (int.TryParse(line.AsSpan(0, nl), out var s)) seqs.Add(s);
+                        pending.Remove(0, nl + 1);
+                    }
+                }
+            }
+            catch { /* 连接重置 */ }
+            return seqs;
+        });
+
+        // ③ 回切：3s 周期 → 0x73 → 全新 0x70 → 扰动耗尽命中 → direct（明细 relay_to_direct）
+        await WaitMappingStateAsync(httpA, "direct", seconds: 40);
+        var root = await GetAsync(httpA, "/api/mappings");
+        var item = root.GetProperty("data").GetProperty("items").EnumerateArray().Single();
+        Assert.Equal("relay_to_direct", item.GetProperty("detail").GetString());
+        _output.WriteLine("M2-19|relay-fallback-back|state=direct|detail=relay_to_direct");
+
+        // ④ 排水窗到期旧中继会话关闭 → 序号流断连止；已收序号从 0 严格递增（无缺无重无乱序——
+        //    断连后未送达的尾部写入不在顺序性语义内，NET-75）
+        var received = await readTask.WaitAsync(TimeSpan.FromSeconds(15)); // 排水 2s + 余量
+        await writeTask.WaitAsync(TimeSpan.FromSeconds(5)); // 写侧随断连自行收尾
+        Assert.NotEmpty(received);
+        for (var i = 0; i < received.Count; i++)
+            Assert.Equal(i, received[i]);
+
+        // ⑤ 新连接走新直连路径完整往返
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(40 * 1024));
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(3 * 1024));
     }
 }

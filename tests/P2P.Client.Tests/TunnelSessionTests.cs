@@ -182,9 +182,9 @@ public sealed class TunnelSessionTests
     [Fact]
     public async Task 会话表_取用_替换_移除_断链摘表()
     {
-        var host = new TunnelHost();
+        var host = new TunnelHost(TimeSpan.FromMilliseconds(100)); // M2-19 排水窗缩短（默认 2s，NET-75）
         var disconnected = new ConcurrentQueue<(Guid Peer, string Reason)>();
-        host.SessionDisconnected += (peer, reason) => disconnected.Enqueue((peer, reason));
+        host.SessionDisconnected += (s, reason) => disconnected.Enqueue((s.PeerDeviceId, reason));
         var peerB = Guid.NewGuid();
         await using (host)
         {
@@ -194,12 +194,14 @@ public sealed class TunnelSessionTests
             Assert.Same(a, host.Get(peerB));
             Assert.Null(host.Get(Guid.NewGuid()));
 
-            // 替换：同设备对新会话 → 旧会话销毁（replaced）+ 表内只剩新会话（02 §4.5 重建=新 sessionId）
+            // 替换：同设备对新会话 → 旧会话仍存活走排水窗延迟关闭（M2-19 NET-75：先排水后切换），
+            // 表内即刻只剩新会话（新会话承载后续流量不等排水）
             var (a2, _, _, _, _, _) = await EstablishAsync(peerB: peerB);
             host.Attach(a2);
-            Assert.True(a.IsClosed);
+            Assert.False(a.IsClosed); // 排水窗内旧会话保持接收（在途帧送达）
             Assert.Same(a2, host.Get(peerB));
-            Assert.Contains(disconnected, e => e.Peer == peerB && e.Reason.Contains("replaced"));
+            await UntilAsync(() => a.IsClosed, "排水窗到期旧会话关闭");
+            Assert.Contains(disconnected, e => e.Peer == peerB && e.Reason.Contains("replaced_drained"));
 
             // 主动移除（解绑/停机）
             await host.RemoveAsync(peerB, "unit");
@@ -212,6 +214,56 @@ public sealed class TunnelSessionTests
             a3.Close("unit");
             await UntilAsync(() => host.Get(peerB) is null, "断链摘表");
             Assert.Contains(disconnected, e => e.Peer == peerB && e.Reason.Contains("local_close"));
+        }
+    }
+
+    // ── M2-19 回切排水（NET-75：先排水后切换）──────────────────────
+
+    [Fact]
+    public async Task 回切排水_窗内旧会话在途帧送达_到期关闭_新会话即刻承载()
+    {
+        var host = new TunnelHost(TimeSpan.FromMilliseconds(400));
+        await using (host)
+        {
+            var peerB = Guid.NewGuid();
+            var (a, b, _, _, ha, _) = await EstablishAsync(peerB: peerB);
+            host.Attach(a);
+
+            var (a2, _, _, _, _, _) = await EstablishAsync(peerB: peerB);
+            TunnelSession? attached = null;
+            host.SessionAttached += s => attached = s;
+            host.Attach(a2); // 存活旧会话 → 排水窗延迟关闭（M2-19）
+
+            // 新会话即刻表内可用（后续流量不等排水）+ 挂入事件（引擎 relay→direct 翻转驱动）
+            Assert.Same(a2, host.Get(peerB));
+            Assert.Same(a2, attached);
+
+            // 排水窗内旧会话接收循环照常：B 发的 DATA（在途帧）仍送达 A 的 handler（NET-75 排空语义）
+            Assert.False(a.IsClosed);
+            await b.SendDataAsync(a.AllocateChannelId(), "in-flight"u8.ToArray());
+            await UntilAsync(() => ha.Events.Any(e => e.Kind == "data"), "排水窗内旧会话在途帧送达");
+
+            await UntilAsync(() => a.IsClosed, "排水窗到期旧会话关闭");
+            Assert.False(a2.IsClosed); // 新会话不受旧会话关闭影响
+            Assert.Same(a2, host.Get(peerB));
+        }
+    }
+
+    [Fact]
+    public async Task 已亡会话替换_立即关闭无排水窗()
+    {
+        var host = new TunnelHost(TimeSpan.FromSeconds(30)); // 长窗反证：已亡路径不等待
+        await using (host)
+        {
+            var peerB = Guid.NewGuid();
+            var (a, _, _, _, _, _) = await EstablishAsync(peerB: peerB);
+            host.Attach(a);
+            a.Close("dead"); // 重建场景：旧会话已亡（断链后重打）
+
+            var (a2, _, _, _, _, _) = await EstablishAsync(peerB: peerB);
+            host.Attach(a2);
+            Assert.True(a.IsClosed); // 立即（不等 30s 排水窗）
+            Assert.Same(a2, host.Get(peerB));
         }
     }
 

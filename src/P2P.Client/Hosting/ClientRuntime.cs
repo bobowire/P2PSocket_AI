@@ -39,6 +39,10 @@ public sealed record ClientRuntimeOptions
     /// <summary>打洞 socket 绑定地址覆盖缝（M1-35：NatSimulator 按源 IP 识别客户端 NAT，
     /// 双客户端打洞 socket 须各自绑定内网回环别名；生产 null=Any 全接口）。</summary>
     public IPAddress? PunchBindOverride { get; init; }
+
+    /// <summary>中继回切重试周期覆盖缝（M2-19）：生产 null=60s（PRD 06 §6/OQ-7 定值，
+    /// 非用户可调）；集成测试注入秒级缩短以验证周期触发与回切全链。</summary>
+    public TimeSpan? RelayRetryIntervalOverride { get; init; }
 }
 
 /// <summary>客户端全组件生命周期（单一属主；启动序=01 §4.1，停机序为其逆序）。</summary>
@@ -59,6 +63,7 @@ public sealed class ClientRuntime : IAsyncDisposable
     private ClientRegistrationService _wizard = null!;
     private LocalApiServices _api = null!;
     private WebApplication _app = null!;
+    private Task? _relayRetryLoop;
     private int _registeredPathStarted;
     private int _disposed;
 
@@ -183,6 +188,10 @@ public sealed class ClientRuntime : IAsyncDisposable
                 try { await _sync.EnableAsync(m.MappingId, CancellationToken.None); }
                 catch (Exception e) { Log?.Invoke($"[restore] 映射 {m.Name} 恢复失败：{e.Message}"); }
             }
+
+            // 中继回切周期循环（M2-19，02 §6.2/OQ-7）：relay 态设备对每 60s 重试直连
+            _relayRetryLoop = RelayRetryLoopAsync(_cts.Token);
+
             Log?.Invoke($"注册后路径完成：网卡已应用，映射恢复 {_state.State.Mappings.Count(m => m.Enabled)} 条");
         }
         catch (OperationCanceledException) { /* 停机 */ }
@@ -242,6 +251,10 @@ public sealed class ClientRuntime : IAsyncDisposable
                 break;
             case RelayGrant grant:
                 _ = HandleRelayGrantAsync(grant);
+                break;
+            case PunchRetry retry: // S→C 0x73（M2-19）：访问方发起侧由请求-应答通道消费不走此路径，
+                // 到达此处的必为被邀请方重打预备通知——实际端点交换由随后的 0x71 邀请驱动
+                Log?.Invoke($"[punch] 服务端回切通知（session={retry.SessionId}）：预备重打洞（02 §6.2）");
                 break;
         }
     }
@@ -362,6 +375,51 @@ public sealed class ClientRuntime : IAsyncDisposable
         {
             if (transport is not null) await transport.DisposeAsync(); // 握手未成：释放承载
         }
+    }
+
+    // ── 中继回切直连（M2-19，02 §6.2/OQ-7/NET-75）────────────────────
+
+    /// <summary>回切重试周期（PRD 06 §6 定值 60s；测试缝 RelayRetryIntervalOverride）。</summary>
+    private static readonly TimeSpan RelayRetryInterval = TimeSpan.FromSeconds(60);
+
+    /// <summary>relay 态设备对周期重试直连：访问方（会话发起侧，IsInitiator）每周期发 0x73 请求协调
+    /// （服务端台账/活中继解析 → 双端 0x73 通知；被邀请侧非发起方不触发，防双端同时重打）→
+    /// 随后入队全新 0x70 打洞（端点须新鲜，两段式不变）。成功 → 直连会话替换中继（TunnelHost
+    /// 排水窗，NET-75）→ 映射 relay→direct；失败且回退资格真 → 再走中继回退（会话对整体替换）。</summary>
+    private async Task RelayRetryLoopAsync(CancellationToken ct)
+    {
+        try
+        {
+            var interval = _options.RelayRetryIntervalOverride ?? RelayRetryInterval;
+            using var timer = new PeriodicTimer(interval);
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                foreach (var session in _host.Sessions.Where(s => s.ViaRelay && !s.IsClosed && s.IsInitiator))
+                {
+                    // proto 取该设备对 relay 态映射（隧道为设备对级资源，02 §4.5）；无映射兜底 udp
+                    var proto = _engine.Snapshots.FirstOrDefault(m =>
+                            m.Config.PeerDeviceId == session.PeerDeviceId && m.State == MappingState.Relay)
+                        ?.Config.Proto ?? "udp";
+                    try
+                    {
+                        await _control.SendRequestAsync<PunchRetry>(new PunchRetry(
+                            _control.NextSeq(), _control.TimestampMs(), MsgType.PunchRetry,
+                            session.SessionId), ct);
+                    }
+                    catch (ControlErrorException e)
+                    {
+                        // 台账/活中继均已不在册（1001 等）：退化为直接全新 0x70（等效回切路径）
+                        Log?.Invoke($"[relay] 回切协调被拒（{e.Code} {e.HttpLikeMsg}）：改走全新打洞");
+                    }
+                    catch (Exception e)
+                    {
+                        Log?.Invoke($"[relay] PunchRetry 发送失败：{e.Message}（下周期重试）");
+                    }
+                    _scheduler.Enqueue(session.PeerDeviceId, null, proto);
+                }
+            }
+        }
+        catch (OperationCanceledException) { /* 停机 */ }
     }
 
     /// <summary>STUN 端点派生：控制地址主机 + 3478（STUN 与控制同宿主，01 §5 TD-07）。</summary>

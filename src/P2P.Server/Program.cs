@@ -70,7 +70,9 @@ builder.Services.AddSingleton(sp => new SignalingCoordinator(
     sp.GetRequiredService<DeviceRegistry>(),
     sp.GetRequiredService<Authorizer>(),
     sp.GetRequiredService<AuditLogger>(),
-    sessionTimeout: TimeSpan.FromSeconds(options.Punch.TimeoutSec)));
+    sessionTimeout: TimeSpan.FromSeconds(options.Punch.TimeoutSec),
+    // M2-19 回切 0x73 解析兜底：活中继会话反查（闭包延迟解析——RelayService 构造依赖本类，调用期才解环）
+    activeRelayLookup: punchSessionId => sp.GetRequiredService<RelayService>().ResolveActiveRelay(punchSessionId)));
 builder.Services.AddSingleton(sp => new PresenceMonitor(
     sp.GetRequiredService<DeviceRegistry>(),
     sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),

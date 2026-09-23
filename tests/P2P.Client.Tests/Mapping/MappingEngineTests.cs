@@ -306,8 +306,8 @@ public sealed class MappingEngineTests
         topo.EngineB.Log += m => _output.WriteLine($"[EngineB] {m}");
         sessionA.Log += m => _output.WriteLine($"[SessionA] {m}");
         sessionA.Disconnected += (_, r) => _output.WriteLine($"[SessionA] Disconnected: {r}");
-        topo.HostA.SessionDisconnected += (p, r) => _output.WriteLine($"[HostA] peer={p} disconnected: {r}");
-        topo.HostB.SessionDisconnected += (p, r) => _output.WriteLine($"[HostB] peer={p} disconnected: {r}");
+        topo.HostA.SessionDisconnected += (s, r) => _output.WriteLine($"[HostA] peer={s.PeerDeviceId} disconnected: {r}");
+        topo.HostB.SessionDisconnected += (s, r) => _output.WriteLine($"[HostB] peer={s.PeerDeviceId} disconnected: {r}");
         await topo.EngineA.EnableAsync(new MappingConfig(mappingId, "m1", localPort, "tcp",
             "self", target.Port, topo.PeerB));
 

@@ -8,7 +8,7 @@
 | 清单 | 里程碑 | 出口标准 | 状态 |
 |---|---|---|---|
 | [M1-核心链路.md](M1-核心链路.md) | M1 · 核心链路可用（两台设备注册 + 第一条 UDP 直连映射） | 验收场景 A-1~A-4 通过 | ✅ 收官（2026-09-12；M1-37 Windows 轮完、环境依赖项转 M2 穿插，见清单附录 A.3 收官口径） |
-| [M2-打洞完整与授权闭环.md](M2-打洞完整与授权闭环.md) | M2 · 打洞完整与授权闭环（TCP 打洞、中继回退、分组与远程码全量生效） | 验收场景 A-5~A-9 通过 | 🔨 进行中（2026-09-12 起；M2-03/04/05/06/07/16/17/18/23/30/31 ✅ 11/35） |
+| [M2-打洞完整与授权闭环.md](M2-打洞完整与授权闭环.md) | M2 · 打洞完整与授权闭环（TCP 打洞、中继回退、分组与远程码全量生效） | 验收场景 A-5~A-9 通过 | 🔨 进行中（2026-09-12 起；M2-03/04/05/06/07/16/17/18/19/23/30/31 ✅ 12/35） |
 | M3（待建） | 管理面与可观测 | A-10~A-12 | — |
 | M4（待建） | 交付打磨 | 交付清单齐全 | — |
 
@@ -41,3 +41,4 @@
 | 2026-09-22 | **M2-17 RelayClient ✅**（9/35）——RelayClient 静态编排（AllocateAsync 0x74 族配对 + JoinAsync）+ RelayTransport:ITunnelTransport 双承载（UDP 500ms 窗重发 JOIN/[0x02]、TCP 首帧分帧；发送附加 8B sid、接收即裸 PTP 帧；90s 空闲自关闭 watchdog 兜底）；集成测 +5（含 Grant 双侧同 sid、密文逐字节往返、1001、JOIN 超时、FakeTime 空闲自关闭）；全仓 464 全绿、Core 83.61%、CI quick 通过 |
 | 2026-09-22 | **M2-23 peers.json 与 /api/peers ✅**（10/35）——PeersStore（{deviceId→relayFallback} 默认关/原子替换/损坏自愈/非法键容错）+ PeersApi GET·PUT（04 §2.4 形状、passive 2002）+ PunchOutcome.RelayAllowed 出队合成（本地配置 AND Ack.relayAllowed，仅 Ack 后失败携带，供 M2-18）；测 +12，全仓 476 全绿、Core 83.61%、CI quick 通过 |
 | 2026-09-23 | **M2-18 承载绑定与中继路径 ✅**（11/35）——回退链内联 Puncher（Ack 后失败+资格真→0x74→JOIN 先 UDP 后 TCP→中继上 PTP 握手，THello1 200ms 重发覆盖对端 JOIN 窗）+ 被邀请侧 RelayGrant 推送→THello1 sessionId 关联邀请上下文（120s TTL）应答握手 + TunnelSession.ViaRelay 驱动映射 relay 态/复用/断链回 punching（05 §4 注记，设计 v1.17）；测 +6，全仓 482 全绿、Core 83.61%、CI quick 通过 |
+| 2026-09-23 | **M2-19 中继回切直连 ✅**（12/35）——0x73 协调触发（IsInitiator 60s 周期[测试缝]→台账 120s 过期以 RelayService.ResolveActiveRelay 按 PunchSessionId 反查活中继兜底→双端通知，非发起方 1001；实际打洞由 A 全新 0x70 驱动，被拒退化全新 0x70）+ NET-75 排水切换落 TunnelHost.Attach（存活旧会话 2s 排水窗内接收照常后 replaced_drained、已亡立即 Close、会话表即刻指新）+ SessionDisconnected 携带会话对象/新增 SessionAttached 驱动 relay→direct（重打失败保持 relay 态服务连续、回退再走新中继会话双端整体替换防脑裂）（05 §4 注记，设计 v1.18）；集成测借扰动一次性天然舞台（首打 miss→relay、重打扰动耗尽→命中 direct+relay_to_direct+序号 0..K 严格连续+断连止+新连接 echo）；测 +8（信令 5/排水 2/集成 1），全仓 490 全绿、Core 83.61%、CI quick 通过 |

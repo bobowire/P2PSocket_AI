@@ -214,7 +214,7 @@ public sealed class ControlSession : IAsyncDisposable
             or MsgType.UserLogout or MsgType.Heartbeat or MsgType.DeviceList or MsgType.GroupCreate
             or MsgType.GroupUpdate or MsgType.GroupDissolve or MsgType.MappingUpsert or MsgType.MappingDelete
             or MsgType.MappingStatus or MsgType.PunchRequest or MsgType.PunchInvite or MsgType.PunchResult
-            or MsgType.PunchEndpoint or MsgType.RelayAllocate or MsgType.Error;
+            or MsgType.PunchEndpoint or MsgType.PunchRetry or MsgType.RelayAllocate or MsgType.Error;
 
     private static IPcpMessage DecodeTyped(byte[] msgpack, byte msgType) => msgType switch
     {
@@ -233,6 +233,7 @@ public sealed class ControlSession : IAsyncDisposable
         MsgType.MappingStatus => PcpCodec.Decode<MappingStatus>(msgpack),
         MsgType.PunchRequest => PcpCodec.Decode<PunchRequest>(msgpack),
         MsgType.PunchEndpoint => PcpCodec.Decode<PunchEndpoint>(msgpack),
+        MsgType.PunchRetry => PcpCodec.Decode<PunchRetry>(msgpack), // 0x73 回切协调（M2-19）
         MsgType.RelayAllocate => PcpCodec.Decode<RelayAllocate>(msgpack),
         MsgType.Error => PcpCodec.Decode<ErrorMessage>(msgpack),
         _ => PcpCodec.DecodeLoose(msgpack),
