@@ -8,7 +8,7 @@
 | 清单 | 里程碑 | 出口标准 | 状态 |
 |---|---|---|---|
 | [M1-核心链路.md](M1-核心链路.md) | M1 · 核心链路可用（两台设备注册 + 第一条 UDP 直连映射） | 验收场景 A-1~A-4 通过 | ✅ 收官（2026-09-12；M1-37 Windows 轮完、环境依赖项转 M2 穿插，见清单附录 A.3 收官口径） |
-| [M2-打洞完整与授权闭环.md](M2-打洞完整与授权闭环.md) | M2 · 打洞完整与授权闭环（TCP 打洞、中继回退、分组与远程码全量生效） | 验收场景 A-5~A-9 通过 | 🔨 进行中（2026-09-12 起；M2-03/04/05/06/07/16/17/18/19/23/30/31 ✅ 12/35） |
+| [M2-打洞完整与授权闭环.md](M2-打洞完整与授权闭环.md) | M2 · 打洞完整与授权闭环（TCP 打洞、中继回退、分组与远程码全量生效） | 验收场景 A-5~A-9 通过 | 🔨 进行中（2026-09-12 起；M2-03/04/05/06/07/16/17/18/19/23/30/31/32 ✅ 13/35） |
 | M3（待建） | 管理面与可观测 | A-10~A-12 | — |
 | M4（待建） | 交付打磨 | 交付清单齐全 | — |
 
@@ -42,3 +42,4 @@
 | 2026-09-22 | **M2-23 peers.json 与 /api/peers ✅**（10/35）——PeersStore（{deviceId→relayFallback} 默认关/原子替换/损坏自愈/非法键容错）+ PeersApi GET·PUT（04 §2.4 形状、passive 2002）+ PunchOutcome.RelayAllowed 出队合成（本地配置 AND Ack.relayAllowed，仅 Ack 后失败携带，供 M2-18）；测 +12，全仓 476 全绿、Core 83.61%、CI quick 通过 |
 | 2026-09-23 | **M2-18 承载绑定与中继路径 ✅**（11/35）——回退链内联 Puncher（Ack 后失败+资格真→0x74→JOIN 先 UDP 后 TCP→中继上 PTP 握手，THello1 200ms 重发覆盖对端 JOIN 窗）+ 被邀请侧 RelayGrant 推送→THello1 sessionId 关联邀请上下文（120s TTL）应答握手 + TunnelSession.ViaRelay 驱动映射 relay 态/复用/断链回 punching（05 §4 注记，设计 v1.17）；测 +6，全仓 482 全绿、Core 83.61%、CI quick 通过 |
 | 2026-09-23 | **M2-19 中继回切直连 ✅**（12/35）——0x73 协调触发（IsInitiator 60s 周期[测试缝]→台账 120s 过期以 RelayService.ResolveActiveRelay 按 PunchSessionId 反查活中继兜底→双端通知，非发起方 1001；实际打洞由 A 全新 0x70 驱动，被拒退化全新 0x70）+ NET-75 排水切换落 TunnelHost.Attach（存活旧会话 2s 排水窗内接收照常后 replaced_drained、已亡立即 Close、会话表即刻指新）+ SessionDisconnected 携带会话对象/新增 SessionAttached 驱动 relay→direct（重打失败保持 relay 态服务连续、回退再走新中继会话双端整体替换防脑裂）（05 §4 注记，设计 v1.18）；集成测借扰动一次性天然舞台（首打 miss→relay、重打扰动耗尽→命中 direct+relay_to_direct+序号 0..K 严格连续+断连止+新连接 echo）；测 +8（信令 5/排水 2/集成 1），全仓 490 全绿、Core 83.61%、CI quick 通过 |
+| 2026-09-23 | **M2-32 场景 A-6 ✅**（13/35）——断言①②三方世界（TcpNatMode.SymmetricRandom 随机分配→端口预测失配+APDF 身份过滤拒绝双侧必 miss；B 回退开→relay+40KiB 密文往返、C 无条目→failed 且明细非 server_ 拒绝）；断言③ UdpBlocked 变体（B UDP 出站全丢→JOIN UDP 10s 超时→TCP 承载兜底[两端承载异构]→relay 可访问，回退预算 30s 独立计量覆盖）；断言④回切由 M2_19 用例承担（同 A-6 回切路径）；StartTcpSimulatorAsync 参数化 mode/ipC，无生产代码变更；测 +2（集成 65→67），全仓 492 全绿、CI quick 通过 |

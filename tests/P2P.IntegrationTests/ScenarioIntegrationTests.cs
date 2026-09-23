@@ -17,12 +17,14 @@ using Xunit.Abstractions;
 namespace P2P.IntegrationTests;
 
 /// <summary>
-/// 集成场景自动化 A-1~A-5 + M2-18 中继回退 + M2-19 中继回切直连（09 §2.3；M1-35 交付 A-1~A-4、
-/// M2-31 交付 A-5 TCP 打洞命中率矩阵、M2-18 交付承载绑定中继路径、M2-19 交付回切排水切换）。
-/// 三进程 in-proc：服务端 + 双客户端（各自独立 baseDir）；网卡以 StubNicManager
+/// 集成场景自动化 A-1~A-6 + M2-18 中继回退 + M2-19 中继回切直连（09 §2.3；M1-35 交付 A-1~A-4、
+/// M2-31 交付 A-5 TCP 打洞命中率矩阵、M2-18 交付承载绑定中继路径、M2-19 交付回切排水切换、
+/// M2-32 交付 A-6 中继回退场景：SymmetricRandom 必败/回退开关分岔/UdpBlocked TCP 承载变体）。
+/// 三进程 in-proc：服务端 + 双客户端（各自独立 baseDir；A-6 断言①②为三方）；网卡以 StubNicManager
 /// 替身、虚拟 IP 用 127.0.0.x 回环别名（A-4 隔离语义在 127.0.0.0/8 内等价成立）；A-3/A-4 打洞链路经
 /// NatSimulator（STUN 派生 :3478，TD-07），A-5 双端 SymmetricSequential 经 TcpNatSimulator（TD-17/21），
-/// M2-18 复用 A-5 miss 世界（打洞必败）驱动中继回退，M2-19 借其扰动一次性在重打时耗尽驱动回切命中。
+/// M2-18 复用 A-5 miss 世界（打洞必败）驱动中继回退，M2-19 借其扰动一次性在重打时耗尽驱动回切命中，
+/// M2-32 A-6 以 SymmetricRandom 随机分配（预测失配+APDF 拒绝必 miss）与 UdpBlocked（UDP 出站全丢）变体。
 /// 全运行时重组件专用集合（与 ClientRuntimeIntegrationTests 共用）：每用例拉起双 Kestrel+服务端+打洞链路，
 /// 相互串行避免与轻量类并行时叠加满载偶发（沿 M1-31 加固惯例）。
 /// </summary>
@@ -216,12 +218,16 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
     /// <summary>A-5 世界：双端 SymmetricSequential TCP NAT（TD-17 导演+桥接；TD-07 派生 :3478/TCP）——
     /// 探测分配顺序导演端口、出站 APDF 精确身份过滤、探测映射 listen 交付（TD-21）。
     /// PortBase 独立段（默认 20000 归 TcpNatSimulatorTests 机制测试，并行类窗口监听不互撞）。
-    /// perturbB：B 首次探测后注入外来流扰动（端口预测失配 miss 场景）。</summary>
-    private async Task StartTcpSimulatorAsync(int perturbB = 0)
+    /// perturbB：B 首次探测后注入外来流扰动（端口预测失配 miss 场景）。
+    /// mode：A-6 置 SymmetricRandom（随机分配 → 端口预测失配 + APDF 身份过滤拒绝 → 双侧必 miss，09 §2.2）；
+    /// ipC：三方变体（A-6 目标 C 回退关对照）。</summary>
+    private async Task StartTcpSimulatorAsync(int perturbB = 0,
+        TcpNatMode mode = TcpNatMode.SymmetricSequential, IPAddress? ipC = null)
     {
         _tcpSim = new TcpNatSimulator(new TcpNatOptions { StunPort = 3478, PortBase = 20500 });
-        _tcpSim.RegisterClient(IPAddress.Parse("127.0.0.4"), TcpNatMode.SymmetricSequential, "A");
-        _tcpSim.RegisterClient(IPAddress.Parse("127.0.0.5"), TcpNatMode.SymmetricSequential, "B", perturbB);
+        _tcpSim.RegisterClient(IPAddress.Parse("127.0.0.4"), mode, "A");
+        _tcpSim.RegisterClient(IPAddress.Parse("127.0.0.5"), mode, "B", perturbB);
+        if (ipC is not null) _tcpSim.RegisterClient(ipC, mode, "C");
         await _tcpSim.StartAsync();
     }
 
@@ -850,5 +856,88 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         // ⑤ 新连接走新直连路径完整往返
         await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(40 * 1024));
         await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(3 * 1024));
+    }
+
+    // ── M2-32 场景 A-6（09 §2.2/§2.3、OQ-4/7）─────────────────────────
+
+    /// <summary>A-6 断言①②：SymmetricRandom（随机分配导演端口）→ 端口预测失配 + APDF 身份过滤拒绝 →
+    /// TCP 打洞双侧必 miss；目标 B 回退开（peers.json+服务端中继开）→ 0x74 → relay 态可访问（经中继密文
+    /// 转发载荷往返）；同世界目标 C 无 peers.json 条目（默认关）→ failed。断言④（回切排水切直连数据连续）
+    /// 由 M2_19 用例承担（同 A-6 回切路径，周期缩短缝下序号载荷校验）。</summary>
+    [Fact]
+    public async Task M2_32_A6_SymmetricRandom必败_B回退开relay可访问_C回退关failed()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone), tcpStub: false);
+        var ipC = IPAddress.Parse("127.0.0.6");
+        _sim!.RegisterClient(ipC, UdpNatMode.FullCone, "C"); // 三方：C 侧 UDP NAT（中继 JOIN 承载）
+        await StartTcpSimulatorAsync(mode: TcpNatMode.SymmetricRandom, ipC: ipC);
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("a6-a", IPAddress.Parse("127.0.0.4"), group, punchConcurrency: 2);
+        var b = await SeedClientAsync("a6-b", IPAddress.Parse("127.0.0.5"), group, punchConcurrency: 2);
+        var c = await SeedClientAsync("a6-c", ipC, group, punchConcurrency: 2);
+        var httpA = await StartRuntimeAsync(a);
+        var httpB = await StartRuntimeAsync(b);
+        var httpC = await StartRuntimeAsync(c);
+        await WaitPhaseAsync(httpA, "running");
+        await WaitPhaseAsync(httpB, "running");
+        await WaitPhaseAsync(httpC, "running");
+
+        // 仅 B 开（设备级回退配置，D3/OQ-10）；C 无条目=默认关（PRD 06 §2）
+        var put = await PutAsync(httpA, $"/api/peers/{b.DeviceId}", new { relayFallback = true });
+        Assert.Equal(0, put.GetProperty("code").GetInt32());
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPortB = FreePort();
+        var mappingB = await CreateAndEnableMappingAsync(httpA, (ushort)localPortB, b.RemoteCode, (ushort)echoPort);
+
+        // 断言①：随机分配必 miss（10s 打洞预算）→ 回退开 → 0x74 → relay（映射态+中继密文转发往返）
+        await WaitMappingStateAsync(httpA, "relay", seconds: 40, mappingB);
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPortB, RandomGenerator.Bytes(40 * 1024));
+        _output.WriteLine("A6|nat=SymmetricRandom|target=B|fallback=on|state=relay");
+
+        // 断言②：同世界目标 C 回退关 → 打洞必败后无 0x74 → failed（明细为打洞失败而非服务端拒绝）
+        var localPortC = FreePort();
+        var mappingC = await CreateAndEnableMappingAsync(httpA, (ushort)localPortC, c.RemoteCode, (ushort)echoPort);
+        await WaitMappingStateAsync(httpA, "failed", seconds: 40, mappingC);
+        var root = await GetAsync(httpA, "/api/mappings");
+        var itemC = root.GetProperty("data").GetProperty("items").EnumerateArray()
+            .Single(i => i.GetProperty("mappingId").GetGuid() == mappingC);
+        Assert.DoesNotContain("server_", itemC.GetProperty("detail").GetString()); // 在线正常，失败源于打洞
+        _output.WriteLine("A6|nat=SymmetricRandom|target=C|fallback=off|state=failed");
+    }
+
+    /// <summary>A-6 断言③ UdpBlocked 变体：B 的 UDP 出站全丢（STUN/JOIN 均不可达）→ TCP 打洞（SymmetricRandom
+    /// 亦必败）→ 回退 → JOIN 先 UDP（10s 超时）→ **TCP 承载兜底**（FR-S-704，两端承载可异构 02 §6.2：
+    /// A 保持 UDP、B 落 TCP）→ 中继仍建立且可访问。</summary>
+    [Fact]
+    public async Task M2_32_A6_UdpBlocked变体_TCP中继承载relay可访问()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.UdpBlocked), tcpStub: false);
+        await StartTcpSimulatorAsync(mode: TcpNatMode.SymmetricRandom);
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("a6-ub-a", IPAddress.Parse("127.0.0.4"), group, punchConcurrency: 2);
+        var b = await SeedClientAsync("a6-ub-b", IPAddress.Parse("127.0.0.5"), group, punchConcurrency: 2);
+        var httpA = await StartRuntimeAsync(a);
+        var httpB = await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+        await WaitPhaseAsync(httpB, "running");
+        var put = await PutAsync(httpA, $"/api/peers/{b.DeviceId}", new { relayFallback = true });
+        Assert.Equal(0, put.GetProperty("code").GetInt32());
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+
+        // B JOIN UDP 重发 10s 超时计入回退预算（RelayFallbackTimeout=30s 独立计量覆盖）
+        await WaitMappingStateAsync(httpA, "relay", seconds: 50);
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(40 * 1024));
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(3 * 1024));
+        _output.WriteLine("A6-VARIANT|nat=UdpBlocked|carrier=relay-tcp|state=relay");
     }
 }
