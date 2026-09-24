@@ -1,7 +1,8 @@
 // M1-30 客户端运行时装配（01 §4.1 冷启动序列、01 §3.2 进程模型）：
 // 读状态 → [未注册：仅本地 Web 向导模式，等 RegistrationCompleted] /
 // [已注册：Nic 应用虚拟 IP（失败降级告警不阻断）→ 通道 Established → 恢复启用中映射（启用即打洞）]。
-// Puncher 委托缝在此接 ControlClient（0x70/0x76/STUN，M1-26 注）；0x71 PunchInvite 推送接调度器。
+// Puncher 委托缝在此接 ControlClient（0x70/0x76/STUN，M1-26 注）；0x71 PunchInvite 推送接调度器；
+// ClientReporter 上报三消息（M2-22：0x72/0x62/0x64，停机序先于引擎/control）。
 // Program.cs（宿主入口）经 ClientHostService 驱动；测试直接构造（M1-35 同法注入替身）。
 using System.Net;
 using System.Net.Sockets;
@@ -43,6 +44,10 @@ public sealed record ClientRuntimeOptions
     /// <summary>中继回切重试周期覆盖缝（M2-19）：生产 null=60s（PRD 06 §6/OQ-7 定值，
     /// 非用户可调）；集成测试注入秒级缩短以验证周期触发与回切全链。</summary>
     public TimeSpan? RelayRetryIntervalOverride { get; init; }
+
+    /// <summary>0x64 流量上报周期覆盖缝（M2-22）：生产 null=30s（02 §2.4 定值）；
+    /// 集成测试注入亚秒级以验证周期落库与停机补报。</summary>
+    public TimeSpan? StatsIntervalOverride { get; init; }
 }
 
 /// <summary>客户端全组件生命周期（单一属主；启动序=01 §4.1，停机序为其逆序）。</summary>
@@ -59,6 +64,7 @@ public sealed class ClientRuntime : IAsyncDisposable
     private LazyPuncher _puncher = null!;
     private PunchScheduler _scheduler = null!;
     private MappingEngine _engine = null!;
+    private ClientReporter _reporter = null!;
     private MappingSyncService _sync = null!;
     private ClientRegistrationService _wizard = null!;
     private LocalApiServices _api = null!;
@@ -113,6 +119,12 @@ public sealed class ClientRuntime : IAsyncDisposable
         var bindIp = IPAddress.TryParse(_state.State.VirtualIp, out var vip) ? vip : IPAddress.Loopback;
         _engine = new MappingEngine(_host, _scheduler, bindIp); // 监听绑虚拟 IP（01 §3.2）
         _engine.Log += m => Log?.Invoke($"[engine] {m}");
+        // 上报三消息（M2-22，FR-C-404/1002）：0x72 打洞结果 / 0x62 映射状态 / 0x64 流量统计
+        _reporter = new ClientReporter(_control, _scheduler, _engine, new ClientReporterOptions
+        {
+            StatsInterval = _options.StatsIntervalOverride ?? TimeSpan.FromSeconds(30),
+        });
+        _reporter.Log += m => Log?.Invoke($"[report] {m}");
         _sync = new MappingSyncService(_control, _engine, _state);
         _wizard = new ClientRegistrationService(_control, _state, _nic);
         _api = new LocalApiServices(_control, _state, _settings, _peers, _wizard, _sync, _scheduler);
@@ -475,6 +487,7 @@ public sealed class ClientRuntime : IAsyncDisposable
         try { await _cts.CancelAsync(); } catch { /* 已取消 */ }
         try { await _app.DisposeAsync(); } catch { /* Kestrel 收尾 */ }
         await _api.DisposeAsync();   // Hub 停推
+        await _reporter.DisposeAsync(); // 0x64 停机补报（须先于引擎/控制通道：读快照、走连接）
         await _engine.DisposeAsync(); // 拆监听/关 channel
         await _scheduler.DisposeAsync();
         _puncher.Dispose();

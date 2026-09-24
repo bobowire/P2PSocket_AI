@@ -87,12 +87,15 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
     public IReadOnlyCollection<MappingSnapshot> Snapshots
         => _mappings.Values.Select(r => new MappingSnapshot(r.Config, r.State, r.Detail)).ToList();
 
-    /// <summary>流量快照（04 §2.8 mapping_stats 事件源；访问侧 channel 计数，目标侧归对端映射）。</summary>
-    public sealed record MappingTraffic(Guid MappingId, long BytesUp, long BytesDown);
+    /// <summary>流量快照（04 §2.8 mapping_stats 事件源；访问侧 channel 计数，目标侧归对端映射）。
+    /// RelayBytes=双向经中继字节合计，含于 BytesUp+BytesDown 总量内（03 §2.6 relay_bytes 口径；
+    /// channel 所属会话 ViaRelay 计入，M2-22 供 0x64）。</summary>
+    public sealed record MappingTraffic(Guid MappingId, long BytesUp, long BytesDown, long RelayBytes);
 
     public IReadOnlyCollection<MappingTraffic> TrafficSnapshots()
         => _mappings.Values.Select(r => new MappingTraffic(r.Config.MappingId,
-               Volatile.Read(ref r.BytesUp), Volatile.Read(ref r.BytesDown))).ToList();
+               Volatile.Read(ref r.BytesUp), Volatile.Read(ref r.BytesDown),
+               Volatile.Read(ref r.BytesRelay))).ToList();
 
     public MappingEngine(TunnelHost tunnels, PunchScheduler scheduler, IPAddress virtualIp,
         MappingEngineOptions? options = null)
@@ -120,6 +123,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         public Task? AcceptLoop;
         public long BytesUp;     // 访问侧累计（mapping_stats 速率采样，04 §2.8）
         public long BytesDown;
+        public long BytesRelay;  // 其中经中继承载的累计（0x64 relayBytes，M2-22）
     }
 
     // ── 映射生命周期（M1-28 同步层调用）──────────────────────────────
@@ -449,7 +453,11 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
                 await entry.OutQuota.WaitAsync(ct); // 背压：在飞槽位满则暂停读本地 socket
                 try { await entry.Session.SendDataAsync(entry.ChannelId, chunk, ct); }
                 finally { entry.OutQuota.Release(); }
-                if (entry.Owner is { } o) Interlocked.Add(ref o.BytesUp, n); // 流量计数（成功发出后）
+                if (entry.Owner is { } o)
+                {
+                    Interlocked.Add(ref o.BytesUp, n); // 流量计数（成功发出后）
+                    if (entry.Session.ViaRelay) Interlocked.Add(ref o.BytesRelay, n);
+                }
             }
             await CloseEntryAsync(entry, notifyPeer: true); // EOF → CLOSE
         }
@@ -468,7 +476,11 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
             await foreach (var data in entry.Inbound.Reader.ReadAllAsync(ct))
             {
                 await entry.Socket.SendAsync(data, ct);
-                if (entry.Owner is { } o) Interlocked.Add(ref o.BytesDown, data.Length);
+                if (entry.Owner is { } o)
+                {
+                    Interlocked.Add(ref o.BytesDown, data.Length);
+                    if (entry.Session.ViaRelay) Interlocked.Add(ref o.BytesRelay, data.Length);
+                }
             }
         }
         catch (Exception e) when (e is OperationCanceledException or SocketException

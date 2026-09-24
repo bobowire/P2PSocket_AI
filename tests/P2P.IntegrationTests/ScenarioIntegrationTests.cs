@@ -180,8 +180,10 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
     }
 
     /// <summary>启动客户端运行时（网卡替身 + 打洞 socket 绑内网别名缝；诊断日志进测试产物；
-    /// relayRetryInterval：M2-19 回切 60s 周期的缩短缝——周期机制本身驱动回切，间接验证触发）。</summary>
-    private async Task<HttpClient> StartRuntimeAsync(SeededClient c, TimeSpan? relayRetryInterval = null)
+    /// relayRetryInterval：M2-19 回切 60s 周期的缩短缝——周期机制本身驱动回切，间接验证触发；
+    /// statsInterval：M2-22 0x64 30s 上报周期的缩短缝——周期落库与停机补报验证）。</summary>
+    private async Task<HttpClient> StartRuntimeAsync(SeededClient c, TimeSpan? relayRetryInterval = null,
+        TimeSpan? statsInterval = null)
     {
         var runtime = new ClientRuntime(new ClientRuntimeOptions
         {
@@ -189,6 +191,7 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
             NicOverride = _nic,
             PunchBindOverride = c.Ip,
             RelayRetryIntervalOverride = relayRetryInterval,
+            StatsIntervalOverride = statsInterval,
         });
         runtime.Log += m => _output.WriteLine($"[{c.Ip}] {m}");
         await runtime.StartAsync();
@@ -940,5 +943,222 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(40 * 1024));
         await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(3 * 1024));
         _output.WriteLine("A6-VARIANT|nat=UdpBlocked|carrier=relay-tcp|state=relay");
+    }
+
+    // ── M2-22 客户端上报三消息（02 §2.4、FR-C-404/1002；服务端落库断言衔接 M2-08）──
+
+    /// <summary>轮询服务端库至查询命中（上报异步落库；共享 in-memory 连接与服务器写并发偶发
+    /// SQLITE busy 类瞬态，容忍重试至超时）。</summary>
+    private async Task<T> PollDbAsync<T>(Func<AppDbContext, T?> query, string what, int seconds = 10) where T : class
+    {
+        var deadline = Environment.TickCount64 + seconds * 1000L;
+        while (true)
+        {
+            try
+            {
+                await using var db = _factory.CreateDbContext();
+                if (query(db) is { } hit) return hit;
+            }
+            catch (SqliteException) { /* 共享连接并发瞬态：下轮重试 */ }
+            if (Environment.TickCount64 > deadline) Assert.Fail($"等待落库超时：{what}");
+            await Task.Delay(200);
+        }
+    }
+
+    /// <summary>0x72 直连 + 0x62 状态流水：FullCone 恒等世界 N=1 直连 → punch_stats 行
+    /// （result=direct/proto/N 取台账）+ audit mapping_status（State=direct + 端点明细）。</summary>
+    [Fact]
+    public async Task M2_22_直连打洞_0x72落库0x62审计()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone));
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("r22-dir-a", IPAddress.Parse("127.0.0.4"), group);
+        var b = await SeedClientAsync("r22-dir-b", IPAddress.Parse("127.0.0.5"), group);
+        var httpA = await StartRuntimeAsync(a);
+        await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        var mappingId = await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+        await WaitMappingStateAsync(httpA, "direct");
+
+        // 0x72：punch_stats 直连行（Ok+端点=direct；proto/concurrency 取 M2-08 会话台账）
+        var stat = await PollDbAsync(db => db.PunchStats.AsNoTracking()
+            .FirstOrDefault(p => p.InitiatorId == a.DeviceId && p.TargetId == b.DeviceId), "punch_stats direct");
+        Assert.Equal("direct", stat.Result);
+        Assert.Equal("tcp", stat.Proto);
+        Assert.Equal(1, stat.Concurrency);
+        Assert.NotEqual(Guid.Empty, stat.SessionId);
+        Assert.Null(stat.Reason);
+        Assert.True(stat.DurationMs >= 0);
+
+        // 0x62：mapping_status 审计流水（M2-08 受理端；detail=PascalCase JSON：MappingId/State/Detail）
+        var audit = await PollDbAsync(db => db.AuditLogs.AsNoTracking()
+            .FirstOrDefault(l => l.Event == "mapping_status" && l.DeviceId == a.DeviceId
+                && l.Detail!.Contains(mappingId.ToString())
+                && l.Detail.Contains("\"State\":\"direct\"")), "mapping_status audit");
+        Assert.Contains("local=", audit.Detail); // 直连明细携带端点（SetState detail 约定）
+    }
+
+    /// <summary>0x72 中继行 + 0x64 中继字节归属：A-5 miss 同构世界 + 回退开 → relay 态 + 中继 echo →
+    /// punch_stats result=relay（Ok 无端点表达约定）+ mapping_stats RelayBytes=全部流量。</summary>
+    [Fact]
+    public async Task M2_22_中继回退_0x72relay行0x64中继字节()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone), tcpStub: false);
+        await StartTcpSimulatorAsync(perturbB: 2);
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("r22-rl-a", IPAddress.Parse("127.0.0.4"), group, punchConcurrency: 2);
+        var b = await SeedClientAsync("r22-rl-b", IPAddress.Parse("127.0.0.5"), group, punchConcurrency: 2);
+        var httpA = await StartRuntimeAsync(a, statsInterval: TimeSpan.FromMilliseconds(300));
+        await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+        var put = await PutAsync(httpA, $"/api/peers/{b.DeviceId}", new { relayFallback = true });
+        Assert.Equal(0, put.GetProperty("code").GetInt32());
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        var mappingId = await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+        await WaitMappingStateAsync(httpA, "relay", seconds: 40);
+
+        // 0x72：relay 行（Ok 无端点=relay 口径；失败原因不携带）
+        var stat = await PollDbAsync(db => db.PunchStats.AsNoTracking()
+            .FirstOrDefault(p => p.InitiatorId == a.DeviceId && p.TargetId == b.DeviceId), "punch_stats relay");
+        Assert.Equal("relay", stat.Result);
+        Assert.Equal(2, stat.Concurrency);
+        Assert.Null(stat.Reason);
+
+        // 0x64：中继路径流量（周期上报；RelayBytes=BytesUp/Down 全量——channel 会话 ViaRelay 计入）
+        var first = RandomGenerator.Bytes(40 * 1024);
+        var second = RandomGenerator.Bytes(3 * 1024);
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, first);
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, second);
+        var total = first.Length + second.Length;
+        var row = await PollDbAsync(db => db.MappingStats.AsNoTracking()
+            .FirstOrDefault(s => s.BytesUp == total && s.BytesDown == total
+                && s.RelayBytes == total * 2 && s.MappingId == mappingId), "mapping_stats relay bytes");
+        Assert.NotNull(row); // relay_bytes=双向经中继字节之和（含于 up+down 总量，03 §2.6 口径）
+    }
+
+    /// <summary>0x72 Ack 后失败行：双侧预测失配（无回退）→ failed 态 → punch_stats result=failed
+    /// + Reason=punch_timeout（10s 打洞预算耗尽）。</summary>
+    [Fact]
+    public async Task M2_22_Ack后失败_0x72failed行()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone), tcpStub: false);
+        await StartTcpSimulatorAsync(perturbB: 2);
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("r22-fl-a", IPAddress.Parse("127.0.0.4"), group, punchConcurrency: 2);
+        var b = await SeedClientAsync("r22-fl-b", IPAddress.Parse("127.0.0.5"), group, punchConcurrency: 2);
+        var httpA = await StartRuntimeAsync(a);
+        var httpB = await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+        await WaitPhaseAsync(httpB, "running");
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+        await WaitMappingStateAsync(httpA, "failed", seconds: 40);
+
+        var stat = await PollDbAsync(db => db.PunchStats.AsNoTracking()
+            .FirstOrDefault(p => p.InitiatorId == a.DeviceId && p.TargetId == b.DeviceId), "punch_stats failed");
+        Assert.Equal("failed", stat.Result);
+        Assert.Equal("punch_timeout", stat.Reason);
+        Assert.NotEqual(Guid.Empty, stat.SessionId); // Ack 后失败：会话两段式完成（台账在册）
+    }
+
+    /// <summary>0x72 Ack 前失败不上报（M2-22 门控）：目标设备离线 → 0x70 即时 Error 4005 →
+    /// SessionId 空 → 无 0x72（服务端无台账会话可归属，避免 punch_result_unknown 审计噪声）。</summary>
+    [Fact]
+    public async Task M2_22_Ack前失败_无0x72不上报()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone));
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("r22-pre-a", IPAddress.Parse("127.0.0.4"), group);
+        var b = await SeedClientAsync("r22-pre-b", IPAddress.Parse("127.0.0.5"), group);
+        var httpA = await StartRuntimeAsync(a);
+        await WaitPhaseAsync(httpA, "running");
+        // B 已注册但运行时未启：0x70 → Error 4005（被邀请方离线）→ Ack 前失败
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        var mappingId = await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+        await WaitMappingStateAsync(httpA, "failed", seconds: 20);
+        var root = await GetAsync(httpA, "/api/mappings");
+        var detail = root.GetProperty("data").GetProperty("items").EnumerateArray()
+            .Single(i => i.GetProperty("mappingId").GetGuid() == mappingId)
+            .GetProperty("detail").GetString();
+        Assert.Contains("server_4005", detail); // Ack 前失败：0x70 即时拒（被邀请方离线）
+
+        await Task.Delay(1500); // 误发也已处理完毕的宽限
+        await using var db = _factory.CreateDbContext();
+        Assert.Empty(db.PunchStats.AsNoTracking().Where(p => p.InitiatorId == a.DeviceId));
+    }
+
+    /// <summary>0x64 周期落库 + 优雅停机补报：亚秒周期下映射流量周期到达 mapping_stats（精确字节）；
+    /// 追加流量后停机（runtime Dispose）→ 终刷覆盖为全量精确值（覆盖式 upsert 幂等口径，M2-08）。</summary>
+    [Fact]
+    public async Task M2_22_流量上报_0x64周期落库与停机补报()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone));
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("r22-st-a", IPAddress.Parse("127.0.0.4"), group);
+        var b = await SeedClientAsync("r22-st-b", IPAddress.Parse("127.0.0.5"), group);
+        var runtime = new ClientRuntime(new ClientRuntimeOptions
+        {
+            BaseDir = a.Dir,
+            NicOverride = _nic,
+            PunchBindOverride = a.Ip,
+            StatsIntervalOverride = TimeSpan.FromMilliseconds(300),
+        });
+        runtime.Log += m => _output.WriteLine($"[{a.Ip}] {m}");
+        await runtime.StartAsync();
+        _runtimes.Add(runtime);
+        var httpA = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{runtime.WebPort}") };
+        _https.Add(httpA);
+        await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        var mappingId = await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+        await WaitMappingStateAsync(httpA, "direct");
+
+        // 首批流量 → 周期上报到达（精确字节：echo 全量上下行对称）
+        var first = RandomGenerator.Bytes(40 * 1024);
+        var second = RandomGenerator.Bytes(3 * 1024);
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, first);
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, second);
+        var firstTotal = first.Length + second.Length;
+        await PollDbAsync(db => db.MappingStats.AsNoTracking()
+            .FirstOrDefault(s => s.MappingId == mappingId && s.BytesUp == firstTotal), "mapping_stats 首批周期上报");
+
+        // 追加批次（末周期后的增量）→ 停机补报覆盖为全量精确值
+        var third = RandomGenerator.Bytes(8 * 1024);
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, third);
+        await Task.Delay(300); // splice 计数尾包竞态宽限（测试读毕 ≠ BytesDown 已加毕）
+        await runtime.DisposeAsync(); // 幂等：夹具 teardown 二次销毁安全
+        var grand = firstTotal + third.Length;
+        await using var db = _factory.CreateDbContext();
+        var row = db.MappingStats.AsNoTracking().Single(s => s.MappingId == mappingId);
+        Assert.Equal(grand, row.BytesUp);
+        Assert.Equal(grand, row.BytesDown);
+        Assert.Equal(0, row.RelayBytes); // 直连路径：无中继字节
     }
 }

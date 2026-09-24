@@ -40,9 +40,11 @@ public sealed record PunchOptions
 }
 
 /// <summary>打洞结果（本地事件驱动映射状态机；成功带双方端点）。
+/// <see cref="SessionId"/>：成功与 Ack 后失败携带（会话两段式完成、服务端台账在册——0x72 上报归属，
+/// M2-22）；Ack 前失败为 Guid.Empty（无会话）。
 /// <see cref="RelayAllowed"/>（M2-23）：失败结果的中继回退资格 = 本地 peers.json 设备级配置 AND
 /// 服务端 PunchRequestAck.relayAllowed（05 §3.1，Puncher 出队执行时合成；消费方 M2-18 走 0x74）。
-/// 仅 Ack 后失败（会话两段式完成、服务端台账在册）携带 true；Ack 前失败无会话不可中继。</summary>
+/// 仅 Ack 后失败携带 true；Ack 前失败无会话不可中继。</summary>
 public sealed record PunchOutcome(
     bool Ok,
     Guid SessionId,
@@ -297,9 +299,11 @@ public sealed class Puncher : IPuncher, IDisposable
         }
     }
 
-    /// <summary>Ack 后失败（打洞/握手阶段）：失败语义同外层（超时/错误二分），并携带回退资格（05 §3.1）。</summary>
-    private PunchOutcome FailAfterAck(Guid targetDeviceId, Exception e, CancellationToken ct, bool relayAllowed)
-        => new(false, Guid.Empty, targetDeviceId, null, null, null,
+    /// <summary>Ack 后失败（打洞/握手阶段）：失败语义同外层（超时/错误二分），并携带回退资格（05 §3.1）。
+    /// SessionId=会话两段式完成的服务端台账在册 id（0x72 failed 行落库前提，M2-22）。</summary>
+    private PunchOutcome FailAfterAck(Guid sessionId, Guid targetDeviceId, Exception e, CancellationToken ct,
+        bool relayAllowed)
+        => new(false, sessionId, targetDeviceId, null, null, null,
             e is OperationCanceledException && !ct.IsCancellationRequested
                 ? "punch_timeout"
                 : $"punch_error: {e.Message}",
@@ -309,7 +313,7 @@ public sealed class Puncher : IPuncher, IDisposable
     private async Task<PunchOutcome> FailOrFallbackAsync(PunchRequestAck ack, Guid targetDeviceId,
         Exception e, CancellationToken ct, bool relayAllowed)
     {
-        var fail = FailAfterAck(targetDeviceId, e, ct, relayAllowed);
+        var fail = FailAfterAck(ack.SessionId, targetDeviceId, e, ct, relayAllowed);
         return relayAllowed && _relayAllocator is not null
             ? await FallbackToRelayAsync(ack, fail, ct).ConfigureAwait(false)
             : fail;

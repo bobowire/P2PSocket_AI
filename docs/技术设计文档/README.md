@@ -1,6 +1,6 @@
 # P2P 内网穿透产品 · 技术设计文档
 
-> 版本：v1.19　创建日期：2026-08-19　状态：待评审
+> 版本：v1.20　创建日期：2026-08-19　状态：待评审
 > 依据：[产品需求文档 PRD v0.6](../prd/README.md)（决策 D1~D21，D3 经 v0.4 修订；开放问题 OQ-1~OQ-19 已全部决议）
 > 定位：开发阶段的**施工图纸**——所有实现以本文档为准；与 PRD 冲突时以 PRD 为准并提出修订。
 
@@ -92,3 +92,4 @@
 | 2026-09-23 | v1.17 | M2-18 落地同步：05 §4 补实现注记——回退链内联 Puncher（0x74→JOIN 先 UDP 后 TCP 承载兜底[两端承载可异构]→PTP 握手即经中继，THello1 200ms 周期重发覆盖对端 JOIN 窗、回退预算独立计量、失败并入映射 failed）；被邀请侧关联机制（RelayGrant 不含对端信息——以 THello1 载荷打洞 sessionId 关联预记邀请上下文[对端 deviceId+静态公钥，服务端 relayAllowed 真才预记/应答成功即撤销/TTL 120s 对齐服务端台账/先记后应答防并发竞态]）；TunnelSession.ViaRelay 承载标记驱动映射态分派/隧道复用/断链回 punching。Primary+Fallback 双 socket 并存切换（NET-75 排水）属 M2-19 回切，本版未含 |
 | 2026-09-23 | v1.18 | M2-19 落地同步：05 §4 补实现注记（回切直连 OQ-7/NET-75）——0x73 只做协调触发（访问方 IsInitiator 60s 周期[测试缝 RelayRetryIntervalOverride]→服务端台账解析[120s 过期以 RelayService.ResolveActiveRelay 按 PunchSessionId 反查活中继兜底；非发起方 1001 防双端同打]→双端 0x73{原 sessionId}，实际端点交换由 A 随后全新 0x70 驱动；客户端被 1001 拒退化全新 0x70）；NET-75 排水切换落 TunnelHost.Attach（存活旧会话 2s 排水窗内接收照常后 Close("replaced_drained")、已亡立即 Close、会话表即刻指新）；排水期新旧并存一致性（SessionDisconnected 携带会话对象[引擎只清旧会话 channel]、新增 SessionAttached 驱动 B 侧/兜底 relay→direct[明细 relay_to_direct]）；重打失败映射保持 relay 态服务连续、失败+回退资格真走新中继会话双端整体替换（防单端保留旧会话脑裂）；每连接帧连续即满足 NET-75 顺序性（断连后尾部写入不在语义内） |
 | 2026-09-24 | v1.19 | M2-08 落地同步：05 §5 补实现注记（上报族 0x72/0x62/0x64 与保留清理）——0x72 结果映射（Ok+端点=direct / Ok 无端点=relay[FailReason 携带打洞失败原因] / !Ok=failed，relay 语义靠端点缺席表达不改 schema）、proto/N/时长取自会话台账（M2-07 台账扩为 RelayLedgerEntry 含 proto/PunchCount/CreatedAt；120s 窗覆盖全部上报时点，窗外 drop+审计；仅发起方可报、sessionId 去重首份即定论）；0x62 → mapping_status 审计流水（映射运行态不落表，客户端状态机是真相源；仅受理本人映射）；0x64 → mapping_stats 覆盖式 upsert（载荷=客户端本地累计绝对值→重发/乱序不叠加，最新到达=客户端当前真相；逐项归属校验、同报告重复项去重）；RetentionCleaner 启动+每日（audit_logs 与 punch_stats 一并，OQ-17；键每轮现读、非法回退 90）；03 §2.7/§2.9 保留口径与 concurrency 来源勘误同步 |
+| 2026-09-24 | v1.20 | M2-22 落地同步：05 §5 补客户端上报实现注记（ClientReporter 三消息）——0x72 上报点=PunchScheduler.PunchCompleted（仅访问方；端点映射与服务端三态判据互证，Ack 前失败[SessionId 空]不上报——Puncher Ack 后失败改携 ack.SessionId 补齐 failed 行归属前提）；0x62 状态机迁移三态（direct/relay/failed）入流水、invalid 预留 0x75 联动；0x64 TrafficSnapshots 30s 周期+优雅停机终刷（停机序先于引擎/控制通道）、零值条目也上报（重启清零如实覆盖旧行=覆盖式 upsert 的客户端配合面）；relay_bytes 口径明确=双向经中继合计、含于 up+down 总量（channel 会话 ViaRelay 归属，03 §2.6） |
