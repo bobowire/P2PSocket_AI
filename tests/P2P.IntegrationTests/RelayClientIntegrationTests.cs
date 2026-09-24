@@ -46,6 +46,7 @@ public sealed class RelayClientIntegrationTests : IAsyncLifetime
             _signaling,
             new MappingService(_factory, audit),
             _relay,
+            new StatsService(_factory, audit),
             audit);
         _server = new ControlServer(_factory, _registry, router.DispatchAsync);
         await _server.StartAsync(new IPEndPoint(IPAddress.Loopback, 0));

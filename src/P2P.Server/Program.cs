@@ -84,6 +84,12 @@ builder.Services.AddSingleton(sp => new RelayService(
     sp.GetRequiredService<SignalingCoordinator>().ResolveRelayPeers,
     new RelayServiceOptions { IdleTimeout = TimeSpan.FromSeconds(options.Relay.IdleTimeoutSec) }));
 builder.Services.AddSingleton<ControlMessageRouter>();
+// 上报族处理器（M2-08）：0x62 审计 / 0x64 mapping_stats / 0x72 落库在 SignalingCoordinator；
+// 保留清理 audit_logs+punch_stats 一并（启动+每日，OQ-17/03 §2.7/§2.9）
+builder.Services.AddSingleton<StatsService>();
+builder.Services.AddSingleton(sp => new RetentionCleaner(
+    sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+    sp.GetRequiredService<TimeProvider>()));
 builder.Services.AddSingleton(sp => new ControlServer(
     sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
     sp.GetRequiredService<DeviceRegistry>(),

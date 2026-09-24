@@ -7,7 +7,7 @@ namespace P2P.Server.Services;
 /// <summary>
 /// 服务端启动编排（01 §3.1 单进程多服务；IHostedService）：
 /// 启动序：数据库迁移+种子 → 控制面监听 → STUN UDP → 中继 UDP/TCP → （构造即运行的监视器/信令 reaper 已随后就绪）。
-/// 停机逆序：中继 → STUN → 控制面（关闭全部会话）→ 监视器 → 信令。
+/// 停机逆序：中继 → STUN → 控制面（关闭全部会话）→ 监视器 → 信令 → 保留清理。
 /// </summary>
 public sealed class ServerHostService(IServiceProvider sp, ILogger<ServerHostService> logger, ServerOptions options)
     : IHostedService
@@ -40,6 +40,7 @@ public sealed class ServerHostService(IServiceProvider sp, ILogger<ServerHostSer
         // 4) 显式触发构造（后台循环随构造启动；无端口绑定，仅确认装配完整）
         _ = sp.GetRequiredService<PresenceMonitor>();
         _ = sp.GetRequiredService<SignalingCoordinator>();
+        _ = sp.GetRequiredService<RetentionCleaner>(); // 启动即清一轮，此后每日（M2-08/OQ-17）
         logger.LogInformation("服务端启动完成：心跳超时 {Timeout}s、打洞超时 {Punch}s",
             options.Heartbeat.TimeoutSec, options.Punch.TimeoutSec);
     }
@@ -58,6 +59,7 @@ public sealed class ServerHostService(IServiceProvider sp, ILogger<ServerHostSer
 
         await sp.GetRequiredService<PresenceMonitor>().DisposeAsync();
         await sp.GetRequiredService<SignalingCoordinator>().DisposeAsync();
+        await sp.GetRequiredService<RetentionCleaner>().DisposeAsync();
         logger.LogInformation("服务端已停止");
     }
 }

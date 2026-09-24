@@ -13,10 +13,11 @@ namespace P2P.Server.Services;
 /// （余量判断 M3 前恒真）——0x71/0x70 Ack 随会话携带，客户端 Puncher 出队时与本地 peers.json 合成。
 /// 并发路数 N（OQ-19/TD-20，M2-16）：取 0x70 punchConcurrency 经 PunchPolicy.Normalize 校验
 /// （1~5 缺省 3），经 0x71/0x70 Ack 的 PunchCount 统一回填——双方该次打洞执行同一 N（02 §5.2②）。
-/// 会话台账（M2-07）：结束后短期保留 sessionId → (A,B) 设备对，供 0x74 RelayAllocate 解析对端。
+/// 会话台账（M2-07）：结束后短期保留 sessionId → 设备对（M2-08 扩为含 proto/N/起始时刻），
+/// 供 0x74 RelayAllocate 解析对端与 0x72 PunchResult 补齐统计上下文。
 /// 0x73 PunchRetry 回切协调（M2-19，02 §6.2/OQ-7）：台账 → 活中继反查解析设备对 →
 /// 校验访问方=原发起方 → 向双端下发 0x73（通知重打；A 侧应答兼受理回执，随后走全新 0x70）。
-/// 0x72 PunchResult 处理属 FR-C-404 → M2。
+/// 0x72 PunchResult → punch_stats 落库（M2-08，FR-S-503、03 §2.9）：发起方上报、sessionId 去重。
 /// </summary>
 public sealed class SignalingCoordinator : IAsyncDisposable
 {
@@ -34,7 +35,7 @@ public sealed class SignalingCoordinator : IAsyncDisposable
     private readonly Func<Guid, (Guid InitiatorId, Guid TargetId)?>? _activeRelayLookup; // 活中继反查（M2-19，RelayService）
     private readonly object _gate = new();
     private readonly Dictionary<Guid, PunchSession> _sessions = [];   // sessionId → 活跃会话
-    private readonly Dictionary<Guid, (Guid InitiatorId, Guid TargetId, DateTimeOffset ExpiresAt)> _relayLedger = []; // 结束会话台账（0x74 对端解析）
+    private readonly Dictionary<Guid, RelayLedgerEntry> _relayLedger = []; // 结束会话台账（0x74 对端解析 + 0x72 统计上下文）
     private readonly Queue<(ControlSession Session, PunchRequest Msg)> _pending = new(); // 排队申请
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _reaper;
@@ -64,10 +65,16 @@ public sealed class SignalingCoordinator : IAsyncDisposable
         public required PeerInfo InitiatorInfo { get; init; }
         public required PeerInfo TargetInfo { get; init; }
         public required EndpointPair RequesterEndpoints { get; init; }
+        public required string Proto { get; init; }               // 0x70 载荷（udp|tcp，M2-08 统计）
         public required byte PunchCount { get; init; }
         public required bool RelayAllowed { get; init; }               // relay_enabled 合成（M2-07）
         public required DateTimeOffset CreatedAt { get; init; }
     }
+
+    /// <summary>结束会话台账条目（120s）：0x74/0x73 对端解析 + 0x72 统计上下文（proto/N/起始时刻）。</summary>
+    public sealed record RelayLedgerEntry(
+        Guid InitiatorId, Guid TargetId, string Proto, byte PunchCount,
+        DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt);
 
     // ── 0x70 PunchRequest（发起方 A）──────────────────────────────────
 
@@ -129,6 +136,7 @@ public sealed class SignalingCoordinator : IAsyncDisposable
             InitiatorInfo = new PeerInfo(a.Id, a.DeviceName, a.RemoteCode, a.StaticPubKey),
             TargetInfo = new PeerInfo(b.Id, b.DeviceName, b.RemoteCode, b.StaticPubKey),
             RequesterEndpoints = msg.RequesterEndpoints ?? new EndpointPair(null, null),
+            Proto = string.IsNullOrWhiteSpace(msg.Proto) ? "udp" : msg.Proto, // 旧端缺省容忍（02 §7）
             // OQ-19/TD-20（M2-16）：取发起方请求值（越界/缺省 → 3，容忍哲学），Ack/Invite 统一回填
             PunchCount = PunchPolicy.Normalize(msg.PunchConcurrency),
             // M2-07：全局开关 AND 限速余量（余量判断 M3 前恒真）——与设备级 peers.json 在客户端合成（05 §3.1）
@@ -186,6 +194,60 @@ public sealed class SignalingCoordinator : IAsyncDisposable
         }
     }
 
+    // ── 0x72 PunchResult 打洞结果统计（M2-08，FR-S-503/FR-C-404、03 §2.9）──
+
+    /// <summary>0x72 落库上下文（台账未过期部分）：proto/N 取自 0x70 会话，时长 = CreatedAt→上报到达。</summary>
+    public RelayLedgerEntry? ResolvePunchContext(Guid sessionId)
+    {
+        lock (_gate)
+        {
+            if (_relayLedger.TryGetValue(sessionId, out var r)
+                && r.ExpiresAt > _time.GetLocalNow())
+                return r;
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 打洞结果落 punch_stats（FR-S-503）：仅发起方可报、sessionId 去重（先到先记）。
+    /// result 映射：Ok+端点=direct；Ok 无端点=relay（回退成功，FailReason 携带打洞失败原因）；
+    /// !Ok=failed。proto/concurrency/duration_ms 不在 0x72 载荷 → 台账上下文补齐（120s 窗覆盖
+    /// 直连/失败/中继回退全部上报时点；窗外=异常迟到，drop+审计）。
+    /// </summary>
+    public async Task HandlePunchResultAsync(ControlSession session, PunchResult msg)
+    {
+        var ctx = ResolvePunchContext(msg.SessionId);
+        if (ctx is null || ctx.InitiatorId != session.DeviceId)
+        {
+            await _audit.WriteAsync("punch_result_unknown", session.DeviceId,
+                detail: new { msg.SessionId, msg.Ok, hasEndpoint = msg.Endpoint is not null });
+            return;
+        }
+
+        var result = !msg.Ok ? "failed" : msg.Endpoint is not null ? "direct" : "relay";
+        var durationMs = (int)Math.Clamp(
+            (_time.GetLocalNow() - ctx.CreatedAt).TotalMilliseconds, 0, int.MaxValue);
+
+        await using var db = await _dbFactory.CreateDbContextAsync();
+        // 去重：同 session 重复上报（重发/竞态）不重复落行——首份结果即定论
+        if (await db.PunchStats.AsNoTracking().AnyAsync(p => p.SessionId == msg.SessionId))
+            return;
+
+        db.PunchStats.Add(new PunchStat
+        {
+            Ts = _time.GetLocalNow().UtcDateTime,
+            SessionId = msg.SessionId,
+            InitiatorId = ctx.InitiatorId,
+            TargetId = ctx.TargetId,
+            Proto = ctx.Proto,
+            Concurrency = ctx.PunchCount,
+            Result = result,
+            Reason = msg.FailReason,
+            DurationMs = durationMs,
+        });
+        await db.SaveChangesAsync();
+    }
+
     // ── 0x73 PunchRetry 回切协调（M2-19，02 §6.2/OQ-7）───────────────
 
     /// <summary>中继回切直连（OQ-7）：访问方 60s 周期请求协调重打。台账 → 活中继反查解析设备对，
@@ -218,7 +280,9 @@ public sealed class SignalingCoordinator : IAsyncDisposable
 
     /// <summary>结束会话入台账（须持锁）：完成与超时两路径共用。</summary>
     private void RetainForRelayNoLock(PunchSession s)
-        => _relayLedger[s.SessionId] = (s.InitiatorId, s.TargetId, _time.GetLocalNow() + RelayLedgerTtl);
+        => _relayLedger[s.SessionId] = new RelayLedgerEntry(
+            s.InitiatorId, s.TargetId, s.Proto, s.PunchCount, s.CreatedAt,
+            _time.GetLocalNow() + RelayLedgerTtl);
 
     /// <summary>排队申请推进：A、B 均空闲者依次启动。</summary>
     private async Task ProcessQueueAsync()

@@ -5,8 +5,9 @@ namespace P2P.Server.Services;
 /// <summary>
 /// 控制消息分发器（05 §5）：ControlSession 完成帧校验后按 msgType 路由到处理器。
 /// passive 主动类拦截（02 §2.5，SEC-51）在路由入口统一执行。
-/// M1-14~17 挂载注册/用户/分组/信令族；M1-28 挂载映射 0x60/0x61（0x62 状态上报 → M2）；
-/// M2-07 挂载中继 0x74 RelayAllocate；M2-19 挂载回切 0x73 PunchRetry。
+/// M1-14~17 挂载注册/用户/分组/信令族；M1-28 挂载映射 0x60/0x61；
+/// M2-07 挂载中继 0x74 RelayAllocate；M2-19 挂载回切 0x73 PunchRetry；
+/// M2-08 挂载上报族 0x62/0x64/0x72（审计/流量累计/打洞结果）。
 /// </summary>
 public sealed class ControlMessageRouter
 {
@@ -16,11 +17,12 @@ public sealed class ControlMessageRouter
     private readonly SignalingCoordinator _signaling;
     private readonly MappingService _mappings;
     private readonly RelayService _relay;
+    private readonly StatsService _stats;
     private readonly AuditLogger _audit;
 
     public ControlMessageRouter(RegistrationService registration, UserService user,
         GroupService group, SignalingCoordinator signaling, MappingService mappings,
-        RelayService relay, AuditLogger audit)
+        RelayService relay, StatsService stats, AuditLogger audit)
     {
         _registration = registration;
         _user = user;
@@ -28,6 +30,7 @@ public sealed class ControlMessageRouter
         _signaling = signaling;
         _mappings = mappings;
         _relay = relay;
+        _stats = stats;
         _audit = audit;
     }
 
@@ -84,6 +87,15 @@ public sealed class ControlMessageRouter
                 break;
             case RelayAllocate relayAllocate:
                 await _relay.HandleAllocateAsync(session, relayAllocate);
+                break;
+            case PunchResult punchResult: // 0x72 打洞结果 → punch_stats（M2-08，03 §2.9）
+                await _signaling.HandlePunchResultAsync(session, punchResult);
+                break;
+            case MappingStatus mappingStatus: // 0x62 映射状态 → 审计流水（M2-08）
+                await _stats.HandleMappingStatusAsync(session, mappingStatus);
+                break;
+            case StatsReport statsReport: // 0x64 流量累计 → mapping_stats 覆盖式 upsert（M2-08）
+                await _stats.HandleStatsReportAsync(session, statsReport);
                 break;
             case MappingUpsert mappingUpsert:
                 await _mappings.HandleUpsertAsync(session, mappingUpsert);

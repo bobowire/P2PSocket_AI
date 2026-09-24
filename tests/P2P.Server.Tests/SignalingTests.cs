@@ -48,6 +48,7 @@ public sealed class SignalingTests : IAsyncLifetime
             _signaling,
             new MappingService(factory, audit),
             _relay,
+            new StatsService(factory, audit),
             audit);
         _server = new ControlServer(factory, _registry, router.DispatchAsync, time: _time);
         return _server.StartAsync(new IPEndPoint(IPAddress.Loopback, 0));

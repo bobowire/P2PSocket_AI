@@ -1,6 +1,6 @@
 # P2P 内网穿透产品 · 技术设计文档
 
-> 版本：v1.18　创建日期：2026-08-19　状态：待评审
+> 版本：v1.19　创建日期：2026-08-19　状态：待评审
 > 依据：[产品需求文档 PRD v0.6](../prd/README.md)（决策 D1~D21，D3 经 v0.4 修订；开放问题 OQ-1~OQ-19 已全部决议）
 > 定位：开发阶段的**施工图纸**——所有实现以本文档为准；与 PRD 冲突时以 PRD 为准并提出修订。
 
@@ -91,3 +91,4 @@
 | 2026-09-22 | v1.16 | M2-07 落地同步：02 §6.2 补实现注记——§6.1④ "源地址更新"**收窄为 RELAY_JOIN 认领时刷新**（数据包未知源保守丢弃防劫持，地址变更经重新 JOIN/空闲回收兜底）、0x74 错误路径定案（5002 / 1001 session_unknown[台账 120s] / 4005）、Grant 端点 host 取控制连接本地侧地址、TCP 端首帧 10s 与断连即收会话；05 新增 §6.1 实现注记（端槽认领算法、转发承载 TCP 优先无缓冲丢弃、per-end 写串行化、回收细节）——TD-11/90s/限速 M3 决议语义不变 |
 | 2026-09-23 | v1.17 | M2-18 落地同步：05 §4 补实现注记——回退链内联 Puncher（0x74→JOIN 先 UDP 后 TCP 承载兜底[两端承载可异构]→PTP 握手即经中继，THello1 200ms 周期重发覆盖对端 JOIN 窗、回退预算独立计量、失败并入映射 failed）；被邀请侧关联机制（RelayGrant 不含对端信息——以 THello1 载荷打洞 sessionId 关联预记邀请上下文[对端 deviceId+静态公钥，服务端 relayAllowed 真才预记/应答成功即撤销/TTL 120s 对齐服务端台账/先记后应答防并发竞态]）；TunnelSession.ViaRelay 承载标记驱动映射态分派/隧道复用/断链回 punching。Primary+Fallback 双 socket 并存切换（NET-75 排水）属 M2-19 回切，本版未含 |
 | 2026-09-23 | v1.18 | M2-19 落地同步：05 §4 补实现注记（回切直连 OQ-7/NET-75）——0x73 只做协调触发（访问方 IsInitiator 60s 周期[测试缝 RelayRetryIntervalOverride]→服务端台账解析[120s 过期以 RelayService.ResolveActiveRelay 按 PunchSessionId 反查活中继兜底；非发起方 1001 防双端同打]→双端 0x73{原 sessionId}，实际端点交换由 A 随后全新 0x70 驱动；客户端被 1001 拒退化全新 0x70）；NET-75 排水切换落 TunnelHost.Attach（存活旧会话 2s 排水窗内接收照常后 Close("replaced_drained")、已亡立即 Close、会话表即刻指新）；排水期新旧并存一致性（SessionDisconnected 携带会话对象[引擎只清旧会话 channel]、新增 SessionAttached 驱动 B 侧/兜底 relay→direct[明细 relay_to_direct]）；重打失败映射保持 relay 态服务连续、失败+回退资格真走新中继会话双端整体替换（防单端保留旧会话脑裂）；每连接帧连续即满足 NET-75 顺序性（断连后尾部写入不在语义内） |
+| 2026-09-24 | v1.19 | M2-08 落地同步：05 §5 补实现注记（上报族 0x72/0x62/0x64 与保留清理）——0x72 结果映射（Ok+端点=direct / Ok 无端点=relay[FailReason 携带打洞失败原因] / !Ok=failed，relay 语义靠端点缺席表达不改 schema）、proto/N/时长取自会话台账（M2-07 台账扩为 RelayLedgerEntry 含 proto/PunchCount/CreatedAt；120s 窗覆盖全部上报时点，窗外 drop+审计；仅发起方可报、sessionId 去重首份即定论）；0x62 → mapping_status 审计流水（映射运行态不落表，客户端状态机是真相源；仅受理本人映射）；0x64 → mapping_stats 覆盖式 upsert（载荷=客户端本地累计绝对值→重发/乱序不叠加，最新到达=客户端当前真相；逐项归属校验、同报告重复项去重）；RetentionCleaner 启动+每日（audit_logs 与 punch_stats 一并，OQ-17；键每轮现读、非法回退 90）；03 §2.7/§2.9 保留口径与 concurrency 来源勘误同步 |

@@ -38,7 +38,7 @@ public sealed class RegistrationTests : IAsyncLifetime
         _relay = new RelayService(factory, _registry, _signaling.ResolveRelayPeers, time: _time);
         var router = new ControlMessageRouter(_registration, new UserService(factory, audit, _time),
             new GroupService(factory, _registry, _time), _signaling,
-            new MappingService(factory, audit), _relay, audit);
+            new MappingService(factory, audit), _relay, new StatsService(factory, audit), audit);
         _server = new ControlServer(factory, _registry, router.DispatchAsync, time: _time);
         return _server.StartAsync(new IPEndPoint(IPAddress.Loopback, 0));
     }

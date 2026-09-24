@@ -214,7 +214,8 @@ public sealed class ControlSession : IAsyncDisposable
             or MsgType.UserLogout or MsgType.Heartbeat or MsgType.DeviceList or MsgType.GroupCreate
             or MsgType.GroupUpdate or MsgType.GroupDissolve or MsgType.MappingUpsert or MsgType.MappingDelete
             or MsgType.MappingStatus or MsgType.PunchRequest or MsgType.PunchInvite or MsgType.PunchResult
-            or MsgType.PunchEndpoint or MsgType.PunchRetry or MsgType.RelayAllocate or MsgType.Error;
+            or MsgType.PunchEndpoint or MsgType.PunchRetry or MsgType.RelayAllocate
+            or MsgType.StatsReport or MsgType.Error;
 
     private static IPcpMessage DecodeTyped(byte[] msgpack, byte msgType) => msgType switch
     {
@@ -231,6 +232,8 @@ public sealed class ControlSession : IAsyncDisposable
         MsgType.MappingUpsert => PcpCodec.Decode<MappingUpsert>(msgpack),
         MsgType.MappingDelete => PcpCodec.Decode<MappingDelete>(msgpack),
         MsgType.MappingStatus => PcpCodec.Decode<MappingStatus>(msgpack),
+        MsgType.StatsReport => PcpCodec.Decode<StatsReport>(msgpack),          // 0x64 流量累计（M2-08）
+        MsgType.PunchResult => PcpCodec.Decode<PunchResult>(msgpack),          // 0x72 打洞结果（M2-08）
         MsgType.PunchRequest => PcpCodec.Decode<PunchRequest>(msgpack),
         MsgType.PunchEndpoint => PcpCodec.Decode<PunchEndpoint>(msgpack),
         MsgType.PunchRetry => PcpCodec.Decode<PunchRetry>(msgpack), // 0x73 回切协调（M2-19）
