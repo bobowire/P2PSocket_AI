@@ -6,8 +6,9 @@ dist/
 node_modules/
 wwwroot/
 
-# 数据与日志
+# 数据与日志（data/ 指运行时工作目录；源码目录 Data/ 反排除——Windows 大小写不敏感曾误伤服务端数据层）
 data/
+!src/P2P.Server/Data/
 logs/
 *.db
 *.db-wal
