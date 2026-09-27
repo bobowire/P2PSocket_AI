@@ -54,6 +54,34 @@ public sealed class DbInitializerTests : IDisposable
     }
 
     [Fact]
+    public void Seed_DefaultJoinPolicyConfigurable()
+    {
+        // FR-S-304：默认分组准入策略取 default_join_policy 配置
+        DbInitializer.Initialize(_db);
+        var def = Assert.Single(_db.Groups.Where(g => g.IsDefault));
+        var admin = Assert.Single(_db.Users.Where(u => u.IsAdmin));
+
+        // 拆掉默认分组后改配置再 Seed：重建的默认组应取 approval
+        _db.GroupMembers.RemoveRange(_db.GroupMembers.Where(m => m.GroupId == def.Id));
+        _db.Groups.Remove(def);
+        _db.ServerConfig.Single(c => c.Key == "default_join_policy").Value = "approval";
+        _db.SaveChanges();
+        DbInitializer.Seed(_db);
+
+        var rebuilt = Assert.Single(_db.Groups.Where(g => g.IsDefault));
+        Assert.Equal("approval", rebuilt.JoinPolicy);
+        Assert.Equal(admin.Id, rebuilt.OwnerUserId);
+
+        // 非法值回退 free
+        _db.GroupMembers.RemoveRange(_db.GroupMembers.Where(m => m.GroupId == rebuilt.Id));
+        _db.Groups.Remove(rebuilt);
+        _db.ServerConfig.Single(c => c.Key == "default_join_policy").Value = "bogus";
+        _db.SaveChanges();
+        DbInitializer.Seed(_db);
+        Assert.Equal("free", Assert.Single(_db.Groups.Where(g => g.IsDefault)).JoinPolicy);
+    }
+
+    [Fact]
     public void Initialize_IsIdempotent()
     {
         DbInitializer.Initialize(_db);

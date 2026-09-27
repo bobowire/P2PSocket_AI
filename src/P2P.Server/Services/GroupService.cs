@@ -5,18 +5,25 @@ using P2P.Server.Data;
 namespace P2P.Server.Services;
 
 /// <summary>
-/// 分组与设备列表（02 §2.4 0x50/0x55/0x56/0x40；FR-S-301/302/401、OQ-16）。
+/// 分组与设备列表（02 §2.4 0x50~0x57/0x40；FR-S-301~307、OQ-16/17）。
 /// 0x40 可见性 = 本账号设备 ∪ 共同分组设备（与 L2 同口径，05 §5）。
-/// 入组 0x51/邀请码/审批/移出成员（FR-S-303~307）→ M2。
+/// M2-09：凭码入组/审批队列/邀请码/退组/移出成员全量；入组即跨账号共享
+/// （成员是设备维度，joiner 所属账号与组所有者无关，05 §1）；0x75 联动触发点归 M2-12。
 /// </summary>
 public sealed class GroupService(
     IDbContextFactory<AppDbContext> dbFactory,
     DeviceRegistry registry,
+    AuditLogger audit,
     TimeProvider? time = null)
 {
     /// <summary>0x40 分页上限（OQ-16：默认 100，钳制区间 1~200）。</summary>
     public const int DefaultLimit = 100;
     public const int MaxLimit = 200;
+
+    /// <summary>邀请码 6 位去混淆字符集（03 §3：数字 2-9 + 小写去 o/i/l，OQ-17）。</summary>
+    public const int InviteCodeLength = 6;
+    internal const string InviteCharset = "23456789abcdefghjkmnpqrstuvwxyz";
+    private const int InviteCodeMaxAttempts = 8;
 
     private readonly TimeProvider _time = time ?? TimeProvider.System;
 
@@ -46,9 +53,268 @@ public sealed class GroupService(
         };
         await using var db = await dbFactory.CreateDbContextAsync();
         db.Groups.Add(group);
+        // 创建设备即首成员（FR-S-306 组内互见：可见性=共同分组口径，
+        // 创建者不入组则与凭码入组的跨账号设备互不可见）
+        db.GroupMembers.Add(new GroupMember
+        {
+            Id = Guid.NewGuid(), GroupId = group.Id, DeviceId = session.DeviceId,
+            Approved = true, JoinedAt = group.CreatedAt,
+        });
         await db.SaveChangesAsync();
         await session.SendAsync(new GroupCreateAck(session.NextSeq(), session.ServerTimestamp(),
             MsgType.GroupCreate, group.Id));
+    }
+
+    // ── 0x51 凭码入组（登录态；free 即入 / approval 建申请单；FR-S-303/306）──
+
+    public async Task HandleJoinAsync(ControlSession session, GroupJoin msg)
+    {
+        if (session.OwnerUserId is null)
+        {
+            await session.SendErrorAsync(ErrorCode.Unauthorized, "login_required");
+            return;
+        }
+        var code = msg.InviteCode?.Trim();
+        if (string.IsNullOrEmpty(code))
+        {
+            await session.SendErrorAsync(ErrorCode.BadRequest, "invite_code_required");
+            return;
+        }
+
+        await using var db = await dbFactory.CreateDbContextAsync();
+        var group = await db.Groups.AsNoTracking().SingleOrDefaultAsync(g => g.InviteCode == code);
+        if (group is null) // 无码匹配=无效或已撤销（撤销=置 NULL）
+        {
+            await session.SendErrorAsync(ErrorCode.GroupNotFound, "invite_invalid");
+            await audit.WriteAsync("group_join_deny", session.DeviceId, userId: session.OwnerUserId,
+                detail: new { Reason = "invite_invalid" });
+            return;
+        }
+
+        // 已是成员：幂等 Ack（不重复入组、不重复审计）
+        if (await db.GroupMembers.AnyAsync(m => m.GroupId == group.Id && m.DeviceId == session.DeviceId))
+        {
+            await session.SendAsync(new GroupJoinAck(session.NextSeq(), session.ServerTimestamp(),
+                MsgType.GroupJoin, group.Id));
+            return;
+        }
+
+        if (group.JoinPolicy != "approval")
+        {
+            db.GroupMembers.Add(new GroupMember
+            {
+                Id = Guid.NewGuid(), GroupId = group.Id, DeviceId = session.DeviceId,
+                Approved = true, JoinedAt = _time.GetLocalNow().UtcDateTime,
+            });
+            // 直接入组后清理残留 pending 申请（策略曾由 approval 切换的边角）
+            await db.JoinRequests.Where(r => r.GroupId == group.Id && r.DeviceId == session.DeviceId
+                && r.Status == "pending").ExecuteDeleteAsync();
+            await db.SaveChangesAsync();
+            await session.SendAsync(new GroupJoinAck(session.NextSeq(), session.ServerTimestamp(),
+                MsgType.GroupJoin, group.Id));
+            await audit.WriteAsync("group_join", session.DeviceId, userId: session.OwnerUserId,
+                detail: new { GroupId = group.Id, Policy = "free" });
+            return;
+        }
+
+        // approval：建 pending 申请单（重复申请去重），回 3002 待审批
+        if (!await db.JoinRequests.AnyAsync(r => r.GroupId == group.Id && r.DeviceId == session.DeviceId
+                && r.Status == "pending"))
+        {
+            db.JoinRequests.Add(new JoinRequest
+            {
+                Id = Guid.NewGuid(), GroupId = group.Id, DeviceId = session.DeviceId,
+                Status = "pending", CreatedAt = _time.GetLocalNow().UtcDateTime,
+            });
+            await db.SaveChangesAsync();
+            await audit.WriteAsync("group_join_request", session.DeviceId, userId: session.OwnerUserId,
+                detail: new { GroupId = group.Id });
+        }
+        await session.SendErrorAsync(ErrorCode.GroupNeedApproval, "group_need_approval");
+    }
+
+    // ── 0x52 设备自退（登录态；FR-S-307）─────────────────────────────
+
+    public async Task HandleLeaveAsync(ControlSession session, GroupLeave msg)
+    {
+        if (session.OwnerUserId is null)
+        {
+            await session.SendErrorAsync(ErrorCode.Unauthorized, "login_required");
+            return;
+        }
+        await using var db = await dbFactory.CreateDbContextAsync();
+        var removed = await db.GroupMembers.Where(m =>
+            m.GroupId == msg.GroupId && m.DeviceId == session.DeviceId).ExecuteDeleteAsync();
+        await session.SendAsync(new GroupLeaveAck(session.NextSeq(), session.ServerTimestamp(),
+            MsgType.GroupLeave, removed > 0));
+        if (removed > 0)
+            await audit.WriteAsync("group_leave", session.DeviceId, userId: session.OwnerUserId,
+                detail: new { msg.GroupId });
+    }
+
+    // ── 0x53 审批队列 List/Approve/Reject（仅所有者；FR-S-305）────────
+
+    public async Task HandleJoinRequestsAsync(ControlSession session, JoinRequests msg)
+    {
+        if (session.OwnerUserId is null)
+        {
+            await session.SendErrorAsync(ErrorCode.Unauthorized, "login_required");
+            return;
+        }
+        switch (msg.Action)
+        {
+            case JoinRequestAction.List:
+                await HandleJoinListAsync(session, msg);
+                return;
+            case JoinRequestAction.Approve or JoinRequestAction.Reject:
+                await HandleJoinDecisionAsync(session, msg);
+                return;
+            default:
+                await session.SendErrorAsync(ErrorCode.BadRequest, "bad_join_request_action");
+                return;
+        }
+    }
+
+    private async Task HandleJoinListAsync(ControlSession session, JoinRequests msg)
+    {
+        if (msg.GroupId is not { } groupId)
+        {
+            await session.SendErrorAsync(ErrorCode.BadRequest, "group_id_required");
+            return;
+        }
+        var (forbidden, notFound) = await CheckOwnerAsync(session, groupId);
+        if (notFound)
+        {
+            await session.SendErrorAsync(ErrorCode.GroupNotFound, "group_not_found");
+            return;
+        }
+        if (forbidden)
+        {
+            await session.SendErrorAsync(ErrorCode.Forbidden, "not_group_owner");
+            return;
+        }
+
+        await using var db = await dbFactory.CreateDbContextAsync();
+        var rows = await db.JoinRequests.AsNoTracking()
+            .Where(r => r.GroupId == groupId && r.Status == "pending")
+            .OrderBy(r => r.CreatedAt).ThenBy(r => r.Id)
+            .ToListAsync();
+        var names = await db.Devices.AsNoTracking()
+            .Where(d => rows.Select(r => r.DeviceId).Contains(d.Id))
+            .ToDictionaryAsync(d => d.Id, d => d.DeviceName);
+        var items = rows.Select(r => new JoinRequestItem(r.Id, r.GroupId, r.DeviceId,
+            names.GetValueOrDefault(r.DeviceId, ""),
+            (ulong)new DateTimeOffset(r.CreatedAt).ToUnixTimeMilliseconds())).ToArray();
+        await session.SendAsync(new JoinRequestsResponse(session.NextSeq(), session.ServerTimestamp(),
+            MsgType.JoinRequests, items));
+    }
+
+    private async Task HandleJoinDecisionAsync(ControlSession session, JoinRequests msg)
+    {
+        if (msg.RequestId is not { } requestId)
+        {
+            await session.SendErrorAsync(ErrorCode.BadRequest, "request_id_required");
+            return;
+        }
+        await using var db = await dbFactory.CreateDbContextAsync();
+        var request = await db.JoinRequests.SingleOrDefaultAsync(r =>
+            r.Id == requestId && r.Status == "pending");
+        if (request is null) // 不存在或已处理：诚实 Ok=false（防客户端无限等待）
+        {
+            await session.SendAsync(new JoinRequestsAck(session.NextSeq(), session.ServerTimestamp(),
+                MsgType.JoinRequests, false));
+            return;
+        }
+        var (forbidden, notFound) = await CheckOwnerAsync(session, request.GroupId);
+        if (notFound)
+        {
+            await session.SendErrorAsync(ErrorCode.GroupNotFound, "group_not_found");
+            return;
+        }
+        if (forbidden)
+        {
+            await session.SendErrorAsync(ErrorCode.Forbidden, "not_group_owner");
+            return;
+        }
+
+        var approved = msg.Action == JoinRequestAction.Approve;
+        request.Status = approved ? "approved" : "rejected";
+        request.HandledAt = _time.GetLocalNow().UtcDateTime;
+        if (approved && !await db.GroupMembers.AnyAsync(m =>
+                m.GroupId == request.GroupId && m.DeviceId == request.DeviceId))
+            db.GroupMembers.Add(new GroupMember
+            {
+                Id = Guid.NewGuid(), GroupId = request.GroupId, DeviceId = request.DeviceId,
+                Approved = true, JoinedAt = _time.GetLocalNow().UtcDateTime,
+            });
+        await db.SaveChangesAsync();
+        await session.SendAsync(new JoinRequestsAck(session.NextSeq(), session.ServerTimestamp(),
+            MsgType.JoinRequests, true));
+        await audit.WriteAsync(approved ? "group_join_approve" : "group_join_reject",
+            session.DeviceId, userId: session.OwnerUserId,
+            detail: new { request.GroupId, request.DeviceId, RequestId = request.Id });
+    }
+
+    // ── 0x54 邀请码生成/撤销（仅所有者；每分组至多一码=覆盖式；OQ-17）──
+
+    public async Task HandleInviteGenAsync(ControlSession session, GroupInviteGen msg)
+    {
+        if (session.OwnerUserId is null)
+        {
+            await session.SendErrorAsync(ErrorCode.Unauthorized, "login_required");
+            return;
+        }
+        var (forbidden, notFound) = await CheckOwnerAsync(session, msg.GroupId);
+        if (notFound)
+        {
+            await session.SendErrorAsync(ErrorCode.GroupNotFound, "group_not_found");
+            return;
+        }
+        if (forbidden)
+        {
+            await session.SendErrorAsync(ErrorCode.Forbidden, "not_group_owner");
+            return;
+        }
+
+        await using var db = await dbFactory.CreateDbContextAsync();
+        var group = await db.Groups.SingleAsync(g => g.Id == msg.GroupId);
+        if (msg.Revoke)
+        {
+            group.InviteCode = null;
+            await db.SaveChangesAsync();
+            await session.SendAsync(new GroupInviteGenAck(session.NextSeq(), session.ServerTimestamp(),
+                MsgType.GroupInviteGen, true, null));
+            await audit.WriteAsync("group_invite_revoke", session.DeviceId, userId: session.OwnerUserId,
+                detail: new { msg.GroupId });
+            return;
+        }
+
+        for (var attempt = 1; attempt <= InviteCodeMaxAttempts; attempt++)
+        {
+            var code = GenerateInviteCode();
+            if (await db.Groups.AsNoTracking().AnyAsync(g => g.InviteCode == code))
+                continue;
+            group.InviteCode = code;
+            try
+            {
+                await db.SaveChangesAsync();
+            }
+            catch (DbUpdateException ex) when (IsUniqueViolation(ex) && attempt >= InviteCodeMaxAttempts)
+            {
+                break; // 冲突重试耗尽（6 位 31 字符集 ≈ 8.9 亿空间，实际不可达）
+            }
+            catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+            {
+                continue; // 并发撞码：换码重试
+            }
+            await session.SendAsync(new GroupInviteGenAck(session.NextSeq(), session.ServerTimestamp(),
+                MsgType.GroupInviteGen, true, code));
+            // 审计不含码值本身（AI-17：准入凭据不入日志）
+            await audit.WriteAsync("group_invite_gen", session.DeviceId, userId: session.OwnerUserId,
+                detail: new { msg.GroupId });
+            return;
+        }
+        await session.SendErrorAsync(ErrorCode.Conflict, "invite_code_exhausted");
     }
 
     // ── 0x55 编辑（所有者；Name/Policy null=不改）─────────────────────
@@ -119,6 +385,40 @@ public sealed class GroupService(
             MsgType.GroupDissolve, true));
     }
 
+    // ── 0x57 所有者移出成员（FR-S-307）───────────────────────────────
+
+    public async Task HandleRemoveMemberAsync(ControlSession session, GroupRemoveMember msg)
+    {
+        if (session.OwnerUserId is null)
+        {
+            await session.SendErrorAsync(ErrorCode.Unauthorized, "login_required");
+            return;
+        }
+        var (forbidden, notFound) = await CheckOwnerAsync(session, msg.GroupId);
+        if (notFound)
+        {
+            await session.SendErrorAsync(ErrorCode.GroupNotFound, "group_not_found");
+            return;
+        }
+        if (forbidden)
+        {
+            await session.SendErrorAsync(ErrorCode.Forbidden, "not_group_owner");
+            return;
+        }
+
+        await using var db = await dbFactory.CreateDbContextAsync();
+        var removed = await db.GroupMembers.Where(m =>
+            m.GroupId == msg.GroupId && m.DeviceId == msg.MemberDeviceId).ExecuteDeleteAsync();
+        // 移出后残留 pending 申请一并清理（该设备不再待审）
+        await db.JoinRequests.Where(r => r.GroupId == msg.GroupId && r.DeviceId == msg.MemberDeviceId
+            && r.Status == "pending").ExecuteDeleteAsync();
+        await session.SendAsync(new GroupRemoveMemberAck(session.NextSeq(), session.ServerTimestamp(),
+            MsgType.GroupRemoveMember, removed > 0));
+        if (removed > 0)
+            await audit.WriteAsync("group_member_remove", session.DeviceId, userId: session.OwnerUserId,
+                detail: new { msg.GroupId, msg.MemberDeviceId });
+    }
+
     // ── 0x40 设备列表分页（OQ-16）────────────────────────────────────
 
     public async Task HandleDeviceListAsync(ControlSession session, DeviceListRequest msg)
@@ -168,6 +468,18 @@ public sealed class GroupService(
             (session.OwnerUserId != null && d.OwnerUserId == session.OwnerUserId)
             || db.GroupMembers.Any(m => m.DeviceId == d.Id && myGroups.Contains(m.GroupId)));
     }
+
+    /// <summary>邀请码生成（加密随机；UNIQUE 冲突由调用方重试）。</summary>
+    internal static string GenerateInviteCode()
+    {
+        Span<char> code = stackalloc char[InviteCodeLength];
+        for (var i = 0; i < InviteCodeLength; i++)
+            code[i] = InviteCharset[System.Security.Cryptography.RandomNumberGenerator.GetInt32(InviteCharset.Length)];
+        return new string(code);
+    }
+
+    private static bool IsUniqueViolation(DbUpdateException ex)
+        => ex.InnerException is Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: 19 };
 
     private async Task<(bool Forbidden, bool NotFound)> CheckOwnerAsync(ControlSession session, Guid groupId)
     {

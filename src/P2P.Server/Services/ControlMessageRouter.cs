@@ -7,7 +7,8 @@ namespace P2P.Server.Services;
 /// passive 主动类拦截（02 §2.5，SEC-51）在路由入口统一执行。
 /// M1-14~17 挂载注册/用户/分组/信令族；M1-28 挂载映射 0x60/0x61；
 /// M2-07 挂载中继 0x74 RelayAllocate；M2-19 挂载回切 0x73 PunchRetry；
-/// M2-08 挂载上报族 0x62/0x64/0x72（审计/流量累计/打洞结果）。
+/// M2-08 挂载上报族 0x62/0x64/0x72（审计/流量累计/打洞结果）；
+/// M2-09 挂载分组全量 0x51/0x52/0x53/0x54/0x57（凭码入组/自退/审批/邀请码/移出）。
 /// </summary>
 public sealed class ControlMessageRouter
 {
@@ -66,6 +67,21 @@ public sealed class ControlMessageRouter
                 break;
             case GroupCreate groupCreate:
                 await _group.HandleCreateAsync(session, groupCreate);
+                break;
+            case GroupJoin groupJoin: // 0x51 凭码入组（M2-09，FR-S-303/306）
+                await _group.HandleJoinAsync(session, groupJoin);
+                break;
+            case GroupLeave groupLeave: // 0x52 设备自退（M2-09，FR-S-307）
+                await _group.HandleLeaveAsync(session, groupLeave);
+                break;
+            case JoinRequests joinRequests: // 0x53 审批队列 List/Approve/Reject（M2-09，FR-S-305）
+                await _group.HandleJoinRequestsAsync(session, joinRequests);
+                break;
+            case GroupInviteGen groupInviteGen: // 0x54 邀请码生成/撤销（M2-09，OQ-17）
+                await _group.HandleInviteGenAsync(session, groupInviteGen);
+                break;
+            case GroupRemoveMember groupRemoveMember: // 0x57 所有者移出成员（M2-09，FR-S-307）
+                await _group.HandleRemoveMemberAsync(session, groupRemoveMember);
                 break;
             case GroupUpdate groupUpdate:
                 await _group.HandleUpdateAsync(session, groupUpdate);

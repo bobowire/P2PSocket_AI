@@ -78,7 +78,7 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
         var router = new ControlMessageRouter(
             new RegistrationService(_factory, _registry, audit),
             new UserService(_factory, audit),
-            new GroupService(_factory, _registry),
+            new GroupService(_factory, _registry, audit),
             signaling,
             new MappingService(_factory, audit),
             relay,

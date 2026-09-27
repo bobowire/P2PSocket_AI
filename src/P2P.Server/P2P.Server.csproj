@@ -8,6 +8,10 @@
     <ProjectReference Include="..\P2P.Core\P2P.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <!-- 测试触达 internal（GroupService 邀请码生成器等），同 Client/Nic 惯例 -->
+    <InternalsVisibleTo Include="P2P.Server.Tests" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>

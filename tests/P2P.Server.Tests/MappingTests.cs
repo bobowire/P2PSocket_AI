@@ -36,7 +36,7 @@ public sealed class MappingTests : IAsyncLifetime
         var router = new ControlMessageRouter(
             new RegistrationService(_factory, _registry, audit),
             new UserService(_factory, audit),
-            new GroupService(_factory, _registry),
+            new GroupService(_factory, _registry, audit),
             _signaling,
             new MappingService(_factory, audit),
             _relay,

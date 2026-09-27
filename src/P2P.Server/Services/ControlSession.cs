@@ -212,6 +212,8 @@ public sealed class ControlSession : IAsyncDisposable
         => msgType is MsgType.Hello or MsgType.Proof or MsgType.Register or MsgType.RegisterAck
             or MsgType.UnbindMe or MsgType.DeviceUpdate or MsgType.UserRegister or MsgType.UserLogin
             or MsgType.UserLogout or MsgType.Heartbeat or MsgType.DeviceList or MsgType.GroupCreate
+            or MsgType.GroupJoin or MsgType.GroupLeave or MsgType.JoinRequests or MsgType.GroupInviteGen
+            or MsgType.GroupRemoveMember
             or MsgType.GroupUpdate or MsgType.GroupDissolve or MsgType.MappingUpsert or MsgType.MappingDelete
             or MsgType.MappingStatus or MsgType.PunchRequest or MsgType.PunchInvite or MsgType.PunchResult
             or MsgType.PunchEndpoint or MsgType.PunchRetry or MsgType.RelayAllocate
@@ -227,6 +229,11 @@ public sealed class ControlSession : IAsyncDisposable
         MsgType.UnbindMe => PcpCodec.Decode<UnbindMe>(msgpack),
         MsgType.DeviceList => PcpCodec.Decode<DeviceListRequest>(msgpack),
         MsgType.GroupCreate => PcpCodec.Decode<GroupCreate>(msgpack),
+        MsgType.GroupJoin => PcpCodec.Decode<GroupJoin>(msgpack),              // 0x51 凭码入组（M2-09）
+        MsgType.GroupLeave => PcpCodec.Decode<GroupLeave>(msgpack),            // 0x52 自退（M2-09）
+        MsgType.JoinRequests => PcpCodec.Decode<JoinRequests>(msgpack),        // 0x53 审批队列（M2-09）
+        MsgType.GroupInviteGen => PcpCodec.Decode<GroupInviteGen>(msgpack),    // 0x54 邀请码（M2-09）
+        MsgType.GroupRemoveMember => PcpCodec.Decode<GroupRemoveMember>(msgpack), // 0x57 移出（M2-09）
         MsgType.GroupUpdate => PcpCodec.Decode<GroupUpdate>(msgpack),
         MsgType.GroupDissolve => PcpCodec.Decode<GroupDissolve>(msgpack),
         MsgType.MappingUpsert => PcpCodec.Decode<MappingUpsert>(msgpack),

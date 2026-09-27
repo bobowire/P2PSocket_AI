@@ -10,8 +10,9 @@ using Xunit;
 namespace P2P.Server.Tests;
 
 /// <summary>
-/// 分组与设备列表测试（02 §2.4 0x50/0x55/0x56/0x40；完成判定：分页边界（空/恰满/越界 offset）、解散后可见性回收）。
-/// 入组 0x51 属 M2：非默认组成员关系以直接写库构造。
+/// 分组与设备列表测试（02 §2.4 0x50~0x57/0x40）。
+/// M1-16：分页边界（空/恰满/越界 offset）、0x50/0x55/0x56 权限与生命周期、解散后可见性回收。
+/// M2-09：凭码入组（free/approval 双策略）、审批队列、邀请码生成/撤销/唯一性、退组/移出可见性回收。
 /// </summary>
 public sealed class GroupTests : IAsyncLifetime
 {
@@ -35,7 +36,7 @@ public sealed class GroupTests : IAsyncLifetime
         var router = new ControlMessageRouter(
             new RegistrationService(factory, _registry, audit),
             new UserService(factory, audit),
-            new GroupService(factory, _registry),
+            new GroupService(factory, _registry, audit),
             _signaling,
             new MappingService(factory, audit),
             _relay,
@@ -195,16 +196,7 @@ public sealed class GroupTests : IAsyncLifetime
         var defaultErr = await owner.ReceiveAsync<ErrorMessage>();
         Assert.Equal(ErrorCode.Conflict, defaultErr!.Code);
 
-        // 解散自定义组 → Ok + 成员/申请联动清理
-        await using (var db = CreateDb())
-        {
-            db.GroupMembers.Add(new GroupMember
-            {
-                Id = Guid.NewGuid(), GroupId = created.GroupId, DeviceId = ownerId,
-                Approved = true, JoinedAt = DateTime.UtcNow,
-            });
-            await db.SaveChangesAsync();
-        }
+        // 解散自定义组 → Ok + 成员/申请联动清理（创建者成员由建组隐式写入，M2-09）
         await owner.SendAsync(new GroupDissolve(owner.NextSeq(), owner.Now(), MsgType.GroupDissolve, created.GroupId));
         var dissolved = await owner.ReceiveAsync<GroupDissolveAck>();
         Assert.True(dissolved!.Ok);
@@ -235,6 +227,362 @@ public sealed class GroupTests : IAsyncLifetime
         Assert.Equal(ErrorCode.Forbidden, error!.Code);
     }
 
+    // ── M2-09 辅助：独立账号（跨账号共享入组，05 §1）──────────────────
+
+    /// <summary>已注册设备注册独立用户并登录（默认 username 同密码）。</summary>
+    private async Task LoginNewUserAsync(TestPcpClient client, string username)
+    {
+        await client.SendAsync(new UserRegister(client.NextSeq(), client.Now(), MsgType.UserRegister,
+            username, $"{username}-password-1"));
+        _ = await client.ReceiveAsync<UserRegisterAck>();
+        await client.SendAsync(new UserLogin(client.NextSeq(), client.Now(), MsgType.UserLogin,
+            username, $"{username}-password-1"));
+        _ = await client.ReceiveAsync<UserLoginAck>();
+    }
+
+    /// <summary>所有者生成邀请码（0x54），返回码值。</summary>
+    private static async Task<string> GenInviteAsync(TestPcpClient owner, Guid groupId)
+    {
+        await owner.SendAsync(new GroupInviteGen(owner.NextSeq(), owner.Now(), MsgType.GroupInviteGen,
+            groupId, Revoke: false));
+        var ack = await owner.ReceiveAsync<GroupInviteGenAck>();
+        Assert.True(ack!.Ok);
+        return ack.InviteCode!;
+    }
+
+    /// <summary>B 移出默认组，使指定组成为唯一可见性来源（M1-16 基线同款构造）。</summary>
+    private async Task RemoveFromDefaultGroupAsync(Guid deviceId)
+    {
+        await using var db = CreateDb();
+        var defaultGroupId = await db.Groups.AsNoTracking().Where(g => g.IsDefault).Select(g => g.Id).SingleAsync();
+        var row = await db.GroupMembers.SingleAsync(m => m.GroupId == defaultGroupId && m.DeviceId == deviceId);
+        db.GroupMembers.Remove(row);
+        await db.SaveChangesAsync();
+    }
+
+    // ── M2-09 0x51/0x54 凭码入组（free/approval 双策略）────────────────
+
+    [Fact]
+    public async Task GroupJoin_FreePolicy_CrossAccount_JoinsAndVisible()
+    {
+        // 跨账号：组所有者=admin，入组设备属独立用户 eve（成员是设备维度，05 §1）
+        var (owner, ownerId) = await ConnectLoggedInAsync("owner");
+        var (joiner, joinerId) = await ConnectRegisteredAsync("joiner");
+        await LoginNewUserAsync(joiner, "eve");
+
+        await owner.SendAsync(new GroupCreate(owner.NextSeq(), owner.Now(), MsgType.GroupCreate,
+            "共享组", JoinPolicy.Free));
+        var group = await owner.ReceiveAsync<GroupCreateAck>();
+        var code = await GenInviteAsync(owner, group!.GroupId);
+
+        // 凭码入组：free 即入
+        await joiner.SendAsync(new GroupJoin(joiner.NextSeq(), joiner.Now(), MsgType.GroupJoin, code));
+        var joined = await joiner.ReceiveAsync<GroupJoinAck>();
+        Assert.Equal(group.GroupId, joined!.GroupId);
+
+        await using (var db = CreateDb())
+        {
+            var member = await db.GroupMembers.AsNoTracking()
+                .SingleAsync(m => m.GroupId == group.GroupId && m.DeviceId == joinerId);
+            Assert.True(member.Approved); // free 即入=已批准成员
+            Assert.True(await db.AuditLogs.AnyAsync(a => a.Event == "group_join"
+                && a.DeviceId == joinerId && a.UserId != null));
+        }
+
+        // 可见性互认（与 L2 同口径）
+        var ownerList = await ListAsync(owner, 0, 100);
+        Assert.Contains(ownerList.Items, i => i.DeviceId == joinerId);
+        var joinerList = await ListAsync(joiner, 0, 100);
+        Assert.Contains(joinerList.Items, i => i.DeviceId == ownerId);
+
+        // 已是成员：幂等 Ack（重复凭码不报错不重复入组）
+        await joiner.SendAsync(new GroupJoin(joiner.NextSeq(), joiner.Now(), MsgType.GroupJoin, code));
+        var again = await joiner.ReceiveAsync<GroupJoinAck>();
+        Assert.Equal(group.GroupId, again!.GroupId);
+        await using var db2 = CreateDb();
+        Assert.Equal(1, await db2.GroupMembers.CountAsync(m =>
+            m.GroupId == group.GroupId && m.DeviceId == joinerId));
+    }
+
+    [Fact]
+    public async Task GroupJoin_ApprovalPolicy_PendingListApprove()
+    {
+        var (owner, _) = await ConnectLoggedInAsync("owner");
+        var (joiner, joinerId) = await ConnectRegisteredAsync("joiner");
+        await LoginNewUserAsync(joiner, "eve");
+
+        await owner.SendAsync(new GroupCreate(owner.NextSeq(), owner.Now(), MsgType.GroupCreate,
+            "审批组", JoinPolicy.Approval));
+        var group = await owner.ReceiveAsync<GroupCreateAck>();
+        var code = await GenInviteAsync(owner, group!.GroupId);
+
+        // approval：建 pending 申请单 → 3002 待审批
+        await joiner.SendAsync(new GroupJoin(joiner.NextSeq(), joiner.Now(), MsgType.GroupJoin, code));
+        var pending = await joiner.ReceiveAsync<ErrorMessage>();
+        Assert.Equal(ErrorCode.GroupNeedApproval, pending!.Code);
+
+        // 重复申请去重：再入组仍 3002，申请单不重复
+        await joiner.SendAsync(new GroupJoin(joiner.NextSeq(), joiner.Now(), MsgType.GroupJoin, code));
+        _ = await joiner.ReceiveAsync<ErrorMessage>();
+        Guid requestId;
+        await using (var db = CreateDb())
+            requestId = await db.JoinRequests.AsNoTracking()
+                .Where(r => r.GroupId == group.GroupId && r.DeviceId == joinerId)
+                .Select(r => r.Id).SingleAsync(); // 唯一 pending 行
+        await using (var db = CreateDb())
+            Assert.Equal(1, await db.JoinRequests.CountAsync(r =>
+                r.GroupId == group.GroupId && r.DeviceId == joinerId && r.Status == "pending"));
+
+        // 所有者 List：队列项含设备名与申请时间
+        await owner.SendAsync(new JoinRequests(owner.NextSeq(), owner.Now(), MsgType.JoinRequests,
+            JoinRequestAction.List, group.GroupId, null));
+        var queue = await owner.ReceiveAsync<JoinRequestsResponse>();
+        var item = Assert.Single(queue!.Items);
+        Assert.Equal(requestId, item.RequestId);
+        Assert.Equal(joinerId, item.DeviceId);
+        Assert.Equal("joiner", item.DeviceName);
+        Assert.True(item.CreatedAtMs > 0);
+
+        // Approve：批准即入组
+        await owner.SendAsync(new JoinRequests(owner.NextSeq(), owner.Now(), MsgType.JoinRequests,
+            JoinRequestAction.Approve, null, requestId));
+        var approved = await owner.ReceiveAsync<JoinRequestsAck>();
+        Assert.True(approved!.Ok);
+        await using var db3 = CreateDb();
+        Assert.True(await db3.GroupMembers.AnyAsync(m =>
+            m.GroupId == group.GroupId && m.DeviceId == joinerId && m.Approved));
+        Assert.Equal("approved", await db3.JoinRequests.Where(r => r.Id == requestId)
+            .Select(r => r.Status).SingleAsync());
+        Assert.True(await db3.AuditLogs.AnyAsync(a => a.Event == "group_join_approve"));
+
+        // 已处理的申请再 Approve：Ok=false（不重复入组）
+        await owner.SendAsync(new JoinRequests(owner.NextSeq(), owner.Now(), MsgType.JoinRequests,
+            JoinRequestAction.Approve, null, requestId));
+        var stale = await owner.ReceiveAsync<JoinRequestsAck>();
+        Assert.False(stale!.Ok);
+    }
+
+    [Fact]
+    public async Task GroupJoin_ApprovalPolicy_Reject_NoMembership()
+    {
+        var (owner, _) = await ConnectLoggedInAsync("owner");
+        var (joiner, joinerId) = await ConnectRegisteredAsync("joiner");
+        await LoginNewUserAsync(joiner, "eve");
+
+        await owner.SendAsync(new GroupCreate(owner.NextSeq(), owner.Now(), MsgType.GroupCreate,
+            "审批组R", JoinPolicy.Approval));
+        var group = await owner.ReceiveAsync<GroupCreateAck>();
+        var code = await GenInviteAsync(owner, group!.GroupId);
+
+        await joiner.SendAsync(new GroupJoin(joiner.NextSeq(), joiner.Now(), MsgType.GroupJoin, code));
+        _ = await joiner.ReceiveAsync<ErrorMessage>();
+        Guid requestId;
+        await using (var db = CreateDb())
+            requestId = (await db.JoinRequests.AsNoTracking().SingleAsync(r =>
+                r.GroupId == group!.GroupId && r.DeviceId == joinerId)).Id;
+
+        await owner.SendAsync(new JoinRequests(owner.NextSeq(), owner.Now(), MsgType.JoinRequests,
+            JoinRequestAction.Reject, null, requestId));
+        var rejected = await owner.ReceiveAsync<JoinRequestsAck>();
+        Assert.True(rejected!.Ok);
+        await using var db2 = CreateDb();
+        Assert.False(await db2.GroupMembers.AnyAsync(m => m.GroupId == group.GroupId && m.DeviceId == joinerId));
+        Assert.Equal("rejected", await db2.JoinRequests.Where(r => r.Id == requestId)
+            .Select(r => r.Status).SingleAsync());
+        Assert.True(await db2.AuditLogs.AnyAsync(a => a.Event == "group_join_reject"));
+    }
+
+    [Fact]
+    public async Task GroupJoin_RequiresLogin()
+    {
+        var (owner, _) = await ConnectLoggedInAsync("owner");
+        var (anon, _) = await ConnectRegisteredAsync("anon"); // 未登录
+        await owner.SendAsync(new GroupCreate(owner.NextSeq(), owner.Now(), MsgType.GroupCreate,
+            "码组", JoinPolicy.Free));
+        var group = await owner.ReceiveAsync<GroupCreateAck>();
+        var code = await GenInviteAsync(owner, group!.GroupId);
+
+        await anon.SendAsync(new GroupJoin(anon.NextSeq(), anon.Now(), MsgType.GroupJoin, code));
+        var error = await anon.ReceiveAsync<ErrorMessage>();
+        Assert.Equal(ErrorCode.Unauthorized, error!.Code);
+    }
+
+    // ── M2-09 0x54 邀请码撤销/无效 → 3001；唯一性 ─────────────────────
+
+    [Fact]
+    public async Task GroupJoin_RevokedOrInvalidCode_3001()
+    {
+        var (owner, _) = await ConnectLoggedInAsync("owner");
+        var (joiner, _) = await ConnectRegisteredAsync("joiner");
+        await LoginNewUserAsync(joiner, "eve");
+
+        await owner.SendAsync(new GroupCreate(owner.NextSeq(), owner.Now(), MsgType.GroupCreate,
+            "撤销组", JoinPolicy.Free));
+        var group = await owner.ReceiveAsync<GroupCreateAck>();
+        var code = await GenInviteAsync(owner, group!.GroupId);
+
+        // 撤销：Ack Ok 且不携带码
+        await owner.SendAsync(new GroupInviteGen(owner.NextSeq(), owner.Now(), MsgType.GroupInviteGen,
+            group.GroupId, Revoke: true));
+        var revoked = await owner.ReceiveAsync<GroupInviteGenAck>();
+        Assert.True(revoked!.Ok);
+        Assert.Null(revoked.InviteCode);
+
+        // 撤销后凭原码 → 3001（码失效）
+        await joiner.SendAsync(new GroupJoin(joiner.NextSeq(), joiner.Now(), MsgType.GroupJoin, code));
+        var revokedErr = await joiner.ReceiveAsync<ErrorMessage>();
+        Assert.Equal(ErrorCode.GroupNotFound, revokedErr!.Code);
+
+        // 乱码 → 3001
+        await joiner.SendAsync(new GroupJoin(joiner.NextSeq(), joiner.Now(), MsgType.GroupJoin, "zzzzzz"));
+        var invalid = await joiner.ReceiveAsync<ErrorMessage>();
+        Assert.Equal(ErrorCode.GroupNotFound, invalid!.Code);
+
+        await using var db = CreateDb();
+        Assert.True(await db.AuditLogs.CountAsync(a => a.Event == "group_join_deny") >= 2);
+    }
+
+    [Fact]
+    public async Task InviteCode_UniqueAcrossGroups_OverwritePerGroup()
+    {
+        var (owner, _) = await ConnectLoggedInAsync("owner");
+        await owner.SendAsync(new GroupCreate(owner.NextSeq(), owner.Now(), MsgType.GroupCreate,
+            "组一", JoinPolicy.Free));
+        var g1 = await owner.ReceiveAsync<GroupCreateAck>();
+        await owner.SendAsync(new GroupCreate(owner.NextSeq(), owner.Now(), MsgType.GroupCreate,
+            "组二", JoinPolicy.Free));
+        var g2 = await owner.ReceiveAsync<GroupCreateAck>();
+
+        var code1 = await GenInviteAsync(owner, g1!.GroupId);
+        var code2 = await GenInviteAsync(owner, g2!.GroupId);
+        Assert.NotEqual(code1, code2); // 全局唯一（UNIQUE 约束 + 生成器互异）
+
+        foreach (var c in new[] { code1, code2 })
+        {
+            Assert.Equal(GroupService.InviteCodeLength, c.Length); // 6 位
+            Assert.All(c, ch => Assert.True(GroupService.InviteCharset.Contains(ch))); // 去混淆字符集
+        }
+
+        // 同组再生成=覆盖式：旧码失效、新码可用
+        var code1b = await GenInviteAsync(owner, g1.GroupId);
+        Assert.NotEqual(code1, code1b);
+        var (joiner, _) = await ConnectRegisteredAsync("joiner");
+        await LoginNewUserAsync(joiner, "eve");
+        await joiner.SendAsync(new GroupJoin(joiner.NextSeq(), joiner.Now(), MsgType.GroupJoin, code1));
+        var staleErr = await joiner.ReceiveAsync<ErrorMessage>();
+        Assert.Equal(ErrorCode.GroupNotFound, staleErr!.Code);
+        await joiner.SendAsync(new GroupJoin(joiner.NextSeq(), joiner.Now(), MsgType.GroupJoin, code1b));
+        var joined = await joiner.ReceiveAsync<GroupJoinAck>();
+        Assert.Equal(g1.GroupId, joined!.GroupId);
+    }
+
+    [Fact]
+    public void InviteCode_Generator_FormatAndBulkDistinct()
+    {
+        // 纯单测：生成器格式（6 位/去混淆字符集）与批量互异
+        var seen = new HashSet<string>();
+        for (var i = 0; i < 200; i++)
+        {
+            var code = GroupService.GenerateInviteCode();
+            Assert.Equal(GroupService.InviteCodeLength, code.Length);
+            Assert.All(code, ch => Assert.True("23456789abcdefghjkmnpqrstuvwxyz".Contains(ch)));
+            Assert.True(seen.Add(code), $"撞码：{code}");
+        }
+    }
+
+    // ── M2-09 0x53 权限：仅所有者 ─────────────────────────────────────
+
+    [Fact]
+    public async Task JoinRequests_ByNonOwner_Forbidden()
+    {
+        var (owner, _) = await ConnectLoggedInAsync("owner-a");
+        await owner.SendAsync(new GroupCreate(owner.NextSeq(), owner.Now(), MsgType.GroupCreate,
+            "审批组N", JoinPolicy.Approval));
+        var group = await owner.ReceiveAsync<GroupCreateAck>();
+
+        var (intruder, _) = await ConnectRegisteredAsync("intruder");
+        await LoginNewUserAsync(intruder, "mallory");
+
+        await intruder.SendAsync(new JoinRequests(intruder.NextSeq(), intruder.Now(), MsgType.JoinRequests,
+            JoinRequestAction.List, group!.GroupId, null));
+        var error = await intruder.ReceiveAsync<ErrorMessage>();
+        Assert.Equal(ErrorCode.Forbidden, error!.Code);
+    }
+
+    // ── M2-09 0x52/0x57 退组/移出后可见性回收（完成判定）──────────────
+
+    [Fact]
+    public async Task GroupLeave_RevokesVisibility()
+    {
+        var (owner, ownerId) = await ConnectLoggedInAsync("owner");
+        var (member, memberId) = await ConnectRegisteredAsync("member");
+        await LoginNewUserAsync(member, "eve");
+        await RemoveFromDefaultGroupAsync(memberId); // 指定组为唯一可见性来源
+
+        await owner.SendAsync(new GroupCreate(owner.NextSeq(), owner.Now(), MsgType.GroupCreate,
+            "退组测试", JoinPolicy.Free));
+        var group = await owner.ReceiveAsync<GroupCreateAck>();
+        var code = await GenInviteAsync(owner, group!.GroupId);
+        await member.SendAsync(new GroupJoin(member.NextSeq(), member.Now(), MsgType.GroupJoin, code));
+        _ = await member.ReceiveAsync<GroupJoinAck>();
+
+        var before = await ListAsync(owner, 0, 100);
+        Assert.Contains(before.Items, i => i.DeviceId == memberId);
+
+        // 自退：Ok=true → 可见性回收
+        await member.SendAsync(new GroupLeave(member.NextSeq(), member.Now(), MsgType.GroupLeave,
+            group.GroupId));
+        var left = await member.ReceiveAsync<GroupLeaveAck>();
+        Assert.True(left!.Ok);
+        var after = await ListAsync(owner, 0, 100);
+        Assert.DoesNotContain(after.Items, i => i.DeviceId == memberId);
+        Assert.Contains(after.Items, i => i.DeviceId == ownerId);
+        await using var db = CreateDb();
+        Assert.True(await db.AuditLogs.AnyAsync(a => a.Event == "group_leave" && a.DeviceId == memberId));
+
+        // 再退（非成员）：Ok=false 诚实应答
+        await member.SendAsync(new GroupLeave(member.NextSeq(), member.Now(), MsgType.GroupLeave,
+            group.GroupId));
+        var again = await member.ReceiveAsync<GroupLeaveAck>();
+        Assert.False(again!.Ok);
+    }
+
+    [Fact]
+    public async Task GroupRemoveMember_RevokesVisibility()
+    {
+        var (owner, ownerId) = await ConnectLoggedInAsync("owner");
+        var (member, memberId) = await ConnectRegisteredAsync("member");
+        await LoginNewUserAsync(member, "eve");
+        await RemoveFromDefaultGroupAsync(memberId);
+
+        await owner.SendAsync(new GroupCreate(owner.NextSeq(), owner.Now(), MsgType.GroupCreate,
+            "移出测试", JoinPolicy.Free));
+        var group = await owner.ReceiveAsync<GroupCreateAck>();
+        var code = await GenInviteAsync(owner, group!.GroupId);
+        await member.SendAsync(new GroupJoin(member.NextSeq(), member.Now(), MsgType.GroupJoin, code));
+        _ = await member.ReceiveAsync<GroupJoinAck>();
+
+        // 所有者移出：Ok=true → 可见性回收 + 审计
+        await owner.SendAsync(new GroupRemoveMember(owner.NextSeq(), owner.Now(), MsgType.GroupRemoveMember,
+            group.GroupId, memberId));
+        var removed = await owner.ReceiveAsync<GroupRemoveMemberAck>();
+        Assert.True(removed!.Ok);
+        var after = await ListAsync(owner, 0, 100);
+        Assert.DoesNotContain(after.Items, i => i.DeviceId == memberId);
+        Assert.Contains(after.Items, i => i.DeviceId == ownerId);
+        await using var db = CreateDb();
+        Assert.True(await db.AuditLogs.AnyAsync(a => a.Event == "group_member_remove"
+            && a.DeviceId == ownerId));
+
+        // 再移（已非成员）：Ok=false
+        await owner.SendAsync(new GroupRemoveMember(owner.NextSeq(), owner.Now(), MsgType.GroupRemoveMember,
+            group.GroupId, memberId));
+        var again = await owner.ReceiveAsync<GroupRemoveMemberAck>();
+        Assert.False(again!.Ok);
+
+        _ = member;
+    }
+
     // ── 解散后可见性回收（完成判定）──────────────────────────────────
 
     [Fact]
@@ -253,7 +601,7 @@ public sealed class GroupTests : IAsyncLifetime
             await db.SaveChangesAsync();
         }
 
-        // A 登录建组 G，A、B 加入
+        // A 登录建组 G（A 即首成员，M2-09），B 直接写库加入
         await a.SendAsync(new UserLogin(a.NextSeq(), a.Now(), MsgType.UserLogin,
             DbInitializer.AdminUsername, DbInitializer.AdminUsername));
         _ = await a.ReceiveAsync<UserLoginAck>();
@@ -261,9 +609,11 @@ public sealed class GroupTests : IAsyncLifetime
         var created = await a.ReceiveAsync<GroupCreateAck>();
         await using (var db = CreateDb())
         {
-            db.GroupMembers.AddRange(
-                new GroupMember { Id = Guid.NewGuid(), GroupId = created!.GroupId, DeviceId = aId, Approved = true, JoinedAt = DateTime.UtcNow },
-                new GroupMember { Id = Guid.NewGuid(), GroupId = created.GroupId, DeviceId = bId, Approved = true, JoinedAt = DateTime.UtcNow });
+            db.GroupMembers.Add(new GroupMember
+            {
+                Id = Guid.NewGuid(), GroupId = created!.GroupId, DeviceId = bId,
+                Approved = true, JoinedAt = DateTime.UtcNow,
+            });
             await db.SaveChangesAsync();
         }
 
