@@ -160,12 +160,13 @@ public sealed class MappingEngineTests
         public Guid PeerB = Guid.NewGuid();
         private readonly List<TunnelSession> _sessions = [];
 
-        public Topology(MappingEngineOptions? options = null)
+        public Topology(MappingEngineOptions? options = null,
+            Func<IReadOnlyCollection<string>>? cidrsB = null)
         {
             SchedulerA = new PunchScheduler(PuncherA);
             SchedulerB = new PunchScheduler(PuncherB);
             EngineA = new MappingEngine(HostA, SchedulerA, IPAddress.Loopback, options);
-            EngineB = new MappingEngine(HostB, SchedulerB, IPAddress.Loopback, options);
+            EngineB = new MappingEngine(HostB, SchedulerB, IPAddress.Loopback, options, cidrsB);
         }
 
         /// <summary>再建一条 A↔B 隧道（内存传输对 + 真实 PTP 握手，handler=两侧引擎）。
@@ -285,6 +286,89 @@ public sealed class MappingEngineTests
             closed = true; // 重置式关闭同样表示已断
         }
         Assert.True(closed);
+        await topo.EngineA.DisableAsync(mappingId);
+    }
+
+    // ── M2-11 L3 白名单本地校验（SEC-52 双保险第二道；05 §2.5 目标侧执行点）────
+
+    /// <summary>目标侧 socket 关闭判定（OPEN_FAIL → 本地连接 EOF/重置；OPEN_FAIL关闭本地连接 同款）。</summary>
+    private static async Task<bool> WaitForLocalCloseAsync(TcpClient app)
+    {
+        var stream = app.GetStream();
+        try
+        {
+            var n = await stream.ReadAsync(new byte[16]).AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            return n == 0;
+        }
+        catch (Exception e) when (e is IOException or ObjectDisposedException)
+        {
+            return true; // 重置式关闭同样表示已断
+        }
+    }
+
+    [Fact]
+    public async Task 非self地址_无provider_本地校验拒绝()
+    {
+        await using var target = new LocalServer(echo: true); // 存活目标：拒绝只可能来自 L3 校验
+        await using var topo = new Topology(); // EngineB 无 provider（M1 语义保持：非 self 全拒）
+        await topo.EstablishTunnelAsync();
+
+        var localPort = (ushort)FreePort();
+        await topo.EngineA.EnableAsync(new MappingConfig(Guid.NewGuid(), "m-l3", localPort, "tcp",
+            "127.0.0.1", target.Port, topo.PeerB));
+
+        using var app = new TcpClient();
+        await app.ConnectAsync(IPAddress.Loopback, localPort);
+        Assert.True(await WaitForLocalCloseAsync(app)); // fail closed（空集=不覆盖）
+        Assert.Equal(0, target.Connections);
+    }
+
+    [Fact]
+    public async Task 非self地址_段外_本地校验拒绝()
+    {
+        await using var target = new LocalServer(echo: true);
+        await using var topo = new Topology(cidrsB: () => ["10.0.0.0/8"]); // 段不含回环
+        await topo.EstablishTunnelAsync();
+
+        var localPort = (ushort)FreePort();
+        await topo.EngineA.EnableAsync(new MappingConfig(Guid.NewGuid(), "m-l3", localPort, "tcp",
+            "127.0.0.1", target.Port, topo.PeerB));
+
+        using var app = new TcpClient();
+        await app.ConnectAsync(IPAddress.Loopback, localPort);
+        Assert.True(await WaitForLocalCloseAsync(app));
+        Assert.Equal(0, target.Connections);
+    }
+
+    [Fact]
+    public async Task 非self地址_段内_放行并转发()
+    {
+        await using var target = new LocalServer(echo: true);
+        // 快照语义：Provider 每次现调（LanSegmentsStore 同步替换后立即生效，无需引擎重建）
+        await using var topo = new Topology(cidrsB: () => ["10.0.0.0/8", "127.0.0.0/8"]);
+        await topo.EstablishTunnelAsync();
+
+        var localPort = (ushort)FreePort();
+        var mappingId = Guid.NewGuid();
+        await topo.EngineA.EnableAsync(new MappingConfig(mappingId, "m-l3", localPort, "tcp",
+            "127.0.0.1", target.Port, topo.PeerB));
+
+        using var app = new TcpClient();
+        await app.ConnectAsync(IPAddress.Loopback, localPort);
+        var payload = new byte[2048];
+        Random.Shared.NextBytes(payload);
+        var stream = app.GetStream();
+        await stream.WriteAsync(payload);
+        var echoBack = new byte[payload.Length];
+        var read = 0;
+        while (read < payload.Length)
+        {
+            var n = await stream.ReadAsync(echoBack.AsMemory(read));
+            if (n == 0) throw new IOException($"echo 提前 EOF：{read}/{payload.Length}");
+            read += n;
+        }
+        Assert.Equal(payload, echoBack); // 段内放行 → 目标侧连接该地址正常转发
+        Assert.Equal(1, target.Connections);
         await topo.EngineA.DisableAsync(mappingId);
     }
 

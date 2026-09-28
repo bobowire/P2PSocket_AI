@@ -58,6 +58,7 @@ public sealed class ClientRuntime : IAsyncDisposable
     private StateStore _state = null!;
     private SettingsStore _settings = null!;
     private PeersStore _peers = null!;
+    private LanSegmentsStore _lanSegments = null!;
     private ControlClient _control = null!;
     private INicManager _nic = null!;
     private TunnelHost _host = null!;
@@ -96,6 +97,9 @@ public sealed class ClientRuntime : IAsyncDisposable
         _peers = new PeersStore(_options.BaseDir); // M2-23 目标设备级回退配置（损坏自愈，不拒启）
         _peers.Load();
         _peers.Recovered += m => Log?.Invoke($"[peers] {m}");
+        _lanSegments = new LanSegmentsStore(_options.BaseDir); // M2-11 内网段白名单（损坏自愈，不拒启）
+        _lanSegments.Load();
+        _lanSegments.Recovered += m => Log?.Invoke($"[lansegments] {m}");
 
         var addrs = _settings.Settings.ServerAddrs;
         if (addrs.Length == 0)
@@ -117,7 +121,8 @@ public sealed class ClientRuntime : IAsyncDisposable
         _puncher = new LazyPuncher();
         _scheduler = new PunchScheduler(_puncher);
         var bindIp = IPAddress.TryParse(_state.State.VirtualIp, out var vip) ? vip : IPAddress.Loopback;
-        _engine = new MappingEngine(_host, _scheduler, bindIp); // 监听绑虚拟 IP（01 §3.2）
+        _engine = new MappingEngine(_host, _scheduler, bindIp,
+            enabledCidrsProvider: _lanSegments.EnabledCidrs); // 监听绑虚拟 IP（01 §3.2）+ L3 白名单（M2-11）
         _engine.Log += m => Log?.Invoke($"[engine] {m}");
         // 上报三消息（M2-22，FR-C-404/1002）：0x72 打洞结果 / 0x62 映射状态 / 0x64 流量统计
         _reporter = new ClientReporter(_control, _scheduler, _engine, new ClientReporterOptions

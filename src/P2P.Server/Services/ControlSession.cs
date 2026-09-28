@@ -215,7 +215,7 @@ public sealed class ControlSession : IAsyncDisposable
             or MsgType.GroupJoin or MsgType.GroupLeave or MsgType.JoinRequests or MsgType.GroupInviteGen
             or MsgType.GroupRemoveMember
             or MsgType.GroupUpdate or MsgType.GroupDissolve or MsgType.MappingUpsert or MsgType.MappingDelete
-            or MsgType.MappingStatus or MsgType.PunchRequest or MsgType.PunchInvite or MsgType.PunchResult
+            or MsgType.LanSegmentsUpsert or MsgType.MappingStatus or MsgType.PunchRequest or MsgType.PunchInvite or MsgType.PunchResult
             or MsgType.PunchEndpoint or MsgType.PunchRetry or MsgType.RelayAllocate
             or MsgType.StatsReport or MsgType.Error;
 
@@ -238,6 +238,7 @@ public sealed class ControlSession : IAsyncDisposable
         MsgType.GroupDissolve => PcpCodec.Decode<GroupDissolve>(msgpack),
         MsgType.MappingUpsert => PcpCodec.Decode<MappingUpsert>(msgpack),
         MsgType.MappingDelete => PcpCodec.Decode<MappingDelete>(msgpack),
+        MsgType.LanSegmentsUpsert => PcpCodec.Decode<LanSegmentsUpsert>(msgpack), // 0x63 白名单（M2-11）
         MsgType.MappingStatus => PcpCodec.Decode<MappingStatus>(msgpack),
         MsgType.StatsReport => PcpCodec.Decode<StatsReport>(msgpack),          // 0x64 流量累计（M2-08）
         MsgType.PunchResult => PcpCodec.Decode<PunchResult>(msgpack),          // 0x72 打洞结果（M2-08）

@@ -7,9 +7,9 @@ namespace P2P.Server.Services;
 /// <summary>
 /// 映射 CRUD 同步（02 §2.4 0x60/0x61，FR-S-801 全量同步至服务端存储）：
 /// 字段=PRD 06 §2；L2 授权校验（SEC-52——目标 ∈ 本账号 ∪ 共同分组，与 0x40/0x70 同口径，
-/// 失败写 mapping_deny 审计）；唯一约束 owner+proto+localPort（03 §2.4）。
-/// L3 targetAddr/lan_segments 白名单 → M2（白名单未开放）；0x62 状态上报 → M2（FR-C-404），
-/// M1 映射状态经客户端本地 WS 展示。passive 拦截在路由入口（0x60 属主动类，02 §2.5）。
+/// 失败写 mapping_deny 审计）；L3 白名单（M2-11——targetAddr≠self 须落在目标设备
+/// enabled lan_segments，4002）；唯一约束 owner+proto+localPort（03 §2.4）。
+/// 0x62 状态上报 → M2-08 已落（审计流水）。passive 拦截在路由入口（0x60 属主动类，02 §2.5）。
 /// </summary>
 public sealed class MappingService(IDbContextFactory<AppDbContext> dbFactory, AuditLogger audit)
 {
@@ -46,6 +46,16 @@ public sealed class MappingService(IDbContextFactory<AppDbContext> dbFactory, Au
             await audit.WriteAsync("mapping_deny", session.DeviceId,
                 detail: new { reason = "l2_not_visible", targetDeviceId = target.Id });
             await session.SendErrorAsync(ErrorCode.TargetNotAuthorized, "l2_not_visible");
+            return;
+        }
+
+        // L3 白名单（M2-11，SEC-52 双路径之一；05 §2.5）：targetAddr ≠ self 须落在目标设备
+        // enabled lan_segments 覆盖内。create/edit 共用（编辑改 TargetAddr 同样过校验）
+        if (!await Authorizer.IsTargetAddrAllowedAsync(db, target.Id, msg.TargetAddr.Trim()))
+        {
+            await audit.WriteAsync("mapping_deny", session.DeviceId,
+                detail: new { reason = "l3_segment_not_covered", targetDeviceId = target.Id });
+            await session.SendErrorAsync(ErrorCode.TargetAddrNotAllowed, "l3_segment_not_covered");
             return;
         }
 

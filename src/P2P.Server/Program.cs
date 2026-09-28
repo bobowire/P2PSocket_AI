@@ -67,6 +67,8 @@ builder.Services.AddSingleton<UserService>();
 builder.Services.AddSingleton<DeviceListPusher>();
 builder.Services.AddSingleton<GroupService>();
 builder.Services.AddSingleton<MappingService>();
+// 0x63 内网段白名单（M2-11，FR-C-701/702）：段 CRUD + 移除联动 0x75 失效推送
+builder.Services.AddSingleton<LanSegmentService>();
 builder.Services.AddSingleton(sp => new SignalingCoordinator(
     sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
     sp.GetRequiredService<DeviceRegistry>(),

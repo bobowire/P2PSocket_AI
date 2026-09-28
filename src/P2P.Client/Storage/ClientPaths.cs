@@ -10,6 +10,7 @@ public static class ClientPaths
     public const string StateFileName = "state.json";
     public const string SettingsFileName = "settings.json";
     public const string PeersFileName = "peers.json"; // 目标设备级配置（M2-23，03 §5）
+    public const string LanSegmentsFileName = "lan-segments.json"; // 内网段白名单（M2-11，03 §5）
 
     /// <summary>默认基目录（03 §5）。</summary>
     public static string DefaultBaseDir => OperatingSystem.IsWindows()

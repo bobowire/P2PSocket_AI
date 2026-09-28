@@ -80,7 +80,8 @@ public sealed class SignalingCoordinator : IAsyncDisposable
 
     public async Task HandlePunchRequestAsync(ControlSession session, PunchRequest msg)
     {
-        var verdict = await _authorizer.CheckPunchAsync(session, msg.TargetDeviceId);
+        // L1+L2+L3（M2-11：TriggerMappingId 关联映射现值过白名单，防换段绕过 0x60 校验点）
+        var verdict = await _authorizer.CheckPunchAsync(session, msg.TargetDeviceId, msg.TriggerMappingId);
         if (!verdict.Allowed)
         {
             await _audit.WriteAsync("punch_deny", session.DeviceId,

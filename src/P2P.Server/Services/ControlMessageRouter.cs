@@ -8,7 +8,8 @@ namespace P2P.Server.Services;
 /// M1-14~17 挂载注册/用户/分组/信令族；M1-28 挂载映射 0x60/0x61；
 /// M2-07 挂载中继 0x74 RelayAllocate；M2-19 挂载回切 0x73 PunchRetry；
 /// M2-08 挂载上报族 0x62/0x64/0x72（审计/流量累计/打洞结果）；
-/// M2-09 挂载分组全量 0x51/0x52/0x53/0x54/0x57（凭码入组/自退/审批/邀请码/移出）。
+/// M2-09 挂载分组全量 0x51/0x52/0x53/0x54/0x57（凭码入组/自退/审批/邀请码/移出）；
+/// M2-11 挂载白名单 0x63 LanSegmentsUpsert（passive 允许，本机管理类）。
 /// </summary>
 public sealed class ControlMessageRouter
 {
@@ -17,19 +18,22 @@ public sealed class ControlMessageRouter
     private readonly GroupService _group;
     private readonly SignalingCoordinator _signaling;
     private readonly MappingService _mappings;
+    private readonly LanSegmentService? _lanSegments; // 可选：既有测试夹具不发 0x63 时可省
     private readonly RelayService _relay;
     private readonly StatsService _stats;
     private readonly AuditLogger _audit;
 
     public ControlMessageRouter(RegistrationService registration, UserService user,
         GroupService group, SignalingCoordinator signaling, MappingService mappings,
-        RelayService relay, StatsService stats, AuditLogger audit)
+        RelayService relay, StatsService stats, AuditLogger audit,
+        LanSegmentService? lanSegments = null)
     {
         _registration = registration;
         _user = user;
         _group = group;
         _signaling = signaling;
         _mappings = mappings;
+        _lanSegments = lanSegments;
         _relay = relay;
         _stats = stats;
         _audit = audit;
@@ -118,6 +122,11 @@ public sealed class ControlMessageRouter
                 break;
             case MappingDelete mappingDelete:
                 await _mappings.HandleDeleteAsync(session, mappingDelete);
+                break;
+            case LanSegmentsUpsert lanSegmentsUpsert: // 0x63 白名单（M2-11；passive 允许，不入主动类清单）
+                if (_lanSegments is null)
+                    goto default; // 已登记未挂载：诚实拒绝（避免客户端无限等待）
+                await _lanSegments.HandleUpsertAsync(session, lanSegmentsUpsert);
                 break;
             default:
                 // 已登记但处理器未挂载：诚实拒绝（避免客户端无限等待）

@@ -70,6 +70,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
     private readonly PunchScheduler _scheduler;
     private IPAddress _virtualIp; // UpdateVirtualIp 可切换（向导注册完成时点）
     private readonly MappingEngineOptions _options;
+    private readonly Func<IReadOnlyCollection<string>>? _enabledCidrs; // M2-11 白名单快照读（SEC-52 第二道）
     private readonly ConcurrentDictionary<Guid, Runtime> _mappings = new();
     private readonly ConcurrentDictionary<(Guid SessionId, uint ChannelId), ChannelEntry> _channels = new();
     private readonly CancellationTokenSource _cts = new();
@@ -98,12 +99,13 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
                Volatile.Read(ref r.BytesRelay))).ToList();
 
     public MappingEngine(TunnelHost tunnels, PunchScheduler scheduler, IPAddress virtualIp,
-        MappingEngineOptions? options = null)
+        MappingEngineOptions? options = null, Func<IReadOnlyCollection<string>>? enabledCidrsProvider = null)
     {
         _tunnels = tunnels;
         _scheduler = scheduler;
         _virtualIp = virtualIp;
         _options = options ?? new MappingEngineOptions();
+        _enabledCidrs = enabledCidrsProvider; // null=空集：非 self 一律拒绝（fail closed，M1 行为保持）
         _scheduler.PunchCompleted += OnPunchCompleted;
         _tunnels.SessionDisconnected += OnTunnelDisconnected;
         _tunnels.SessionAttached += OnTunnelAttached;
@@ -278,20 +280,27 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
                     new OpenResultPayload(false, $"proto_not_supported: {open.TargetProto}"));
                 return;
             }
+            // L3 白名单本地校验（M2-11，SEC-52 双保险第二道；05 §2.5）：self=127.0.0.1 恒放行；
+            // 非 self 须被本机 enabled 段 CIDR 覆盖——服务端 0x60/0x70 双路径校验（第一道）后的
+            // 最后一道防线（防服务端校验后段被移除/绕过）。无 provider/无段 = 不覆盖（fail closed）
+            var connectAddr = IPAddress.Loopback;
             if (open.TargetAddr != "self")
             {
-                // L3 白名单校验属 M2（SEC-52 执行点）；M1 仅 self（任务清单 M1-27）
-                await session.SendOpenResultAsync(channelId,
-                    new OpenResultPayload(false, "addr_requires_m2_whitelist"));
-                return;
+                if (!IsCoveredBySegments(open.TargetAddr))
+                {
+                    await session.SendOpenResultAsync(channelId,
+                        new OpenResultPayload(false, $"l3_not_permitted: {open.TargetAddr}"));
+                    return;
+                }
+                connectAddr = IPAddress.Parse(open.TargetAddr); // 覆盖判定已确保可解析
             }
 
-            // self → 127.0.0.1:targetPort（05 §2.5/D15）
+            // self → 127.0.0.1:targetPort（05 §2.5/D15）；段内 → 该地址
             using var connectCts = new CancellationTokenSource(_options.ConnectTimeout);
             var target = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             try
             {
-                await target.ConnectAsync(IPAddress.Loopback, open.TargetPort, connectCts.Token);
+                await target.ConnectAsync(connectAddr, open.TargetPort, connectCts.Token);
             }
             catch (Exception e)
             {
@@ -310,6 +319,20 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         {
             Log?.Invoke($"目标侧 OPEN 处理失败：{e.Message}");
         }
+    }
+
+    /// <summary>targetAddr 是否被本机 enabled 段覆盖（M2-11，SEC-52）：IP 字面量逐段
+    /// IPNetwork.Contains；非法地址/段（手改文件）fail closed。provider 每次现调取快照
+    /// （读无锁、列表不可变——LanSegmentsStore 同步替换）。</summary>
+    private bool IsCoveredBySegments(string targetAddr)
+    {
+        if (!System.Net.IPAddress.TryParse(targetAddr, out var addr))
+            return false;
+        var cidrs = _enabledCidrs?.Invoke() ?? [];
+        foreach (var cidr in cidrs)
+            if (System.Net.IPNetwork.TryParse(cidr, out var net) && net.Contains(addr))
+                return true;
+        return false;
     }
 
     /// <summary>访问侧：OPEN 结果——OK 进 splice，FAIL 关闭本地连接（05 §2.2）。</summary>
