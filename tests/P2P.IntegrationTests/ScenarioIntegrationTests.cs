@@ -91,10 +91,13 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         var audit = new AuditLogger(_factory);
         var signaling = new SignalingCoordinator(_factory, _registry, new Authorizer(_factory), audit);
         var relay = new RelayService(_factory, _registry, signaling.ResolveRelayPeers);
+        // 0x41 推送（M2-10）：场景级真实装配——客户端 0x41→device_list 归 M2-15，当前运行时未知
+        // 推送帧忽略不致断连（ControlConnection 默认分支丢弃），故全程开启不影响既有场景
+        var pusher = new DeviceListPusher(_factory, _registry);
         var router = new ControlMessageRouter(
             new RegistrationService(_factory, _registry, audit),
             new UserService(_factory, audit),
-            new GroupService(_factory, _registry, audit),
+            new GroupService(_factory, _registry, audit, pusher),
             signaling,
             new MappingService(_factory, audit),
             relay,

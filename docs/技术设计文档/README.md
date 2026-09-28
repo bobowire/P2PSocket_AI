@@ -1,6 +1,6 @@
 # P2P 内网穿透产品 · 技术设计文档
 
-> 版本：v1.21　创建日期：2026-08-19　状态：待评审
+> 版本：v1.22　创建日期：2026-08-19　状态：待评审
 > 依据：[产品需求文档 PRD v0.6](../prd/README.md)（决策 D1~D21，D3 经 v0.4 修订；开放问题 OQ-1~OQ-19 已全部决议）
 > 定位：开发阶段的**施工图纸**——所有实现以本文档为准；与 PRD 冲突时以 PRD 为准并提出修订。
 
@@ -94,3 +94,4 @@
 | 2026-09-24 | v1.19 | M2-08 落地同步：05 §5 补实现注记（上报族 0x72/0x62/0x64 与保留清理）——0x72 结果映射（Ok+端点=direct / Ok 无端点=relay[FailReason 携带打洞失败原因] / !Ok=failed，relay 语义靠端点缺席表达不改 schema）、proto/N/时长取自会话台账（M2-07 台账扩为 RelayLedgerEntry 含 proto/PunchCount/CreatedAt；120s 窗覆盖全部上报时点，窗外 drop+审计；仅发起方可报、sessionId 去重首份即定论）；0x62 → mapping_status 审计流水（映射运行态不落表，客户端状态机是真相源；仅受理本人映射）；0x64 → mapping_stats 覆盖式 upsert（载荷=客户端本地累计绝对值→重发/乱序不叠加，最新到达=客户端当前真相；逐项归属校验、同报告重复项去重）；RetentionCleaner 启动+每日（audit_logs 与 punch_stats 一并，OQ-17；键每轮现读、非法回退 90）；03 §2.7/§2.9 保留口径与 concurrency 来源勘误同步 |
 | 2026-09-24 | v1.20 | M2-22 落地同步：05 §5 补客户端上报实现注记（ClientReporter 三消息）——0x72 上报点=PunchScheduler.PunchCompleted（仅访问方；端点映射与服务端三态判据互证，Ack 前失败[SessionId 空]不上报——Puncher Ack 后失败改携 ack.SessionId 补齐 failed 行归属前提）；0x62 状态机迁移三态（direct/relay/failed）入流水、invalid 预留 0x75 联动；0x64 TrafficSnapshots 30s 周期+优雅停机终刷（停机序先于引擎/控制通道）、零值条目也上报（重启清零如实覆盖旧行=覆盖式 upsert 的客户端配合面）；relay_bytes 口径明确=双向经中继合计、含于 up+down 总量（channel 会话 ViaRelay 归属，03 §2.6） |
 | 2026-09-27 | v1.21 | M2-09 落地同步：05 §5 补分组服务全量实现注记（0x51/0x52/0x53/0x54/0x57，FR-S-303~307）——**创建设备即首成员**（语义定案：0x50 建组同时写 group_members，否则共同分组可见性口径下创建者与跨账号入组设备互不可见，FR-S-306 无法闭环；M1 直写库构造掩盖了缺口）；0x51 登录前置、码无效/撤销一律 3001、已是成员幂等 Ack、free 即入+清残留 pending、approval 建单去重回 3002；0x53 List/Approve/Reject 仅所有者（已处理申请 Ok=false 诚实应答）；0x54 六位去混淆字符集（31 字符，03 §3）加密随机+UNIQUE 撞码重试、每分组至多一码=覆盖式、审计不含码值（AI-17）；0x52/0x57 删行+清 pending（非成员 Ok=false 幂等）；默认分组准入策略 server_config 键 default_join_policy（Seed 建组时读取、非法回退 free，FR-S-304）；0x75 联动触发点归 M2-12 |
+| 2026-09-28 | v1.22 | M2-10 落地同步：05 §5 补 0x41 推送实现注记（FR-S-403/TD-16）——独立 DeviceListPusher 单例（构造订阅 DeviceRegistry 上线/离线事件[换线旧会话按 (deviceId,session) 配对移除 no-op 不误触]、GroupService 成员变更 Ack+审计后显式调用、远程码重置触发归 M2-12）；收件人=与 0x40 可见性同口径的逆向查询（同账号∪共同分组≠自身、并集去重）；解散先捕获成员清单再删行；哑节点 Passive 不下发、离线跳过、单收件人失败静默（提示帧语义，轮询 0x40 兜底）；推送与 Ack 共用会话 seq 严格递增；presence 推送 fire-and-forget 不阻塞读循环、分组推送 await 且 Ack 先行；GroupService 可选参数注入 pusher（DI 默认值，既有夹具零改动）；客户端 0x41 接线归 M2-15 |

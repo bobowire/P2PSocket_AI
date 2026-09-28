@@ -10,16 +10,26 @@ public sealed class DeviceRegistry
 {
     private readonly ConcurrentDictionary<Guid, ControlSession> _sessions = [];
 
+    /// <summary>设备上线（会话建立登记后；M2-10 0x41 推送订阅）。</summary>
+    public event Action<Guid>? DeviceOnline;
+
+    /// <summary>设备离线（会话关闭移除后；同设备换线重连时旧会话移除为 no-op 不触发）。</summary>
+    public event Action<Guid>? DeviceOffline;
+
     /// <summary>会话建立（Proof 通过）后登记。同设备旧会话被替换并踢线（单会话在线）。</summary>
     public void Register(ControlSession session)
     {
         if (_sessions.TryGetValue(session.DeviceId, out var old) && !ReferenceEquals(old, session))
             _ = old.CloseAsync("replaced_by_new_session");
         _sessions[session.DeviceId] = session;
+        DeviceOnline?.Invoke(session.DeviceId);
     }
 
     public void Unregister(ControlSession session)
-        => _sessions.TryRemove(new KeyValuePair<Guid, ControlSession>(session.DeviceId, session));
+    {
+        if (_sessions.TryRemove(new KeyValuePair<Guid, ControlSession>(session.DeviceId, session)))
+            DeviceOffline?.Invoke(session.DeviceId);
+    }
 
     public bool IsOnline(Guid deviceId) => _sessions.ContainsKey(deviceId);
 

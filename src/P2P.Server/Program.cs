@@ -63,6 +63,8 @@ builder.Services.AddSingleton<AuditLogger>();
 builder.Services.AddSingleton<Authorizer>();
 builder.Services.AddSingleton<RegistrationService>();
 builder.Services.AddSingleton<UserService>();
+// 0x41 列表变更推送（M2-10，FR-S-403）：订阅 DeviceRegistry 在线事件 + GroupService 成员变更触发
+builder.Services.AddSingleton<DeviceListPusher>();
 builder.Services.AddSingleton<GroupService>();
 builder.Services.AddSingleton<MappingService>();
 builder.Services.AddSingleton(sp => new SignalingCoordinator(

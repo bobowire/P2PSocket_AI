@@ -44,7 +44,7 @@ public sealed class SignalingTests : IAsyncLifetime
         var router = new ControlMessageRouter(
             new RegistrationService(factory, _registry, audit, _time),
             new UserService(factory, audit, _time),
-            new GroupService(factory, _registry, audit, _time),
+            new GroupService(factory, _registry, audit, time: _time),
             _signaling,
             new MappingService(factory, audit),
             _relay,

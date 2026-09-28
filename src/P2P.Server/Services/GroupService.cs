@@ -9,11 +9,13 @@ namespace P2P.Server.Services;
 /// 0x40 可见性 = 本账号设备 ∪ 共同分组设备（与 L2 同口径，05 §5）。
 /// M2-09：凭码入组/审批队列/邀请码/退组/移出成员全量；入组即跨账号共享
 /// （成员是设备维度，joiner 所属账号与组所有者无关，05 §1）；0x75 联动触发点归 M2-12。
+/// M2-10：成员变更后经 DeviceListPusher 推 0x41（提示帧，哑节点不下发）。
 /// </summary>
 public sealed class GroupService(
     IDbContextFactory<AppDbContext> dbFactory,
     DeviceRegistry registry,
     AuditLogger audit,
+    DeviceListPusher? pusher = null,
     TimeProvider? time = null)
 {
     /// <summary>0x40 分页上限（OQ-16：默认 100，钳制区间 1~200）。</summary>
@@ -114,6 +116,8 @@ public sealed class GroupService(
                 MsgType.GroupJoin, group.Id));
             await audit.WriteAsync("group_join", session.DeviceId, userId: session.OwnerUserId,
                 detail: new { GroupId = group.Id, Policy = "free" });
+            if (pusher is not null)
+                await pusher.NotifyGroupMembersAsync(group.Id, session.DeviceId); // 0x41（M2-10）
             return;
         }
 
@@ -148,8 +152,12 @@ public sealed class GroupService(
         await session.SendAsync(new GroupLeaveAck(session.NextSeq(), session.ServerTimestamp(),
             MsgType.GroupLeave, removed > 0));
         if (removed > 0)
+        {
             await audit.WriteAsync("group_leave", session.DeviceId, userId: session.OwnerUserId,
                 detail: new { msg.GroupId });
+            if (pusher is not null)
+                await pusher.NotifyGroupMembersAsync(msg.GroupId, session.DeviceId); // 0x41（M2-10）
+        }
     }
 
     // ── 0x53 审批队列 List/Approve/Reject（仅所有者；FR-S-305）────────
@@ -253,6 +261,8 @@ public sealed class GroupService(
         await audit.WriteAsync(approved ? "group_join_approve" : "group_join_reject",
             session.DeviceId, userId: session.OwnerUserId,
             detail: new { request.GroupId, request.DeviceId, RequestId = request.Id });
+        if (approved && pusher is not null)
+            await pusher.NotifyGroupMembersAsync(request.GroupId, request.DeviceId); // 0x41（M2-10）
     }
 
     // ── 0x54 邀请码生成/撤销（仅所有者；每分组至多一码=覆盖式；OQ-17）──
@@ -377,12 +387,17 @@ public sealed class GroupService(
             await session.SendErrorAsync(ErrorCode.Conflict, "default_group_immutable");
             return;
         }
+        // 成员清单先捕获（删除后无从查询，0x41 收件人来源）
+        var members = pusher is null ? [] : await db.GroupMembers.AsNoTracking()
+            .Where(m => m.GroupId == group.Id).Select(m => m.DeviceId).ToListAsync();
         // 联动清理：成员与准入申请（映射授权为动态计算，可见性随之收缩，05 §5）
         await db.GroupMembers.Where(m => m.GroupId == group.Id).ExecuteDeleteAsync();
         await db.JoinRequests.Where(r => r.GroupId == group.Id).ExecuteDeleteAsync();
         await db.Groups.Where(g => g.Id == group.Id).ExecuteDeleteAsync();
         await session.SendAsync(new GroupDissolveAck(session.NextSeq(), session.ServerTimestamp(),
             MsgType.GroupDissolve, true));
+        if (pusher is not null && members.Count > 0)
+            await pusher.NotifyDevicesAsync(members); // 0x41（M2-10）
     }
 
     // ── 0x57 所有者移出成员（FR-S-307）───────────────────────────────
@@ -415,8 +430,12 @@ public sealed class GroupService(
         await session.SendAsync(new GroupRemoveMemberAck(session.NextSeq(), session.ServerTimestamp(),
             MsgType.GroupRemoveMember, removed > 0));
         if (removed > 0)
+        {
             await audit.WriteAsync("group_member_remove", session.DeviceId, userId: session.OwnerUserId,
                 detail: new { msg.GroupId, msg.MemberDeviceId });
+            if (pusher is not null)
+                await pusher.NotifyGroupMembersAsync(msg.GroupId, msg.MemberDeviceId); // 0x41（M2-10）
+        }
     }
 
     // ── 0x40 设备列表分页（OQ-16）────────────────────────────────────
