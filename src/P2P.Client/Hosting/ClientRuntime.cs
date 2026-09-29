@@ -53,6 +53,10 @@ public sealed record ClientRuntimeOptions
     /// <summary>网卡健康探测周期覆盖缝（M2-24）：生产 null=30s（05 §1.2 定值，FR-C-202）；
     /// 集成测试注入亚秒级以验证替身移除→自动重建→恢复沿。</summary>
     public TimeSpan? NicProbeIntervalOverride { get; init; }
+
+    /// <summary>Hello 协议版本覆盖缝（M2-26）：生产 null=当前协议版本；集成测注入越界值
+    /// 驱动服务端 5004 拒答，验证升级引导数据链（FR-C-904）。</summary>
+    public ushort? ControlProtocolVersionOverride { get; init; }
 }
 
 /// <summary>客户端全组件生命周期（单一属主；启动序=01 §4.1，停机序为其逆序）。</summary>
@@ -79,9 +83,14 @@ public sealed class ClientRuntime : IAsyncDisposable
     private Task? _relayRetryLoop;
     private int _registeredPathStarted;
     private int _disposed;
+    private int _upgradeBrowserOpened; // 版本拒答浏览器引导去重（每进程一次，M2-26）
 
     /// <summary>诊断日志（Program 接 Serilog）。</summary>
     public event Action<string>? Log;
+
+    /// <summary>升级引导触发（M2-26，FR-C-904）：版本拒答取回升级信息即发——浏览器打开
+    /// 仅 Interactive 且每进程一次，本事件每轮拒答均发（测试/前端数据链断言点）。</summary>
+    public event Action<UpdateInfoResponse>? UpgradeRequired;
 
     /// <summary>本地 API 服务束（启动后可用；测试探查/宿主诊断）。</summary>
     public LocalApiServices Api => _api;
@@ -118,9 +127,11 @@ public sealed class ClientRuntime : IAsyncDisposable
         }
 
         // ② 组件装配（控制通道自 ctor 起后台连接循环）
-        _control = new ControlClient(addrs, new ControlClientOptions(),
+        _control = new ControlClient(addrs,
+            new ControlClientOptions { ProtocolVersionOverride = _options.ControlProtocolVersionOverride },
             deviceId: _state.State.DeviceId, deviceSecret: _state.State.DeviceSecret);
         _control.Log += m => Log?.Invoke($"[control] {m}");
+        _control.UpgradeRequired += OnUpgradeRequired; // 5004 拒答 → 升级引导（M2-26）
         _nic = _options.NicOverride ?? CreateNic();
         _nic.Degraded += m => Log?.Invoke($"[nic] 降级告警：{m}");
         _host = new TunnelHost();
@@ -179,6 +190,19 @@ public sealed class ClientRuntime : IAsyncDisposable
             AttachPuncher();
             await RunRegisteredPathAsync(ct);
         }
+    }
+
+    /// <summary>版本拒答升级引导（M2-26，FR-C-904/OQ-5——手动升级，不自动拉包）：日志 + 事件
+    ///（数据链断言点）+ 自动开浏览器 /upgrade?reason=version（沿 M1-24 机制：仅 Interactive，
+    /// 服务模式仅日志；版本不符期间每轮重连都拒答，浏览器按进程去重防轰炸）。</summary>
+    private void OnUpgradeRequired(UpdateInfoResponse info)
+    {
+        Log?.Invoke($"[control] 升级引导：服务端要求 {info.LatestVersion}"
+                    + $"（协议 {info.MinProtocol}~{info.MaxProtocol}，本机 {ProtocolVersion.Current}），"
+                    + $"指引 {info.UpgradeUrl}（FR-C-904）");
+        UpgradeRequired?.Invoke(info);
+        if (_options.Interactive && Interlocked.Exchange(ref _upgradeBrowserOpened, 1) == 0)
+            TryOpenBrowser($"http://127.0.0.1:{_settings.Settings.LocalWebPort}/upgrade?reason=version");
     }
 
     /// <summary>注册后路径（01 §4.1：Nic → Established → 恢复启用映射）。幂等（向导完成事件与已注册启动共用）。</summary>

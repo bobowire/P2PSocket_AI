@@ -107,6 +107,7 @@ internal static partial class TsGen // 生成逻辑集中（顶层语句宿主�
         typeof(GroupInfo),
         typeof(ClientSettings),
         typeof(ReconnectSettings),
+        typeof(UpgradeInfoView), // M2-26 升级引导（04 §2.7 /api/upgrade/info 载荷）
     ];
 
     internal static string EmitPathsTs(List<(string Pattern, string Methods)> endpoints,
@@ -188,7 +189,13 @@ internal static partial class TsGen // 生成逻辑集中（顶层语句宿主�
         sb.AppendLine("  ev: \"device_list\";");
         sb.AppendLine("}");
         sb.AppendLine();
-        sb.AppendLine("export type WsEvent = MappingStatsEvent | MappingStateEvent | LoginStateEvent | DeviceListEvent;");
+        sb.AppendLine("/** 升级引导（M2-26，FR-C-904：版本拒答/升级信息到达→refetch /api/upgrade/info）。 */");
+        sb.AppendLine("export interface UpgradeRequiredEvent {");
+        sb.AppendLine("  ev: \"upgrade_required\";");
+        sb.AppendLine("  latestVersion: string;");
+        sb.AppendLine("}");
+        sb.AppendLine();
+        sb.AppendLine("export type WsEvent = MappingStatsEvent | MappingStateEvent | LoginStateEvent | DeviceListEvent | UpgradeRequiredEvent;");
         return sb.ToString();
     }
 

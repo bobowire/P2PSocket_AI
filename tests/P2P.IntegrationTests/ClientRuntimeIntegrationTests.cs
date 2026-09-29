@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using P2P.Client.Hosting;
 using P2P.Client.Storage;
 using P2P.Core.Crypto;
+using P2P.Core.Protocol;
 using P2P.Nic;
 using P2P.Server.Data;
 using P2P.Server.Services;
@@ -332,6 +333,66 @@ public sealed class ClientRuntimeIntegrationTests : IAsyncLifetime
         Assert.True(await db.Devices.AnyAsync(d => d.Id == a.DeviceId)); // 服务端记录保留
     }
 
+
+    // ── ⑥ 升级引导（M2-26，FR-C-904）：注入版本拒答 → 0x03 数据链路完整 ──
+
+    [Fact]
+    public async Task 升级引导_版本拒答_升级信息事件与本地代理数据链路完整()
+    {
+        // 服务端升级参数（server_config update_* 键，M2-14 语义：max=宿主编译版本，min=配置 clamp）
+        await using (var db = _factory.CreateDbContext())
+        {
+            db.ServerConfig.Single(c => c.Key == "update_latest_version").Value = "9.9.9";
+            db.ServerConfig.Single(c => c.Key == "update_url").Value = "https://dl.example.com/p2p";
+            db.ServerConfig.Single(c => c.Key == "update_notes").Value = "协议升级，请手动更新";
+            await db.SaveChangesAsync();
+        }
+
+        // 未注册向导模式：StartAsync 即返回；服务端 HandleHelloAsync 先校版本再判注册——拒答可达
+        var dir = Path.Combine(_rootDir, "upg");
+        Directory.CreateDirectory(dir);
+        var settings = new SettingsStore(dir);
+        await settings.SaveAsync(new ClientSettings { ServerAddrs = [$"127.0.0.1:{_port}"], LocalWebPort = FreePort() });
+
+        var runtime = new ClientRuntime(new ClientRuntimeOptions
+        {
+            BaseDir = dir,
+            NicOverride = _nic,
+            // 注入版本拒答：Hello 协议版本越界（服务端 5004 → 0x03 受理窗）
+            ControlProtocolVersionOverride = (ushort)(ProtocolVersion.Current + 1),
+        });
+        // 打开动作以事件断言（清单完成判定）：每轮拒答均触发（浏览器去重在宿主层）
+        var tcs = new TaskCompletionSource<UpdateInfoResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+        runtime.UpgradeRequired += info => tcs.TrySetResult(info);
+        await runtime.StartAsync();
+        try
+        {
+            var info = await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.Equal("9.9.9", info.LatestVersion);
+            Assert.Equal(1, info.MinProtocol); // update_min_protocol 种子默认 1
+            Assert.Equal(ProtocolVersion.Current, info.MaxProtocol);
+            Assert.Equal("https://dl.example.com/p2p", info.UpgradeUrl);
+            Assert.Equal("协议升级，请手动更新", info.Notes);
+
+            // 本地代理（04 §2.7）：通道永不能建立 → 拒答窗口缓存回落正是 /upgrade 页数据源
+            using (var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{runtime.WebPort}") })
+            {
+                using var response = await http.GetAsync("/api/upgrade/info");
+                var root = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+                Assert.Equal(0, root.GetProperty("code").GetInt32());
+                var data = root.GetProperty("data");
+                Assert.Equal("9.9.9", data.GetProperty("latestVersion").GetString());
+                Assert.Equal(1, data.GetProperty("minProtocol").GetInt32());
+                Assert.Equal(ProtocolVersion.Current, (ushort)data.GetProperty("maxProtocol").GetInt32());
+                Assert.Equal("https://dl.example.com/p2p", data.GetProperty("upgradeUrl").GetString());
+                Assert.Equal("协议升级，请手动更新", data.GetProperty("notes").GetString());
+            }
+        }
+        finally
+        {
+            await runtime.DisposeAsync();
+        }
+    }
 
     // ── ③ 网卡降级不阻断：EnsureAsync 失败 → 通道/本地 Web 照常运行 ──
 

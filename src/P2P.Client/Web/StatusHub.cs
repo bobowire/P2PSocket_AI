@@ -25,6 +25,9 @@ public static class WsEventNames
 
     /// <summary>登录态/能力模式变迁（状态类→前端 refetch）。</summary>
     public const string LoginState = "login_state";
+
+    /// <summary>版本拒答/升级信息到达（M2-26，FR-C-904：状态类→前端 refetch /api/upgrade/info）。</summary>
+    public const string UpgradeRequired = "upgrade_required";
 }
 
 /// <summary>WS 事件广播中枢（单例；宿主挂 /ws/status 端点转 <see cref="HandleAsync"/>）。</summary>

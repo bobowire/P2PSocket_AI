@@ -1,6 +1,6 @@
 # P2P 内网穿透产品 · 技术设计文档
 
-> 版本：v1.31　创建日期：2026-08-19　状态：待评审
+> 版本：v1.32　创建日期：2026-08-19　状态：待评审
 > 依据：[产品需求文档 PRD v0.6](../prd/README.md)（决策 D1~D21，D3 经 v0.4 修订；开放问题 OQ-1~OQ-19 已全部决议）
 > 定位：开发阶段的**施工图纸**——所有实现以本文档为准；与 PRD 冲突时以 PRD 为准并提出修订。
 
@@ -104,3 +104,4 @@
 | 2026-09-29 | v1.29 | M2-21 落地同步：02 §4.2 帧表 REKEY_ACK 行回填 **0x0C**（与 REKEY 载荷同构 81B；旧发送钥封印；合法域上界扩至 0x0C）+ §4.4 补切换次序保证（响应方接收环先行→旧钥 ACK→发送钥交换；发起方解析 ACK→派生→双钥切换**内联接收循环**——修复"ACK 唤醒异步任务再轮换"竞态窗：响应方发 ACK 即换钥，紧跟的新代帧在旧环下不可解→SEC-12 误判断链，间歇复现于高频数据流+短轮换周期）；05 §2.3 附背压实现注记（CreditGate 账本在 TunnelSession、SpliceIn 每块消费即回 WINDOW、M1 槽位机制删除、256KiB 入站队列保留兜底）+ §4 附 M2-21 实现注记（TTL 仅发起方/静态钥透传/TriggerRekeyAsync 预留/失败仅日志下轮重试） |
 | 2026-09-29 | v1.30 | M2-24 落地同步：05 §1.1 接口块补 CheckHealth 只读探测原语（存在性+IP 一致性；探测不可用按健康返回防重建风暴）+ 自愈实现注记（检测循环与重建编排归客户端宿主 NicHealthMonitor，30s 探测→Remove+Ensure 重建→恢复沿 Restored 事件）；§1.2 Windows 探测手段（独立 Open/Close 句柄 + LUID 单播表比对）、§1.3 Linux 探测手段（sysfs 存在性 + SIOCGIFADDR 主地址）；§2.1 补 listen_failed 自动重试注记（重试集+周期 5s+恢复沿触发 RetryListenFailedAsync 非阻塞闸串行，M1 附录 A.4 Wintun 重启竞态规律复现收口，不再需要手工 retry） |
 | 2026-09-29 | v1.31 | M2-25 落地同步：05 §1.2 卸载注记（INicManager.RemoveLeftoverAsync 遗留适配器移除[Open→WintunDeleteAdapter forceCloseSessions]、ClientUninstaller `--uninstall` CLI 编排[可选 0x12 解绑确认=发送后观察连接离开 Established、配置 --keep-config 默认/--purge]、Wintun.dll 与映射监听释放的职责边界[安装器/A-11、服务停止]）+ §1.3 Linux 卸载（ip link delete；RTM_DELLINK A-11 补强） |
+| 2026-09-30 | v1.32 | M2-26 落地同步：05 §5 补客户端升级引导实现注记（拒答窗口消费 HandleVersionRejectedAsync[无签名 0x03→缓存 LastUpgradeInfo+UpgradeRequired 事件→仍抛保持退避重连]、浏览器引导沿 M1-24 机制[仅 Interactive+每进程一次去重]、UpgradeApi GET /api/upgrade/info 现取/缓存回落[版本不符恰是未建立态]、WsEventNames upgrade_required 事件+UpgradeInfoView 入 export-ts 清单[生成物再生成随 M2-27]） |

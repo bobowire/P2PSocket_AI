@@ -8,6 +8,9 @@
 // - 能力模式：镜像服务端会话语义（02 §2.5）——新会话初始 Normal，登出降 Passive，登录失败不降级；
 //   passive 下主动类消息本地拒绝（省一次往返，服务端同样会拒）；
 // - 未注册设备：握手停在 NeedRegister 待 0x10（M1-24 向导后端），CompleteRegistration 转建立。
+// - 升级引导（M2-26，FR-C-904/02 §2.3）：Hello 5004 版本不符 → 受理窗内发无签名 0x03 →
+//   UpdateInfoResponse 缓存（LastUpgradeInfo）+ UpgradeRequired 事件（宿主接 WS/浏览器引导）
+//   → 仍抛出保持退避重连（每轮重取，升级信息随服务端配置演进）；已建立会话 0x03 同族应答照常。
 using System.IO.Pipelines;
 using System.Net.Sockets;
 using P2P.Core.Crypto;
@@ -33,6 +36,10 @@ public sealed record ControlClientOptions
     public TimeSpan HeartbeatInterval { get; init; } = TimeSpan.FromSeconds(30);
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(5);
     public TimeSpan RequestTimeout { get; init; } = TimeSpan.FromSeconds(10); // M1-26 打洞 Ack 延后，届时调大
+
+    /// <summary>Hello 协议版本覆盖缝（M2-26 测试注入）：生产 null=ProtocolVersion.Current；
+    /// 集成测注入越界值驱动服务端 5004 拒答，验证升级引导数据链（FR-C-904）。</summary>
+    public ushort? ProtocolVersionOverride { get; init; }
 }
 
 public sealed class ControlClientException(string message) : Exception(message);
@@ -70,6 +77,7 @@ public sealed class ControlClient : IAsyncDisposable
     private int _selfSeq;           // 出站 seq 原子递增
     private bool _hmacEnabled;
     private long _lastHeartbeatSentAt;
+    private volatile UpdateInfoResponse? _lastUpgradeInfo; // 最近版本拒答窗口取回的升级信息（M2-26）
     private PendingAck? _pending;
     private int _state = (int)ControlClientState.Idle;
     private CapabilityMode _capability = CapabilityMode.Normal;
@@ -86,6 +94,10 @@ public sealed class ControlClient : IAsyncDisposable
     /// <summary>能力模式变迁（登录/登出/重连驱动，02 §2.5）。</summary>
     public event Action<CapabilityMode>? CapabilityChanged;
 
+    /// <summary>版本拒答取回升级信息（M2-26，FR-C-904）：每轮 5004 拒答均触发
+    ///（宿主接 WS upgrade_required 广播与浏览器引导去重）；载荷=0x03 应答原文。</summary>
+    public event Action<UpdateInfoResponse>? UpgradeRequired;
+
     /// <summary>诊断日志（宿主 M1-30 接 Serilog）。</summary>
     public event Action<string>? Log;
 
@@ -93,6 +105,10 @@ public sealed class ControlClient : IAsyncDisposable
     public bool IsReady => State is ControlClientState.Established or ControlClientState.NeedRegister;
     public CapabilityMode Capability => _capability;
     public Guid? DeviceId { get; private set; }
+
+    /// <summary>最近一次版本拒答窗口取回的升级信息（M2-26）：本地 /api/upgrade/info
+    /// 在通道不可建立时（版本不符恰是此态）的回落数据源。</summary>
+    public UpdateInfoResponse? LastUpgradeInfo => _lastUpgradeInfo;
 
     /// <summary>时钟对齐（OQ-12）：offset 供 timestampMs 与 STUN DEVICE-AUTH 共用（M1-26）。</summary>
     public ClockSync Clock { get; }
@@ -292,7 +308,7 @@ public sealed class ControlClient : IAsyncDisposable
         _nonceC = RandomGenerator.Bytes(16);
         var sentAt = LocalNowMs;
         await SendWireAsync(PcpCodec.Encode(new Hello(NextSeq(), (ulong)sentAt, MsgType.Hello,
-            ProtocolVersion.Current, DeviceId, _nonceC)), ct);
+            _options.ProtocolVersionOverride ?? ProtocolVersion.Current, DeviceId, _nonceC)), ct);
 
         var helloAck = PcpCodec.Decode<HelloAck>(await ReadHandshakeFrameAsync(ct));
         // 时钟对齐（OQ-12）：RTT/2 补偿。此后全部出站 ts 用校准后时钟
@@ -302,8 +318,8 @@ public sealed class ControlClient : IAsyncDisposable
         switch (helloAck.Status)
         {
             case HelloStatus.VersionNotSupported:
-                throw new ControlClientException(
-                    $"服务端协议版本 {helloAck.ProtocolVersion} 不支持本机 {ProtocolVersion.Current}（升级引导 FR-C-904 属 M2）");
+                await HandleVersionRejectedAsync(helloAck, ct);
+                return; // 不可达：HandleVersionRejectedAsync 恒抛（保持退避重连语义）
             case HelloStatus.NeedRegister:
                 SetState(ControlClientState.NeedRegister); // M1-24 向导在此发 0x10（未签名）
                 return;
@@ -330,6 +346,31 @@ public sealed class ControlClient : IAsyncDisposable
         _hmacEnabled = true;
         SetCapability(CapabilityMode.Normal); // 镜像服务端：新会话初始 Normal（02 §2.5）
         SetState(ControlClientState.Established);
+    }
+
+    /// <summary>版本拒答处理（M2-26，FR-C-904/02 §2.3）：5004 后服务端受理窗内 0x03 是唯一可发消息
+    ///（无签名）→ 读 UpdateInfoResponse → 缓存 + 事件 → 仍抛出令连接循环进入退避重连
+    ///（每轮重连重取一次，服务端 update_* 配置演进可跟进）。取回失败不吞异常路径，仅告警。</summary>
+    private async Task HandleVersionRejectedAsync(HelloAck helloAck, CancellationToken ct)
+    {
+        UpdateInfoResponse? info = null;
+        try
+        {
+            await SendWireAsync(PcpCodec.EncodeObject(new UpdateInfoRequest(
+                NextSeq(), TimestampMs(), MsgType.UpdateInfo)), ct);
+            info = PcpCodec.Decode<UpdateInfoResponse>(await ReadHandshakeFrameAsync(ct)); // 受理窗应答未签名
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            Log?.Invoke($"升级信息获取失败：{e.Message}（重连后重取）");
+        }
+        if (info is not null)
+        {
+            _lastUpgradeInfo = info; // volatile 字段：引用写原子+可见性有序
+            UpgradeRequired?.Invoke(info);
+        }
+        throw new ControlClientException(
+            $"服务端协议版本 {helloAck.ProtocolVersion} 不支持本机 {ProtocolVersion.Current}（升级引导 /upgrade?reason=version，FR-C-904）");
     }
 
     private async Task RunSessionAsync(CancellationToken ct)
@@ -441,6 +482,7 @@ public sealed class ControlClient : IAsyncDisposable
         MsgType.PunchRequest => PcpCodec.Decode<PunchRequestAck>(msgpack),
         MsgType.PunchInvite => PcpCodec.Decode<PunchInvite>(msgpack), // S→C 推送（M1-26 挂载处理）
         MsgType.PunchRetry => PcpCodec.Decode<PunchRetry>(msgpack),  // 0x73 请求-应答同族 + 被邀请方推送（M2-19）
+        MsgType.UpdateInfo => PcpCodec.Decode<UpdateInfoResponse>(msgpack), // 0x03 已建立会话同族应答（M2-26）
         // S→C 方向 0x74 恒为 Grant（M2-17 分配应答/对端侧推送接续，02 §6.1②；事件面接线 M2-15）
         MsgType.RelayAllocate => PcpCodec.Decode<RelayGrant>(msgpack),
         _ => PcpCodec.DecodeLoose(msgpack),

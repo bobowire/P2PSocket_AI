@@ -1,6 +1,7 @@
 // M1-29 本地 Web API 组合根（04 §2、TD-12/TD-16）：
 // - LocalApiServices：宿主（M1-30）装配的服务束 + 事件→WS 接线
-//   （mapping_state←引擎状态机、login_state←能力模式变迁、device_list←0x41 提示/0x14 重置 M2-15）；
+//   （mapping_state←引擎状态机、login_state←能力模式变迁、device_list←0x41 提示/0x14 重置 M2-15、
+//   upgrade_required←版本拒答取回升级信息 M2-26）；
 // - MapLocalApi：单点挂全部端点模块；宿主负责 WebApplication 构建/UseWebSockets/监听 127.0.0.1:7100。
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
@@ -52,6 +53,12 @@ public sealed class LocalApiServices : IAsyncDisposable
             ev = WsEventNames.LoginState,
             mode = mode == CapabilityMode.Normal ? "normal" : "passive",
         });
+        // 版本拒答取回升级信息（M2-26，FR-C-904）：状态类提示→前端 refetch /api/upgrade/info
+        Control.UpgradeRequired += info => Hub.Publish(new
+        {
+            ev = WsEventNames.UpgradeRequired,
+            latestVersion = info.LatestVersion,
+        });
     }
 
     public async ValueTask DisposeAsync() => await Hub.DisposeAsync();
@@ -69,6 +76,7 @@ public static class LocalWebApi
         app.MapMappingApi(services.Mappings);
         app.MapDeviceApi(services.Control, services.State, services.Hub); // M2-15 加 0x14 重置端点
         app.MapPeersApi(services.Control, services.Peers); // M2-23 目标设备级配置（04 §2.4）
+        app.MapUpgradeApi(services.Control); // M2-26 升级引导（04 §2.7）
         app.MapDiagnosticsApi(services.Scheduler);
         app.Map("/ws/status", services.Hub.HandleAsync); // 04 §2.8 实时通道
         return app;
