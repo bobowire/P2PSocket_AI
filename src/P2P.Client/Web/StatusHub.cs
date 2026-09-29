@@ -20,6 +20,9 @@ public static class WsEventNames
     /// <summary>映射速率增量（1s 数值类→前端直写，TD-16）。</summary>
     public const string MappingStats = "mapping_stats";
 
+    /// <summary>设备列表变更提示（0x41/远程码重置触发→前端 refetch /api/devices，M2-15）。</summary>
+    public const string DeviceList = "device_list";
+
     /// <summary>登录态/能力模式变迁（状态类→前端 refetch）。</summary>
     public const string LoginState = "login_state";
 }

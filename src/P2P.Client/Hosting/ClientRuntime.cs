@@ -258,7 +258,10 @@ public sealed class ClientRuntime : IAsyncDisposable
     }
 
     /// <summary>0x71 PunchInvite：被邀请方即时响应（不进本地队列，02 §5.1③）；成功会话入宿主表（02 §4.5）。
-    /// 0x74 RelayGrant（M2-18，02 §6.1② 双方下发）：被邀请侧加入中继并应答 PTP 握手（承载绑定回退路径）。</summary>
+    /// 0x74 RelayGrant（M2-18，02 §6.1② 双方下发）：被邀请侧加入中继并应答 PTP 握手（承载绑定回退路径）。
+    /// 0x41 DeviceListUpdate（M2-15，TD-16）：提示事件→前端 refetch，本地不缓存设备列表。
+    /// 0x75 Invalidation（M2-15，05 §4）：受影响映射 MarkInvalid（停转发置 invalid）；
+    /// newCapability 降级已在 ControlClient 内联（连接级状态）→ CapabilityChanged → WS login_state。</summary>
     private void OnServerPush(IPcpMessage message)
     {
         switch (message)
@@ -273,7 +276,28 @@ public sealed class ClientRuntime : IAsyncDisposable
                 // 到达此处的必为被邀请方重打预备通知——实际端点交换由随后的 0x71 邀请驱动
                 Log?.Invoke($"[punch] 服务端回切通知（session={retry.SessionId}）：预备重打洞（02 §6.2）");
                 break;
+            case DeviceListUpdate: // 0x41 无载荷提示帧：广播 device_list（04 §2.8）
+                _api.Hub.Publish(new { ev = WsEventNames.DeviceList });
+                break;
+            case Invalidation invalidation:
+                _ = HandleInvalidationAsync(invalidation);
+                break;
         }
+    }
+
+    /// <summary>0x75 失效推送处理（M2-15，05 §4）：逐映射 MarkInvalid——拆监听/关 channel 停转发、
+    /// 置 invalid 态（mapping_state 事件经引擎状态机既有接线广播，前端置灰）。
+    /// 幂等：未启用/已拆映射 TryGetValue 落空即跳过；disabled 映射服务端本就不入集（M2-12 口径）。</summary>
+    private async Task HandleInvalidationAsync(Invalidation invalidation)
+    {
+        foreach (var mappingId in invalidation.AffectedMappingIds)
+        {
+            try { await _engine.MarkInvalidAsync(mappingId, $"invalidated:{invalidation.Reason}"); }
+            catch (Exception e) { Log?.Invoke($"[engine] 0x75 映射 {mappingId} 失效处理失败：{e.Message}"); }
+        }
+        if (invalidation.AffectedMappingIds.Length > 0)
+            Log?.Invoke($"[control] 0x75 失效推送（reason={invalidation.Reason}，" +
+                        $"{invalidation.AffectedMappingIds.Length} 条映射置 invalid）");
     }
 
     private async Task HandleInviteAsync(PunchInvite invite)

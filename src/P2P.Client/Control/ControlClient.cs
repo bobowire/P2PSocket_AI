@@ -410,6 +410,13 @@ public sealed class ControlClient : IAsyncDisposable
                 if (logoutAck.Ok) SetCapability(CapabilityMode.Passive); // 登出降级（FR-C-603）
                 DeliverAckOrPush(logoutAck);
                 return;
+            case MsgType.Invalidation:
+                var inv = PcpCodec.Decode<Invalidation>(msgpack);
+                // newCapability 即时降级（M2-15，02 §2.5）：能力是连接级状态在此层维护（镜像 UserLogout 分支）；
+                // 受影响映射置 invalid 由宿主 OnServerPush 消费（05 §4）；0x75 恒为推送无 pending 配对
+                if (inv.NewCapability is { } cap) SetCapability(cap);
+                ServerPush?.Invoke(inv);
+                return;
             default:
                 DeliverAckOrPush(DecodeKnown(msgpack, header.MsgType));
                 return;
@@ -421,8 +428,11 @@ public sealed class ControlClient : IAsyncDisposable
     {
         MsgType.RegisterAck => PcpCodec.Decode<RegisterAck>(msgpack),
         MsgType.DeviceUpdate => PcpCodec.Decode<DeviceUpdateAck>(msgpack),
+        MsgType.RemoteCodeReset => PcpCodec.Decode<RemoteCodeResetAck>(msgpack), // 0x14 同族 Ack（M2-15 端点持久化）
         MsgType.UserRegister => PcpCodec.Decode<UserRegisterAck>(msgpack),
         MsgType.DeviceList => PcpCodec.Decode<DeviceListResponse>(msgpack),
+        MsgType.DeviceListUpdate => PcpCodec.Decode<DeviceListUpdate>(msgpack), // 0x41 提示帧（M2-15 → WS device_list）
+        MsgType.LanSegmentsUpsert => PcpCodec.Decode<LanSegmentsUpsertAck>(msgpack), // 0x63 同族（上报接线 M2-27）
         MsgType.GroupCreate => PcpCodec.Decode<GroupCreateAck>(msgpack),
         MsgType.GroupUpdate => PcpCodec.Decode<GroupUpdateAck>(msgpack),
         MsgType.GroupDissolve => PcpCodec.Decode<GroupDissolveAck>(msgpack),

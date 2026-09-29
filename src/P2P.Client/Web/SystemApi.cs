@@ -3,7 +3,7 @@
 //   （Established→running，其余 degraded）+ 通道可达性 + 协议版本；
 // - GET /api/device：state.json 三要素 + 登录账号 + 能力模式；
 // - PUT /api/device：0x13 改名（空名 1001；passive 本地拒 2002）。
-// reset-remote-code（0x14）→ M2；settings GET/PUT → 配置任务。
+// reset-remote-code（0x14）→ DeviceApi（M2-15）；settings GET/PUT → 配置任务。
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
 using P2P.Client.Control;
