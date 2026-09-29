@@ -5,13 +5,16 @@
 //   （TCP 窗口反压应用）；
 //   入站写队列 256KiB 有界，满则断开该 channel（本地应用不消费）；
 // - 状态机 disabled→punching→direct/relay/failed（M2-18：relay 态=打洞失败且回退开→中继承载；
-//   invalid=授权失效预留）；
+//   invalid=授权失效（M2-15：0x75 到达 MarkInvalid）；
 //   enable 前隧道复用检查：设备对隧道存活 → 直达 direct 不排队（02 §4.5 复用规则）；
 // - 隧道断链 → 该设备对映射回 punching 重新排队（02 §4.5 重建=新 sessionId）；
 // - M2-19 回切：直连会话挂入替换中继会话 → relay 态映射翻 direct（TunnelHost 排水窗内
 //   旧会话在途帧照常送达，channel 随旧会话关闭收尾——先排水后切换，NET-75）；
-// - 目标侧 self=127.0.0.1（D15）；非 self 属 M2 白名单（SEC-52 双保险的执行点）；
-// - UDP 映射（05 §2.4/FR-C-303/TD-15）→ M2。
+// - 目标侧 self=127.0.0.1（D15）；非 self 走本机 lan_segments 白名单（SEC-52 双保险的执行点）；
+// - UDP 映射（M2-20，05 §2.4/FR-C-303/TD-15）：UdpClient.Bind 监听；channel=本地应用端点——
+//   端点首包建 channel+OPEN 后乐观直发 UDP_DGRAM（不等 OPEN_OK）；OPEN_FAIL→该端点丢包+映射 failed；
+//   服务侧每 channel 一个随机源端口 UdpClient（Connect 目标）+L3 校验同 TCP；双向空闲 60s 回收
+//   （CLOSE+双端释放）；每映射并发 channel ≤256 超限丢弃+计数；>1368B 数据报 FRAG 分片/重组在会话层。
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
@@ -55,6 +58,15 @@ public sealed record MappingEngineOptions
     public int BacklogBytes { get; init; } = 256 * 1024;
     /// <summary>目标侧连接本地服务超时。</summary>
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>UDP channel 双向空闲回收超时（05 §2.4 默认 60s 可配；测试注入缩短）。</summary>
+    public TimeSpan UdpIdleTimeout { get; init; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>UDP channel 空闲扫描周期（默认 5s；测试注入缩短）。</summary>
+    public TimeSpan UdpSweepInterval { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>每 UDP 映射并发 channel 上限（05 §2.4 默认 256；防 DNS 风暴型放大，超限丢弃+计数）。</summary>
+    public int UdpMaxChannels { get; init; } = 256;
 }
 
 /// <summary>
@@ -63,8 +75,9 @@ public sealed record MappingEngineOptions
 /// </summary>
 public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
 {
-    /// <summary>splice 分块：UDP 承载整帧 ≤1400B（02 §4.3）→ 明文上限 = 1400-16(头)-16(tag)。</summary>
-    public static int ChunkSize => UdpPunchTransport.MaxUdpFrame - PtpHeader.WireLen - Aead.TagLen;
+    /// <summary>splice 分块：UDP 承载整帧 ≤1400B（02 §4.3）→ 明文上限 = 1400-16(头)-16(tag)。
+    /// 与 UDP_DGRAM 单帧上限同源（M2-20 起常量归 PtpFrameCodec）。</summary>
+    public static int ChunkSize => PtpFrameCodec.MaxUdpDgramPlain;
 
     private readonly TunnelHost _tunnels;
     private readonly PunchScheduler _scheduler;
@@ -73,6 +86,8 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
     private readonly Func<IReadOnlyCollection<string>>? _enabledCidrs; // M2-11 白名单快照读（SEC-52 第二道）
     private readonly ConcurrentDictionary<Guid, Runtime> _mappings = new();
     private readonly ConcurrentDictionary<(Guid SessionId, uint ChannelId), ChannelEntry> _channels = new();
+    private readonly ConcurrentDictionary<(Guid SessionId, uint ChannelId), UdpChannelEntry> _udpChannels = new();
+    private readonly Task _udpSweepLoop;
     private readonly CancellationTokenSource _cts = new();
     private int _disposed;
 
@@ -109,6 +124,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         _scheduler.PunchCompleted += OnPunchCompleted;
         _tunnels.SessionDisconnected += OnTunnelDisconnected;
         _tunnels.SessionAttached += OnTunnelAttached;
+        _udpSweepLoop = UdpSweepLoopAsync(_cts.Token);
     }
 
     /// <summary>更新监听绑定地址（01 §3.2 监听绑虚拟 IP）。向导路径冷启动时 VirtualIp 尚空、
@@ -121,8 +137,14 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         public required MappingConfig Config;
         public volatile MappingState State = MappingState.Disabled;
         public string? Detail;
-        public TcpListener? Listener;
+        public TcpListener? Listener;          // tcp 映射监听
         public Task? AcceptLoop;
+        public UdpClient? UdpListener;         // udp 映射监听（M2-20）
+        public Task? UdpRecvLoop;
+        /// <summary>访问侧端点→channel 表（05 §2.4：channel=本地应用端点）；lock (UdpByEndpoint) 保护。</summary>
+        public readonly Dictionary<IPEndPoint, UdpChannelEntry> UdpByEndpoint = [];
+        public long UdpDroppedDatagrams;      // 超限/无隧道丢弃计数（04 §3.2 计数告警源）
+        public long UdpOverflowChannels;      // 超 256 上限被拒的建 channel 尝试计数
         public long BytesUp;     // 访问侧累计（mapping_stats 速率采样，04 §2.8）
         public long BytesDown;
         public long BytesRelay;  // 其中经中继承载的累计（0x64 relayBytes，M2-22）
@@ -136,17 +158,11 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) == 1, this);
         ArgumentNullException.ThrowIfNull(config);
 
-        if (config.Proto != "tcp")
-        {
-            // UDP 映射属 05 §2.4/FR-C-303/TD-15 → M2
-            var rtUdp = new Runtime { Config = config };
-            _mappings[config.MappingId] = rtUdp;
-            SetState(rtUdp, MappingState.Failed, "udp_mapping_not_in_m1");
-            return Task.CompletedTask;
-        }
+        if (config.Proto is not ("tcp" or "udp"))
+            throw new ArgumentException($"proto 须为 tcp|udp（得 {config.Proto}）", nameof(config));
 
         if (_mappings.TryGetValue(config.MappingId, out var existing)
-            && existing.Config.Equals(config) && existing.Listener is not null)
+            && existing.Config.Equals(config) && (existing.Listener is not null || existing.UdpListener is not null))
             return Task.CompletedTask; // 幂等（同步层 diff 后才会重复到达）
         if (existing is not null)
             _ = DisableAsync(config.MappingId);
@@ -154,18 +170,37 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         var rt = new Runtime { Config = config };
         _mappings[config.MappingId] = rt;
 
-        var listener = new TcpListener(_virtualIp, config.LocalPort);
-        try
+        if (config.Proto == "udp")
         {
-            listener.Start(backlog: 16);
+            // UDP 监听（M2-20，05 §2.4）：UdpClient.Bind(virtualIp:localPort)；channel 由端点首包按需建
+            UdpClient listener;
+            try
+            {
+                listener = new UdpClient(new IPEndPoint(_virtualIp, config.LocalPort));
+            }
+            catch (SocketException e)
+            {
+                SetState(rt, MappingState.Failed, $"listen_failed: {e.SocketErrorCode}");
+                return Task.CompletedTask;
+            }
+            rt.UdpListener = listener;
+            rt.UdpRecvLoop = UdpReceiveLoopAsync(rt, _cts.Token);
         }
-        catch (SocketException e)
+        else
         {
-            SetState(rt, MappingState.Failed, $"listen_failed: {e.SocketErrorCode}");
-            return Task.CompletedTask;
+            var listener = new TcpListener(_virtualIp, config.LocalPort);
+            try
+            {
+                listener.Start(backlog: 16);
+            }
+            catch (SocketException e)
+            {
+                SetState(rt, MappingState.Failed, $"listen_failed: {e.SocketErrorCode}");
+                return Task.CompletedTask;
+            }
+            rt.Listener = listener;
+            rt.AcceptLoop = AcceptLoopAsync(rt, _cts.Token);
         }
-        rt.Listener = listener;
-        rt.AcceptLoop = AcceptLoopAsync(rt, _cts.Token);
 
         // 隧道复用检查（02 §4.5：设备对隧道存活 → 复用当前承载不排队打洞——M2-18：中继会话 → relay 态）
         if (_tunnels.Get(config.PeerDeviceId) is { } reused)
@@ -191,7 +226,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
     {
         if (!_mappings.TryGetValue(mappingId, out var rt))
             return Task.CompletedTask; // 未启用/不存在：幂等
-        if (rt.Listener is not null)
+        if (rt.Listener is not null || rt.UdpListener is not null)
         {
             if (rt.State == MappingState.Failed)
             {
@@ -215,8 +250,13 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
     {
         rt.Listener?.Stop(); // accept 循环随之退出
         if (rt.AcceptLoop is not null) { try { await rt.AcceptLoop; } catch { /* 监听关闭 */ } }
+        rt.UdpListener?.Close(); // UDP 接收循环随之退出
+        if (rt.UdpRecvLoop is not null) { try { await rt.UdpRecvLoop; } catch { /* 监听关闭 */ } }
+        rt.UdpListener?.Dispose();
         foreach (var entry in _channels.Values.Where(e => e.MappingId == rt.Config.MappingId).ToList())
             await CloseEntryAsync(entry, notifyPeer: true);
+        foreach (var entry in _udpChannels.Values.Where(e => e.MappingId == rt.Config.MappingId).ToList())
+            await CloseUdpChannelAsync(entry, notifyPeer: true);
         SetState(rt, final, detail);
     }
 
@@ -266,9 +306,14 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
 
     // ── ITunnelChannelHandler（访问侧+目标侧统一入口）────────────────
 
-    /// <summary>目标侧：对端请求打开本地目标连接（self=127.0.0.1，D15；非 self → M2 白名单）。</summary>
+    /// <summary>目标侧：对端请求打开本地目标连接（tcp=连接目标服务；udp=建随机源端口 channel）。</summary>
     public void OnOpen(TunnelSession session, uint channelId, OpenPayload open)
-        => _ = HandleTargetOpenAsync(session, channelId, open);
+    {
+        if (open.TargetProto == "udp")
+            _ = HandleTargetUdpOpenAsync(session, channelId, open);
+        else
+            _ = HandleTargetOpenAsync(session, channelId, open);
+    }
 
     private async Task HandleTargetOpenAsync(TunnelSession session, uint channelId, OpenPayload open)
     {
@@ -283,16 +328,11 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
             // L3 白名单本地校验（M2-11，SEC-52 双保险第二道；05 §2.5）：self=127.0.0.1 恒放行；
             // 非 self 须被本机 enabled 段 CIDR 覆盖——服务端 0x60/0x70 双路径校验（第一道）后的
             // 最后一道防线（防服务端校验后段被移除/绕过）。无 provider/无段 = 不覆盖（fail closed）
-            var connectAddr = IPAddress.Loopback;
-            if (open.TargetAddr != "self")
+            if (!TryResolveTarget(open.TargetAddr, out var connectAddr))
             {
-                if (!IsCoveredBySegments(open.TargetAddr))
-                {
-                    await session.SendOpenResultAsync(channelId,
-                        new OpenResultPayload(false, $"l3_not_permitted: {open.TargetAddr}"));
-                    return;
-                }
-                connectAddr = IPAddress.Parse(open.TargetAddr); // 覆盖判定已确保可解析
+                await session.SendOpenResultAsync(channelId,
+                    new OpenResultPayload(false, $"l3_not_permitted: {open.TargetAddr}"));
+                return;
             }
 
             // self → 127.0.0.1:targetPort（05 §2.5/D15）；段内 → 该地址
@@ -321,6 +361,24 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         }
     }
 
+    /// <summary>L3 解析（TCP/UDP 共用，SEC-52）：self → 127.0.0.1 恒放行；非 self 须被本机
+    /// enabled 段覆盖（无 provider/无段 = fail closed）。</summary>
+    private bool TryResolveTarget(string targetAddr, out IPAddress address)
+    {
+        if (targetAddr == "self")
+        {
+            address = IPAddress.Loopback;
+            return true;
+        }
+        if (IsCoveredBySegments(targetAddr))
+        {
+            address = IPAddress.Parse(targetAddr); // 覆盖判定已确保可解析
+            return true;
+        }
+        address = IPAddress.None;
+        return false;
+    }
+
     /// <summary>targetAddr 是否被本机 enabled 段覆盖（M2-11，SEC-52）：IP 字面量逐段
     /// IPNetwork.Contains；非法地址/段（手改文件）fail closed。provider 每次现调取快照
     /// （读无锁、列表不可变——LanSegmentsStore 同步替换）。</summary>
@@ -335,12 +393,23 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         return false;
     }
 
-    /// <summary>访问侧：OPEN 结果——OK 进 splice，FAIL 关闭本地连接（05 §2.2）。</summary>
+    /// <summary>访问侧：OPEN 结果——TCP OK 进 splice，FAIL 关本地连接（05 §2.2）；
+    /// UDP FAIL → 该端点 OpenFailed 静默丢包 + 映射 failed（监听保持，05 §2.4）。</summary>
     public void OnOpenResult(TunnelSession session, uint channelId, OpenResultPayload result)
     {
-        if (!_channels.TryGetValue((session.SessionId, channelId), out var entry)) return; // 迟到：已关
-        if (result.Ok) StartSplice(entry);
-        else _ = CloseEntryAsync(entry, notifyPeer: false);
+        if (_channels.TryGetValue((session.SessionId, channelId), out var entry))
+        {
+            if (result.Ok) StartSplice(entry);
+            else _ = CloseEntryAsync(entry, notifyPeer: false);
+            return;
+        }
+        if (!result.Ok && _udpChannels.TryGetValue((session.SessionId, channelId), out var udpEntry)
+            && udpEntry.Owner is { } rt)
+        {
+            Volatile.Write(ref udpEntry.OpenFailed, 1);
+            if (rt.State != MappingState.Failed)
+                SetState(rt, MappingState.Failed, $"open_failed: {result.FailReason}");
+        }
     }
 
     /// <summary>隧道→本地：入站数据进有界写队列。</summary>
@@ -355,11 +424,249 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         }
     }
 
-    /// <summary>对端关闭 channel。</summary>
+    /// <summary>对端关闭 channel（TCP splice / UDP channel 统一入口）。</summary>
     public void OnClose(TunnelSession session, uint channelId)
     {
         if (_channels.TryGetValue((session.SessionId, channelId), out var entry))
             _ = CloseEntryAsync(entry, notifyPeer: false);
+        if (_udpChannels.TryGetValue((session.SessionId, channelId), out var udpEntry))
+            _ = CloseUdpChannelAsync(udpEntry, notifyPeer: false);
+    }
+
+    // ── UDP 映射（M2-20，05 §2.4/FR-C-303/TD-15）────────────────────
+
+    /// <summary>UDP channel：访问侧=本地应用端点上下文；服务侧=连目标的本地 socket。
+    /// 双端同构存于 _udpChannels（服务侧 MappingId/Owner 为 null，流量归对端映射计数）。</summary>
+    private sealed class UdpChannelEntry
+    {
+        public required Guid? MappingId;   // 访问侧归属映射 id；服务侧 null
+        public required Runtime? Owner;    // 访问侧流量计数归属；服务侧 null
+        public required TunnelSession Session;
+        public required uint ChannelId;
+        /// <summary>访问侧：本地应用端点（channel 身份即此端点，回发目标）。</summary>
+        public required IPEndPoint? AppEndpoint;
+        /// <summary>服务侧：Connect(target) 的本地 socket（随机源端口，仅收该目标回包）。</summary>
+        public UdpClient? Local;
+        public Task? LocalRecvLoop;        // 服务侧目标→隧道回发循环
+        public long LastActive;            // Environment.TickCount64；双向收发均刷新（空闲回收依据）
+        public int OpenFailed;             // 访问侧：OPEN_FAIL 置 1 → 该端点后续包静默丢弃（表项保留）
+        public int Closed;                 // CloseUdpChannelAsync 幂等闸
+    }
+
+    /// <summary>访问侧监听循环：收本地应用数据报 → 端点表查/建 channel → OPEN{udp} 后乐观直发
+    /// UDP_DGRAM（不等 OPEN_OK，05 §2.4）。单 runtime 单循环（UdpClient.ReceiveAsync 非并发安全）。</summary>
+    private async Task UdpReceiveLoopAsync(Runtime rt, CancellationToken ct)
+    {
+        var listener = rt.UdpListener!;
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                UdpReceiveResult result;
+                try { result = await listener.ReceiveAsync(ct); }
+                catch (SocketException) { continue; } // ICMP 端口不可达等：监听保持（UDP 无连接）
+
+                var entry = LookupUdpChannel(rt, result.RemoteEndPoint);
+                if (entry is not null && (Volatile.Read(ref entry.OpenFailed) == 1 || Volatile.Read(ref entry.Closed) == 1))
+                {
+                    Interlocked.Increment(ref rt.UdpDroppedDatagrams); // OPEN_FAIL/回收中端点：静默丢弃
+                    continue;
+                }
+                if (entry is null)
+                {
+                    var session = _tunnels.Get(rt.Config.PeerDeviceId);
+                    if (session is null || session.IsClosed)
+                    {
+                        Interlocked.Increment(ref rt.UdpDroppedDatagrams); // punching/failed 期间：丢（映射态不变）
+                        continue;
+                    }
+                    entry = OpenUdpChannel(rt, session, result.RemoteEndPoint);
+                    if (entry is null)
+                    {
+                        Interlocked.Increment(ref rt.UdpDroppedDatagrams); // 超 256 上限（建 channel 尝试另计入 Overflow）
+                        continue;
+                    }
+                    try
+                    {
+                        await session.SendOpenAsync(entry.ChannelId,
+                            new OpenPayload("udp", rt.Config.TargetAddr, rt.Config.TargetPort), ct);
+                        // OPEN_OK/OPEN_FAIL 由 OnOpenResult 驱动；数据报乐观直发不等结果
+                    }
+                    catch (Exception e)
+                    {
+                        Log?.Invoke($"映射 {rt.Config.Name} UDP OPEN 发送失败：{e.Message}");
+                        await CloseUdpChannelAsync(entry, notifyPeer: false);
+                        Interlocked.Increment(ref rt.UdpDroppedDatagrams);
+                        continue;
+                    }
+                }
+                try
+                {
+                    await entry.Session.SendUdpDgramAsync(entry.ChannelId, result.Buffer, ct);
+                    Volatile.Write(ref entry.LastActive, Environment.TickCount64);
+                    Interlocked.Add(ref rt.BytesUp, result.Buffer.Length);
+                    if (entry.Session.ViaRelay) Interlocked.Add(ref rt.BytesRelay, result.Buffer.Length);
+                }
+                catch
+                {
+                    Interlocked.Increment(ref rt.UdpDroppedDatagrams); // 会话异常：丢（断链事件统一清理）
+                }
+            }
+        }
+        catch (Exception e) when (e is OperationCanceledException or ObjectDisposedException)
+        { /* 监听关闭（停用/引擎释放） */ }
+    }
+
+    private static UdpChannelEntry? LookupUdpChannel(Runtime rt, IPEndPoint endpoint)
+    {
+        lock (rt.UdpByEndpoint)
+            return rt.UdpByEndpoint.TryGetValue(endpoint, out var entry) ? entry : null;
+    }
+
+    /// <summary>端点首包建 channel：端点表+channel 表登记（上限检查与登记同锁，两表一致）。</summary>
+    private UdpChannelEntry? OpenUdpChannel(Runtime rt, TunnelSession session, IPEndPoint appEndpoint)
+    {
+        lock (rt.UdpByEndpoint)
+        {
+            if (rt.UdpByEndpoint.Count >= _options.UdpMaxChannels)
+            {
+                Interlocked.Increment(ref rt.UdpOverflowChannels); // DNS 风暴型放大防护（05 §2.4）
+                return null;
+            }
+            var entry = new UdpChannelEntry
+            {
+                MappingId = rt.Config.MappingId,
+                Owner = rt,
+                Session = session,
+                ChannelId = session.AllocateChannelId(),
+                AppEndpoint = appEndpoint,
+                LastActive = Environment.TickCount64,
+            };
+            _udpChannels[(session.SessionId, entry.ChannelId)] = entry;
+            rt.UdpByEndpoint[appEndpoint] = entry;
+            return entry;
+        }
+    }
+
+    /// <summary>服务侧 UDP OPEN（05 §2.4）：L3 校验同 TCP → 每 channel 一个随机源端口
+    /// UdpClient.Connect(target)（仅收该目标回包）→ OPEN_OK → 本地接收循环回发。</summary>
+    private async Task HandleTargetUdpOpenAsync(TunnelSession session, uint channelId, OpenPayload open)
+    {
+        try
+        {
+            if (!TryResolveTarget(open.TargetAddr, out var targetAddr))
+            {
+                await session.SendOpenResultAsync(channelId,
+                    new OpenResultPayload(false, $"l3_not_permitted: {open.TargetAddr}"));
+                return;
+            }
+            var local = new UdpClient();
+            try { local.Connect(targetAddr, open.TargetPort); }
+            catch (SocketException e)
+            {
+                local.Dispose();
+                await session.SendOpenResultAsync(channelId,
+                    new OpenResultPayload(false, $"connect_failed: {e.Message}"));
+                return;
+            }
+            var entry = new UdpChannelEntry
+            {
+                MappingId = null,
+                Owner = null,
+                Session = session,
+                ChannelId = channelId,
+                AppEndpoint = null,
+                Local = local,
+                LastActive = Environment.TickCount64,
+            };
+            _udpChannels[(session.SessionId, channelId)] = entry;
+            await session.SendOpenResultAsync(channelId, new OpenResultPayload(true, null));
+            entry.LocalRecvLoop = TargetUdpRecvLoopAsync(entry, local, _cts.Token);
+        }
+        catch (Exception e)
+        {
+            Log?.Invoke($"目标侧 UDP OPEN 处理失败：{e.Message}");
+        }
+    }
+
+    /// <summary>服务侧：目标回包 → UDP_DGRAM 回访问侧。</summary>
+    private async Task TargetUdpRecvLoopAsync(UdpChannelEntry entry, UdpClient local, CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var result = await local.ReceiveAsync(ct);
+                Volatile.Write(ref entry.LastActive, Environment.TickCount64);
+                await entry.Session.SendUdpDgramAsync(entry.ChannelId, result.Buffer, ct);
+            }
+        }
+        catch (Exception e) when (e is OperationCanceledException or ObjectDisposedException
+            or SocketException)
+        { /* channel 回收/引擎释放/ICMP 不可达：退出（残留表项由空闲扫描收敛） */ }
+    }
+
+    /// <summary>UDP_DGRAM 到达（会话层已重组完整数据报）：访问侧回发本地应用端点；服务侧转发目标。</summary>
+    public void OnUdpDgram(TunnelSession session, uint channelId, ReadOnlyMemory<byte> datagram)
+    {
+        if (!_udpChannels.TryGetValue((session.SessionId, channelId), out var entry)
+            || Volatile.Read(ref entry.Closed) == 1)
+            return; // 迟到/已回收：丢（UDP 语义容忍丢包）
+        Volatile.Write(ref entry.LastActive, Environment.TickCount64);
+        if (entry.Owner is { } rt)
+        {
+            try
+            {
+                rt.UdpListener?.Send(datagram.Span, entry.AppEndpoint!);
+                Interlocked.Add(ref rt.BytesDown, datagram.Length);
+                if (entry.Session.ViaRelay) Interlocked.Add(ref rt.BytesRelay, datagram.Length);
+            }
+            catch (SocketException)
+            {
+                Interlocked.Increment(ref rt.UdpDroppedDatagrams);
+            }
+        }
+        else if (entry.Local is { } local)
+        {
+            try { local.Send(datagram.Span); } // Connect 过：无目标参数
+            catch (SocketException) { /* 目标不可达：丢（接收循环 ICMP 收敛） */ }
+        }
+    }
+
+    /// <summary>关 UDP channel（幂等）：双端表项释放 + 通知对端 CLOSE + 服务侧本地 socket 关闭。</summary>
+    private async Task CloseUdpChannelAsync(UdpChannelEntry entry, bool notifyPeer)
+    {
+        if (Interlocked.Exchange(ref entry.Closed, 1) == 1) return;
+        _udpChannels.TryRemove((entry.Session.SessionId, entry.ChannelId), out _);
+        if (entry.Owner is { } o && entry.AppEndpoint is { } ep)
+            lock (o.UdpByEndpoint)
+                o.UdpByEndpoint.Remove(ep); // 同端点再发包建新 channel（05 §2.4 回收语义）
+        if (notifyPeer && !entry.Session.IsClosed)
+        {
+            try { await entry.Session.SendCloseAsync(entry.ChannelId); }
+            catch { /* 会话已关 */ }
+        }
+        entry.Local?.Close(); // 服务侧目标接收循环随之退出
+        if (entry.LocalRecvLoop is not null) { try { await entry.LocalRecvLoop; } catch { } }
+        entry.Local?.Dispose();
+    }
+
+    /// <summary>空闲扫描：周期遍历 _udpChannels，双向无流量超 UdpIdleTimeout 即回收（CLOSE+双端释放）。</summary>
+    private async Task UdpSweepLoopAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(_options.UdpSweepInterval);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                var now = Environment.TickCount64;
+                foreach (var entry in _udpChannels.Values)
+                    if (Volatile.Read(ref entry.Closed) == 0
+                        && now - Volatile.Read(ref entry.LastActive) >= _options.UdpIdleTimeout.TotalMilliseconds)
+                        await CloseUdpChannelAsync(entry, notifyPeer: true);
+            }
+        }
+        catch (OperationCanceledException) { /* 引擎释放 */ }
     }
 
     // ── 状态机驱动 ────────────────────────────────────────────────────
@@ -404,6 +711,8 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         // 排水期新旧会话并存（M2-19）：只清理本会话的 channel（新会话的 channel 不受旧会话关闭影响）
         foreach (var entry in _channels.Values.Where(e => e.Session == session).ToList())
             _ = CloseEntryAsync(entry, notifyPeer: false); // 会话已亡：只清本地
+        foreach (var udpEntry in _udpChannels.Values.Where(e => e.Session == session).ToList())
+            _ = CloseUdpChannelAsync(udpEntry, notifyPeer: false); // 端点表同步摘除→新隧道重开 channel
 
         if (_tunnels.Get(session.PeerDeviceId) is not null) return; // 已有新隧道（替换场景）：不回打
 
@@ -546,6 +855,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
             await TeardownAsync(rt, MappingState.Disabled, "engine_disposed");
         _mappings.Clear();
         _cts.Cancel();
+        try { await _udpSweepLoop; } catch { /* 取消即退出 */ }
         _cts.Dispose();
     }
 }

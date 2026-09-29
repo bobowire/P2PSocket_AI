@@ -3,6 +3,7 @@
 // - 接收循环：解帧 → 防重放 → AEAD 解密 → KEEPALIVE/PING 内联 → channel 分发；
 // - KEEPALIVE 20s 周期（NET-72 ≤25s）+ 3 次未响应判定断链 → 销毁 → 事件（状态机回 punching 由引擎订阅）；
 // - REKEY 轮换属 SEC-14/FR-C-502 → M2，M1 会话密钥随隧道生命周期存续（任务清单 M1-25 注）。
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 using MessagePack;
 using P2P.Core.Crypto;
@@ -214,6 +215,30 @@ public sealed class TunnelSession : IAsyncDisposable
     public ValueTask SendCloseAsync(uint channelId, CancellationToken ct = default)
         => SendChannelFrameAsync(PtpFrameType.Close, channelId, Array.Empty<byte>(), ct);
 
+    /// <summary>发送 UDP_DGRAM（M2-20，05 §2.4）：≤1368B 单帧直发；超出按 1352B 分片为 FRAG 序列
+    /// （同一数据报的片共用 DgramId，More=false 为末片；分片阈值与承载类型解耦——TCP 承载同口径，
+    /// 02 §6.2"UDP_DGRAM 语义不变"）。调用方串行化同 channel 数据报（保证 DgramId 单调映射到发送序）。</summary>
+    public async ValueTask SendUdpDgramAsync(uint channelId, ReadOnlyMemory<byte> datagram, CancellationToken ct = default)
+    {
+        if (datagram.Length <= PtpFrameCodec.MaxUdpDgramPlain)
+        {
+            await SendChannelFrameAsync(PtpFrameType.UdpDgram, channelId, datagram, ct).ConfigureAwait(false);
+            return;
+        }
+        var dgramId = (uint)Interlocked.Increment(ref _nextDgramId);
+        for (ushort index = 0; ; index++)
+        {
+            var take = Math.Min(PtpFrameCodec.MaxFragChunk, datagram.Length - (int)index * PtpFrameCodec.MaxFragChunk);
+            var more = (int)index * PtpFrameCodec.MaxFragChunk + take < datagram.Length;
+            var chunk = datagram.Slice((int)index * PtpFrameCodec.MaxFragChunk, take).ToArray();
+            await SendChannelFrameAsync(PtpFrameType.Frag, channelId,
+                MessagePackSerializer.Serialize(new FragPayload(dgramId, index, more, chunk)), ct).ConfigureAwait(false);
+            if (!more) return;
+        }
+    }
+
+    private int _nextDgramId;
+
     /// <summary>诊断 RTT 测量（02 §4.2 0x06；本地 Web 诊断页用）。单飞行。</summary>
     public async Task<TimeSpan> PingAsync(CancellationToken ct = default)
     {
@@ -317,6 +342,12 @@ public sealed class TunnelSession : IAsyncDisposable
                 case PtpFrameType.Data:
                     _handler.OnData(this, header.ChannelId, plain);
                     break;
+                case PtpFrameType.UdpDgram:
+                    _handler.OnUdpDgram(this, header.ChannelId, plain);
+                    break;
+                case PtpFrameType.Frag:
+                    HandleFrag(header.ChannelId, plain);
+                    break;
                 case PtpFrameType.Close:
                     _handler.OnClose(this, header.ChannelId);
                     break;
@@ -334,6 +365,72 @@ public sealed class TunnelSession : IAsyncDisposable
         {
             Log?.Invoke($"PONG 发送失败：{e.Message}");
         }
+    }
+
+    // ── UDP_DGRAM 分片重组（M2-20，02 §4.2 FRAG）────────────────────
+
+    /// <summary>in-flight 重组缓冲上限（per channel）：超出丢弃全部未齐片（防慢对端内存放大）。</summary>
+    private const int ReasmInFlightLimit = 8;
+
+    /// <summary>未齐分片驻留上限：超时丢弃（对端放弃/丢片兜底）。</summary>
+    private static readonly TimeSpan ReasmStaleAge = TimeSpan.FromSeconds(10);
+
+    private sealed class PendingDgram
+    {
+        public required long FirstSeenMs;
+        public Dictionary<ushort, byte[]> Parts = [];
+        public int Total; // More=false 到达时 = Index+1（0=总数未知）
+    }
+
+    private readonly ConcurrentDictionary<uint /*channelId*/, Dictionary<uint /*dgramId*/, PendingDgram>> _reasm = new();
+
+    /// <summary>FRAG 重组：按 channelId+DgramId 攒片，末片定总数，攒齐合并为完整数据报回调
+    /// <see cref="ITunnelChannelHandler.OnUdpDgram"/>（乱序容忍；未齐超时/超限丢弃+日志）。</summary>
+    private void HandleFrag(uint channelId, byte[] plain)
+    {
+        FragPayload frag;
+        try { frag = MessagePackSerializer.Deserialize<FragPayload>(plain); }
+        catch (MessagePack.MessagePackSerializationException)
+        {
+            Log?.Invoke($"channel {channelId} FRAG 载荷非法，丢弃");
+            return;
+        }
+        var map = _reasm.GetOrAdd(channelId, _ => []);
+        byte[]? assembled = null;
+        lock (map)
+        {
+            foreach (var stale in map.Where(kv =>
+                        Environment.TickCount64 - kv.Value.FirstSeenMs > ReasmStaleAge.TotalMilliseconds)
+                    .Select(kv => kv.Key).ToList())
+                map.Remove(stale); // 未齐超时（对端放弃/丢片）
+            if (!map.TryGetValue(frag.DgramId, out var pend))
+            {
+                if (map.Count >= ReasmInFlightLimit)
+                {
+                    map.Clear();
+                    Log?.Invoke($"channel {channelId} 重组缓冲超 {ReasmInFlightLimit} 条，丢弃未齐分片");
+                }
+                pend = new PendingDgram { FirstSeenMs = Environment.TickCount64 };
+                map[frag.DgramId] = pend;
+            }
+            if (!frag.More) pend.Total = frag.Index + 1;
+            pend.Parts[frag.Index] = frag.Chunk;
+            if (pend.Total > 0 && pend.Parts.Count == pend.Total)
+            {
+                assembled = new byte[pend.Parts.Values.Sum(p => p.Length)];
+                var offset = 0;
+                for (var i = 0; i < pend.Total; i++)
+                {
+                    var part = pend.Parts[(ushort)i];
+                    part.CopyTo(assembled, offset);
+                    offset += part.Length;
+                }
+                map.Remove(frag.DgramId);
+            }
+            if (map.Count == 0) _reasm.TryRemove(channelId, out _); // 空表摘除防增长
+        }
+        if (assembled is not null)
+            _handler.OnUdpDgram(this, channelId, assembled);
     }
 
     // ── KEEPALIVE（NET-72：20s 周期；3 次未响应断链）────────────────

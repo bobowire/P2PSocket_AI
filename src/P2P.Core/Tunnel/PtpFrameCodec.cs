@@ -15,6 +15,13 @@ public static class PtpFrameCodec
     /// <summary>TCP 承载 DATA 上限 16 KiB（02 §4.3）；UDP 承载整帧 ≤1400B 由发送侧保证。</summary>
     public const int MaxDataPayload = 16 * 1024;
 
+    /// <summary>UDP_DGRAM 单帧明文上限（M2-20，02 §4.3：UDP 承载整帧 ≤1400 = 16 头 + 明文 + 16 tag）。
+    /// 与承载类型解耦：超出即走 FRAG 分片（TCP 承载同口径，02 §6.2"UDP_DGRAM 语义不变"）。</summary>
+    public const int MaxUdpDgramPlain = 1400 - PtpHeader.WireLen - Aead.TagLen; // 1368
+
+    /// <summary>FRAG 单片 chunk 上限：1368 减最坏 MessagePack 载荷头（fixarray+uint32+uint16+bool+bin32 ≈ 15B，保守 16）。</summary>
+    public const int MaxFragChunk = MaxUdpDgramPlain - 16; // 1352
+
     /// <summary>组装密文业务帧。</summary>
     public static byte[] Seal(byte type, uint channelId, ulong counter, ReadOnlySpan<byte> plain, ReadOnlySpan<byte> directionKey)
     {
@@ -48,7 +55,7 @@ public static class PtpFrameCodec
         if (ver != PtpHeader.CurrentVer)
             throw new ProtocolException($"PTP 版本不支持：{ver}");
         var type = wire[1];
-        if (!PtpFrameType.IsHandshake(type) && type is < PtpFrameType.Open or > PtpFrameType.Window)
+        if (!PtpFrameType.IsHandshake(type) && type is < PtpFrameType.Open or > PtpFrameType.Frag)
             throw new ProtocolException($"未知 PTP 帧 type：0x{type:X2}");
         return new PtpHeader(ver, type,
             BinaryPrimitives.ReadUInt32LittleEndian(wire.Slice(2, 4)),

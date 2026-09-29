@@ -29,6 +29,9 @@ public interface ITunnelChannelHandler
     /// <summary>收到 DATA。</summary>
     void OnData(TunnelSession session, uint channelId, ReadOnlyMemory<byte> data);
 
+    /// <summary>收到 UDP_DGRAM（M2-20；FRAG 已在会话层重组完毕，回调语义=完整数据报）。</summary>
+    void OnUdpDgram(TunnelSession session, uint channelId, ReadOnlyMemory<byte> datagram);
+
     /// <summary>收到 CLOSE（channel 结束；正常/异常不区分载荷）。</summary>
     void OnClose(TunnelSession session, uint channelId);
 }
@@ -40,5 +43,6 @@ public sealed class NullChannelHandler : ITunnelChannelHandler
     public void OnOpen(TunnelSession session, uint channelId, OpenPayload open) { }
     public void OnOpenResult(TunnelSession session, uint channelId, OpenResultPayload result) { }
     public void OnData(TunnelSession session, uint channelId, ReadOnlyMemory<byte> data) { }
+    public void OnUdpDgram(TunnelSession session, uint channelId, ReadOnlyMemory<byte> datagram) { }
     public void OnClose(TunnelSession session, uint channelId) { }
 }

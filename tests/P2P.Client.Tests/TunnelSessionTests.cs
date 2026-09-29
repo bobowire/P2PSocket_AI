@@ -277,6 +277,7 @@ public sealed class TunnelSessionTests
         public void OnOpen(TunnelSession session, uint channelId, OpenPayload open) => Events.Enqueue(new(channelId, "open", open));
         public void OnOpenResult(TunnelSession session, uint channelId, OpenResultPayload result) => Events.Enqueue(new(channelId, "openresult", result));
         public void OnData(TunnelSession session, uint channelId, ReadOnlyMemory<byte> data) => Events.Enqueue(new(channelId, "data", data.ToArray()));
+        public void OnUdpDgram(TunnelSession session, uint channelId, ReadOnlyMemory<byte> datagram) => Events.Enqueue(new(channelId, "udp_dgram", datagram.ToArray()));
         public void OnClose(TunnelSession session, uint channelId) => Events.Enqueue(new(channelId, "close", null));
     }
 }

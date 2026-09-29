@@ -1,6 +1,6 @@
 # P2P 内网穿透产品 · 技术设计文档
 
-> 版本：v1.27　创建日期：2026-08-19　状态：待评审
+> 版本：v1.28　创建日期：2026-08-19　状态：待评审
 > 依据：[产品需求文档 PRD v0.6](../prd/README.md)（决策 D1~D21，D3 经 v0.4 修订；开放问题 OQ-1~OQ-19 已全部决议）
 > 定位：开发阶段的**施工图纸**——所有实现以本文档为准；与 PRD 冲突时以 PRD 为准并提出修订。
 
@@ -100,3 +100,4 @@
 | 2026-09-29 | v1.25 | M2-13 落地同步：05 §5 补禁用与解绑实现注记（FR-S-105/204/103）——AdminService 统一执行点（CLI 五开关壳[M1-19 模式]/测试直调/M3 Web 共用）；设备禁用先推 0x75(device_disabled) 后踢线，读侧拒绝补齐 Hello[禁用直接断连不落 NeedRegister——堵借覆盖式恢复重签凭据绕回]与注册恢复[2003]两处；用户禁用名下在线设备降级 passive+0x75 携 newCapability（PushOwnedAsync 扩参、空映射集也推）不踢线，恢复路径=重连+登录（0x21 属主动类清单）；解绑清理集合对齐 0x12+同 MAC 重注册全新身份；跨进程 CLI 窗口由 PresenceMonitor 心跳兜底（admin_check_interval 节流读库复核+幂等闸） |
 | 2026-09-29 | v1.27 | M2-15 落地同步：05 §5 补 ControlClient 下行扩展实现注记（02 §2.4、TD-16）——DecodeKnown 扩容四条（0x41/0x75/0x14Ack/0x63Ack）；0x75 消费分工（newCapability 降级 ControlClient 内联[连接级]/映射失效 ClientRuntime MarkInvalid[预留 hook 启用]）；WsEventNames 补 device_list；0x14 新端点 POST /api/device/reset-remote-code 新码持久化+WS 提示 |
 | 2026-09-29 | v1.26 | M2-14 落地同步：05 §5 补 UpdateInfo 实现注记（FR-S-804/OQ-5、02 §7）——0x03 统一应答（update_* 四键 + maxProtocol 代码注入 + minProtocol clamp）；版本不符受理窗（5004 后 0x03 唯一受理应答后断/非 0x03 即断/75s 空闲兜底）；已建立会话 signed 受理连接保持 |
+| 2026-09-29 | v1.28 | M2-20 落地同步：02 §4.2 帧表 FRAG 行回填 **0x0B**（载荷 {dgramId, index, more, chunk}；明文超 1368B=1400−16头−16tag 按 1352B 切片，more=false 末片，channelId+dgramId 攒齐重组；阈值与承载类型解耦）+ 帧类型合法域上界扩至 0x0B（原 0x0A 会拒收 FRAG 断会话）；05 §2.4 附实现注记（分片/重组在 TunnelSession 帧层、per channel in-flight 8/驻留 10s；channel 双端同构 _udpChannels、访问侧端点表同锁上限检查；OPEN_FAIL 表项保留静默丢弃；空闲扫描 5s×60s 可配）+ §2.5 注 UDP 侧 L3 与 TCP 共用 TryResolveTarget |

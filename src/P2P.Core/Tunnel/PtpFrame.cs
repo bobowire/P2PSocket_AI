@@ -13,8 +13,9 @@ public static class PtpFrameType
     public const byte Ping = 0x06;
     public const byte Pong = 0x07;
     public const byte Rekey = 0x08;       // SEC-14 → M2
-    public const byte UdpDgram = 0x09;    // FR-C-303 → M2
+    public const byte UdpDgram = 0x09;    // UDP 映射数据报（M2-20，FR-C-303；channelId 在帧头）
     public const byte Window = 0x0A;      // M2
+    public const byte Frag = 0x0B;        // UDP_DGRAM 分片（M2-20 定案 0x0B，02 §4.2 回填）
 
     // ── 握手帧（明文传输；counter=0、channelId=0，不进防重放窗口）────────
     public const byte THello1 = 0x11;     // A→B {sessionId, ephA, nonceA}
@@ -49,3 +50,13 @@ public sealed record OpenResultPayload(
 [MessagePackObject]
 public sealed record WindowCreditPayload(
     [property: Key(0)] uint CreditBytes);
+
+/// <summary>FRAG 载荷（0x0B，M2-20）：UDP_DGRAM 超单帧上限（明文 1368B）时分片逐帧承载。
+/// channelId 在帧头；DgramId 区分同 channel 相邻数据报的片（UDP 承载乱序容忍）；
+/// More=false 为末片（Index 从 0 起 → 总片数 = Index+1）；接收侧按 channelId+DgramId 攒齐重组。</summary>
+[MessagePackObject]
+public sealed record FragPayload(
+    [property: Key(0)] uint DgramId,
+    [property: Key(1)] ushort Index,
+    [property: Key(2)] bool More,
+    [property: Key(3)] byte[] Chunk);
