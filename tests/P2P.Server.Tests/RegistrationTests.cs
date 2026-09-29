@@ -15,7 +15,7 @@ namespace P2P.Server.Tests;
 /// </summary>
 public sealed class RegistrationTests : IAsyncLifetime
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _db = new();
     private readonly DeviceRegistry _registry = new();
     private readonly List<TestPcpClient> _clients = [];
     private ControlServer _server = null!;
@@ -26,7 +26,6 @@ public sealed class RegistrationTests : IAsyncLifetime
 
     public Task InitializeAsync()
     {
-        _connection.Open();
         var factory = new StubFactory(CreateDb);
         using var init = factory.CreateDbContext();
         DbInitializer.Initialize(init);
@@ -49,11 +48,11 @@ public sealed class RegistrationTests : IAsyncLifetime
         foreach (var c in _clients) await c.DisposeAsync();
         await _server.DisposeAsync();
         await _signaling.DisposeAsync();
-        _connection.Dispose();
+        _db.Dispose();
     }
 
     private AppDbContext CreateDb() => new(
-        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options);
+        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options);
 
     private async Task<TestPcpClient> ConnectAsync()
     {
@@ -116,7 +115,7 @@ public sealed class RegistrationTests : IAsyncLifetime
         Assert.Equal("host-x", device.DeviceName);
         Assert.Equal("P2P-AABBCCDDEE01", device.MacCode);
         Assert.True(await db.GroupMembers.AnyAsync(m => m.DeviceId == ack.DeviceId));
-        Assert.True(await db.AuditLogs.AnyAsync(a => a.Event == "register" && a.DeviceId == ack.DeviceId));
+        Assert.True(await db.WaitAuditAsync(a => a.Event == "register" && a.DeviceId == ack.DeviceId));
     }
 
     // ── 0x10 覆盖式恢复（OQ-14）───────────────────────────────────────
@@ -159,7 +158,7 @@ public sealed class RegistrationTests : IAsyncLifetime
 
         await using var db2 = CreateDb();
         Assert.True(await db2.Mappings.AnyAsync(m => m.Id == mappingId), "存量映射不失效");
-        Assert.True(await db2.AuditLogs.AnyAsync(a => a.Event == "register_recover" && a.DeviceId == deviceId));
+        Assert.True(await db2.WaitAuditAsync(a => a.Event == "register_recover" && a.DeviceId == deviceId));
         _ = recovered;
     }
 
@@ -199,7 +198,7 @@ public sealed class RegistrationTests : IAsyncLifetime
         await using var db = CreateDb();
         Assert.False(await db.Devices.AnyAsync(d => d.Id == ack.DeviceId));
         Assert.False(await db.GroupMembers.AnyAsync(m => m.DeviceId == ack.DeviceId));
-        Assert.True(await db.AuditLogs.AnyAsync(a => a.Event == "unbind" && a.DeviceId == ack.DeviceId));
+        Assert.True(await db.WaitAuditAsync(a => a.Event == "unbind" && a.DeviceId == ack.DeviceId));
     }
 
     // ── 心跳超时离线判定（FR-S-104，30s 可配）─────────────────────────

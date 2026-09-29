@@ -17,7 +17,7 @@ namespace P2P.Server.Tests;
 /// </summary>
 public sealed class DeviceListPushTests : IAsyncLifetime
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _db = new();
     private readonly DeviceRegistry _registry = new();
     private readonly List<TestPcpClient> _clients = [];
     private ControlServer _server = null!;
@@ -26,7 +26,6 @@ public sealed class DeviceListPushTests : IAsyncLifetime
 
     public Task InitializeAsync()
     {
-        _connection.Open();
         var factory = new StubFactory(CreateDb);
         using var init = factory.CreateDbContext();
         DbInitializer.Initialize(init);
@@ -54,11 +53,11 @@ public sealed class DeviceListPushTests : IAsyncLifetime
         foreach (var c in _clients) await c.DisposeAsync();
         await _server.DisposeAsync();
         await _signaling.DisposeAsync();
-        _connection.Dispose();
+        _db.Dispose();
     }
 
     private AppDbContext CreateDb() => new(
-        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options);
+        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options);
 
     private async Task<(TestPcpClient Client, Guid DeviceId)> ConnectLoggedInAsync(string deviceName)
     {

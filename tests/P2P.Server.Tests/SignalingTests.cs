@@ -18,7 +18,7 @@ namespace P2P.Server.Tests;
 /// </summary>
 public sealed class SignalingTests : IAsyncLifetime
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _db = new();
     private readonly DeviceRegistry _registry = new();
     private readonly List<TestPcpClient> _clients = [];
     private ControlServer _server = null!;
@@ -28,7 +28,6 @@ public sealed class SignalingTests : IAsyncLifetime
 
     public Task InitializeAsync()
     {
-        _connection.Open();
         var factory = new StubFactory(CreateDb);
         using var init = factory.CreateDbContext();
         DbInitializer.Initialize(init);
@@ -60,11 +59,11 @@ public sealed class SignalingTests : IAsyncLifetime
         await _server.DisposeAsync();
         await _relay.DisposeAsync();
         await _signaling.DisposeAsync();
-        _connection.Dispose();
+        _db.Dispose();
     }
 
     private AppDbContext CreateDb() => new(
-        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options);
+        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options);
 
     /// <summary>注册设备（默认组成员 → 双方可见，02 §2.4）。时间戳对齐假时钟（M2-19 回切用例
     /// Advance 121s 后 0x73 仍须落在 TsWindow 内——真实时钟会偏出 ±30s 被拒 5005）。</summary>

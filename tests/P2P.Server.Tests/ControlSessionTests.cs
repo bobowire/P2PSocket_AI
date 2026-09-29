@@ -20,7 +20,7 @@ namespace P2P.Server.Tests;
 /// </summary>
 public sealed class ControlSessionTests : IAsyncLifetime
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _db = new();
     private readonly DeviceRegistry _registry = new();
     private readonly ConcurrentQueue<IPcpMessage> _dispatched = new();
     private readonly List<TestPcpClient> _clients = [];
@@ -28,9 +28,8 @@ public sealed class ControlSessionTests : IAsyncLifetime
 
     public Task InitializeAsync()
     {
-        _connection.Open();
         var factory = new StubFactory(() => new AppDbContext(
-            new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options));
+            new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options));
         using (var init = factory.CreateDbContext())
             DbInitializer.Initialize(init);
         _server = new ControlServer(factory, _registry, Dispatch);
@@ -41,7 +40,7 @@ public sealed class ControlSessionTests : IAsyncLifetime
     {
         foreach (var c in _clients) await c.DisposeAsync();
         await _server.DisposeAsync();
-        _connection.Dispose();
+        _db.Dispose();
     }
 
     private Task Dispatch(ControlSession session, IPcpMessage message)
@@ -63,7 +62,7 @@ public sealed class ControlSessionTests : IAsyncLifetime
         var id = Guid.NewGuid();
         var secret = RandomGenerator.Bytes(32);
         using var db = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>()
-            .UseSqlite(_connection).Options);
+            .UseSqlite(_db.DataSource).Options);
         db.Devices.Add(new Device
         {
             Id = id,

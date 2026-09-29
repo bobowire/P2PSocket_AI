@@ -15,7 +15,7 @@ namespace P2P.Server.Tests;
 /// </summary>
 public sealed class MappingTests : IAsyncLifetime
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _db = new();
     private readonly DeviceRegistry _registry = new();
     private readonly List<TestPcpClient> _clients = [];
     private ControlServer _server = null!;
@@ -25,7 +25,6 @@ public sealed class MappingTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        _connection.Open();
         _factory = new StubFactory(CreateDb);
         using var init = _factory.CreateDbContext();
         DbInitializer.Initialize(init);
@@ -53,12 +52,12 @@ public sealed class MappingTests : IAsyncLifetime
         await _server.DisposeAsync();
         await _signaling.DisposeAsync();
         await Task.Delay(200); // 服务端收尾审计与连接销毁竞态宽限（LocalWebApi 测试同法）
-        try { _connection.Dispose(); }
+        try { _db.Dispose(); }
         catch (Exception) { /* sqlite 收尾竞态已知瞬态家族（IOE/NRE 换皮）：测试本体已断言完毕 */ }
     }
 
     private AppDbContext CreateDb() => new(
-        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options);
+        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options);
 
     /// <summary>注册一台设备并以 admin 登录（默认组同账号 → 互相可见）；login=false 供 L2 用例隔离。</summary>
     private async Task<(TestPcpClient Client, Guid DeviceId, string RemoteCode)> RegisterAsync(

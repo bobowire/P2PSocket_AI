@@ -28,7 +28,7 @@ namespace P2P.IntegrationTests;
 /// </summary>
 public sealed class MappingSyncIntegrationTests : IAsyncLifetime
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _db = new();
     private readonly DeviceRegistry _registry = new();
     private readonly List<SignalingCoordinator> _signalings = [];
     private readonly List<RelayService> _relays = [];
@@ -39,7 +39,6 @@ public sealed class MappingSyncIntegrationTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        _connection.Open();
         _factory = new StubFactory(CreateDb);
         using (var init = _factory.CreateDbContext())
             DbInitializer.Initialize(init);
@@ -54,12 +53,12 @@ public sealed class MappingSyncIntegrationTests : IAsyncLifetime
         foreach (var s in _servers) await s.DisposeAsync();
         foreach (var r in _relays) await r.DisposeAsync();
         foreach (var s in _signalings) await s.DisposeAsync();
-        _connection.Dispose();
+        _db.Dispose();
         try { Directory.Delete(_stateDir, true); } catch (IOException) { }
     }
 
     private AppDbContext CreateDb() => new(
-        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options);
+        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options);
 
     private async Task<ControlServer> StartServerAsync(int port)
     {

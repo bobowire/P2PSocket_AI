@@ -20,7 +20,7 @@ namespace P2P.Server.Tests;
 /// </summary>
 public sealed class StatsTests : IAsyncLifetime
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _db = new();
     private readonly DeviceRegistry _registry = new();
     private readonly List<TestPcpClient> _clients = [];
     private ControlServer _server = null!;
@@ -30,7 +30,6 @@ public sealed class StatsTests : IAsyncLifetime
 
     public Task InitializeAsync()
     {
-        _connection.Open();
         var factory = new StubFactory(CreateDb);
         using var init = factory.CreateDbContext();
         DbInitializer.Initialize(init);
@@ -60,11 +59,11 @@ public sealed class StatsTests : IAsyncLifetime
         await _server.DisposeAsync();
         await _relay.DisposeAsync();
         await _signaling.DisposeAsync();
-        _connection.Dispose();
+        _db.Dispose();
     }
 
     private AppDbContext CreateDb() => new(
-        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options);
+        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options);
 
     /// <summary>注册设备（默认组成员 → 双方可见）；时间戳对齐假时钟（TsWindow）。</summary>
     private async Task<(TestPcpClient Client, Guid DeviceId)> RegisterAsync(string name)
@@ -297,6 +296,7 @@ public sealed class StatsTests : IAsyncLifetime
         await SyncAsync(b);
 
         await using var db = CreateDb();
+        Assert.True(await db.WaitAuditAsync(x => x.Event == "mapping_status")); // 应答先于审计写：先等落库
         var row = Assert.Single(await db.AuditLogs.AsNoTracking()
             .Where(x => x.Event == "mapping_status").ToListAsync());
         Assert.Equal(aId, row.DeviceId);

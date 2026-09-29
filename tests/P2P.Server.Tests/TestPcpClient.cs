@@ -148,4 +148,55 @@ internal sealed class TestPcpClient : IAsyncDisposable
         _tcp.Dispose();
         await ValueTask.CompletedTask;
     }
+
+    /// <summary>读一帧并描述（不校验类型；超时返回 null）。排干/诊断用：0x7E 展开错误码与原因。</summary>
+    public async Task<string?> ReceiveDescribeAsync(int timeoutMs = 400)
+    {
+        byte[]? body;
+        using var cts = new CancellationTokenSource(timeoutMs);
+        try { body = await FrameCodec.ReadFrameAsync(_reader, cts.Token); }
+        catch (OperationCanceledException) { return null; }
+        if (body is null) return "<EOF>";
+        try
+        {
+            var msgpack = IncomingSigned ? PcpCodec.DecodeSigned(body, ConnMacKey) : body;
+            var h = PcpCodec.Peek(msgpack);
+            if (h.MsgType == MsgType.Error)
+            {
+                var e = PcpCodec.Decode<ErrorMessage>(msgpack);
+                return $"0x{h.MsgType:X2} seq={h.Seq} ERROR code={e.Code} msg={e.HttpLikeMsg}";
+            }
+            return $"0x{h.MsgType:X2} seq={h.Seq}";
+        }
+        catch (Exception ex) { return $"解码失败: {ex.Message}"; }
+    }
+
+    /// <summary>转储后续帧（类型 + ErrorMessage 内容）：夹具竞态类失败现场取证。</summary>
+    public async Task<List<string>> DumpFramesAsync(int timeoutMs = 2500)
+    {
+        var frames = new List<string>();
+        var deadline = Environment.TickCount64 + timeoutMs;
+        while (true)
+        {
+            var remaining = (int)Math.Max(0, deadline - Environment.TickCount64);
+            if (remaining == 0) return frames;
+            byte[]? body;
+            using var cts = new CancellationTokenSource(remaining);
+            try { body = await FrameCodec.ReadFrameAsync(_reader, cts.Token); }
+            catch (OperationCanceledException) { return frames; }
+            if (body is null) { frames.Add("<EOF>"); return frames; }
+            try
+            {
+                var msgpack = IncomingSigned ? PcpCodec.DecodeSigned(body, ConnMacKey) : body;
+                var h = PcpCodec.Peek(msgpack);
+                if (h.MsgType == MsgType.Error)
+                {
+                    var e = PcpCodec.Decode<ErrorMessage>(msgpack);
+                    frames.Add($"0x{h.MsgType:X2} seq={h.Seq} ERROR code={e.Code} msg={e.HttpLikeMsg}");
+                }
+                else frames.Add($"0x{h.MsgType:X2} seq={h.Seq}");
+            }
+            catch (Exception ex) { frames.Add($"解码失败: {ex.Message}"); }
+        }
+    }
 }

@@ -19,7 +19,7 @@ namespace P2P.Server.Tests;
 /// </summary>
 public sealed class StunServiceTests : IAsyncLifetime
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _db = new();
     private readonly byte[] _secret = RandomGenerator.Bytes(32);
     private readonly Guid _deviceId = Guid.NewGuid();
     private readonly FakeTimeProvider _time = new(DateTimeOffset.UtcNow);
@@ -29,7 +29,6 @@ public sealed class StunServiceTests : IAsyncLifetime
 
     public Task InitializeAsync()
     {
-        _connection.Open();
         var factory = new StubFactory(CreateDb);
         using (var init = factory.CreateDbContext())
             DbInitializer.Initialize(init);
@@ -59,11 +58,11 @@ public sealed class StunServiceTests : IAsyncLifetime
     public async Task DisposeAsync()
     {
         await _service.DisposeAsync();
-        _connection.Dispose();
+        _db.Dispose();
     }
 
     private AppDbContext CreateDb() => new(
-        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options);
+        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options);
 
     private static Task<UdpReceiveResult?> ReceiveOrNullAsync(UdpClient client, int timeoutMs = 500)
     {

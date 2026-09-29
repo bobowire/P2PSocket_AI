@@ -18,7 +18,7 @@ namespace P2P.IntegrationTests;
 /// </summary>
 public sealed class RegistrationIntegrationTests : IAsyncLifetime
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _db = new();
     private readonly DeviceRegistry _registry = new();
     private readonly StubNicManager _nic = new();
     private readonly string _stateDir = Path.Combine(Path.GetTempPath(), "p2p-it-" + Guid.NewGuid().ToString("N"));
@@ -30,7 +30,6 @@ public sealed class RegistrationIntegrationTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        _connection.Open();
         _factory = new StubFactory(CreateDb);
         using (var init = _factory.CreateDbContext())
             DbInitializer.Initialize(init);
@@ -56,12 +55,12 @@ public sealed class RegistrationIntegrationTests : IAsyncLifetime
         await _server.DisposeAsync();
         await _relay.DisposeAsync();
         await _signaling.DisposeAsync();
-        _connection.Dispose();
+        _db.Dispose();
         if (Directory.Exists(_stateDir)) Directory.Delete(_stateDir, true);
     }
 
     private AppDbContext CreateDb() => new(
-        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options);
+        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options);
 
     private (ControlClient Client, StateStore Store, ClientRegistrationService Wizard) NewWizard()
     {

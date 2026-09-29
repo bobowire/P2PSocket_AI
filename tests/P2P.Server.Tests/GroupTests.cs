@@ -16,7 +16,7 @@ namespace P2P.Server.Tests;
 /// </summary>
 public sealed class GroupTests : IAsyncLifetime
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _db = new();
     private readonly DeviceRegistry _registry = new();
     private readonly List<TestPcpClient> _clients = [];
     private ControlServer _server = null!;
@@ -25,7 +25,6 @@ public sealed class GroupTests : IAsyncLifetime
 
     public Task InitializeAsync()
     {
-        _connection.Open();
         var factory = new StubFactory(CreateDb);
         using var init = factory.CreateDbContext();
         DbInitializer.Initialize(init);
@@ -52,11 +51,11 @@ public sealed class GroupTests : IAsyncLifetime
         foreach (var c in _clients) await c.DisposeAsync();
         await _server.DisposeAsync();
         await _signaling.DisposeAsync();
-        _connection.Dispose();
+        _db.Dispose();
     }
 
     private AppDbContext CreateDb() => new(
-        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options);
+        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options);
 
     /// <summary>注册一台设备并以 admin 登录（owner=内置管理员），返回设备号。</summary>
     private async Task<(TestPcpClient Client, Guid DeviceId)> ConnectLoggedInAsync(string deviceName)
@@ -285,7 +284,7 @@ public sealed class GroupTests : IAsyncLifetime
             var member = await db.GroupMembers.AsNoTracking()
                 .SingleAsync(m => m.GroupId == group.GroupId && m.DeviceId == joinerId);
             Assert.True(member.Approved); // free 即入=已批准成员
-            Assert.True(await db.AuditLogs.AnyAsync(a => a.Event == "group_join"
+            Assert.True(await db.WaitAuditAsync(a => a.Event == "group_join"
                 && a.DeviceId == joinerId && a.UserId != null));
         }
 
@@ -353,7 +352,7 @@ public sealed class GroupTests : IAsyncLifetime
             m.GroupId == group.GroupId && m.DeviceId == joinerId && m.Approved));
         Assert.Equal("approved", await db3.JoinRequests.Where(r => r.Id == requestId)
             .Select(r => r.Status).SingleAsync());
-        Assert.True(await db3.AuditLogs.AnyAsync(a => a.Event == "group_join_approve"));
+        Assert.True(await db3.WaitAuditAsync(a => a.Event == "group_join_approve"));
 
         // 已处理的申请再 Approve：Ok=false（不重复入组）
         await owner.SendAsync(new JoinRequests(owner.NextSeq(), owner.Now(), MsgType.JoinRequests,
@@ -389,7 +388,7 @@ public sealed class GroupTests : IAsyncLifetime
         Assert.False(await db2.GroupMembers.AnyAsync(m => m.GroupId == group.GroupId && m.DeviceId == joinerId));
         Assert.Equal("rejected", await db2.JoinRequests.Where(r => r.Id == requestId)
             .Select(r => r.Status).SingleAsync());
-        Assert.True(await db2.AuditLogs.AnyAsync(a => a.Event == "group_join_reject"));
+        Assert.True(await db2.WaitAuditAsync(a => a.Event == "group_join_reject"));
     }
 
     [Fact]
@@ -439,7 +438,7 @@ public sealed class GroupTests : IAsyncLifetime
         Assert.Equal(ErrorCode.GroupNotFound, invalid!.Code);
 
         await using var db = CreateDb();
-        Assert.True(await db.AuditLogs.CountAsync(a => a.Event == "group_join_deny") >= 2);
+        Assert.True(await db.WaitAuditCountAsync(a => a.Event == "group_join_deny", 2) >= 2);
     }
 
     [Fact]
@@ -538,7 +537,7 @@ public sealed class GroupTests : IAsyncLifetime
         Assert.DoesNotContain(after.Items, i => i.DeviceId == memberId);
         Assert.Contains(after.Items, i => i.DeviceId == ownerId);
         await using var db = CreateDb();
-        Assert.True(await db.AuditLogs.AnyAsync(a => a.Event == "group_leave" && a.DeviceId == memberId));
+        Assert.True(await db.WaitAuditAsync(a => a.Event == "group_leave" && a.DeviceId == memberId));
 
         // 再退（非成员）：Ok=false 诚实应答
         await member.SendAsync(new GroupLeave(member.NextSeq(), member.Now(), MsgType.GroupLeave,
@@ -571,7 +570,7 @@ public sealed class GroupTests : IAsyncLifetime
         Assert.DoesNotContain(after.Items, i => i.DeviceId == memberId);
         Assert.Contains(after.Items, i => i.DeviceId == ownerId);
         await using var db = CreateDb();
-        Assert.True(await db.AuditLogs.AnyAsync(a => a.Event == "group_member_remove"
+        Assert.True(await db.WaitAuditAsync(a => a.Event == "group_member_remove"
             && a.DeviceId == ownerId));
 
         // 再移（已非成员）：Ok=false

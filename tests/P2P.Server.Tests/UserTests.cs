@@ -14,7 +14,7 @@ namespace P2P.Server.Tests;
 /// </summary>
 public sealed class UserTests : IAsyncLifetime
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _db = new();
     private readonly DeviceRegistry _registry = new();
     private readonly List<TestPcpClient> _clients = [];
     private ControlServer _server = null!;
@@ -23,7 +23,6 @@ public sealed class UserTests : IAsyncLifetime
 
     public Task InitializeAsync()
     {
-        _connection.Open();
         var factory = new StubFactory(CreateDb);
         using var init = factory.CreateDbContext();
         DbInitializer.Initialize(init);
@@ -50,11 +49,11 @@ public sealed class UserTests : IAsyncLifetime
         foreach (var c in _clients) await c.DisposeAsync();
         await _server.DisposeAsync();
         await _signaling.DisposeAsync();
-        _connection.Dispose();
+        _db.Dispose();
     }
 
     private AppDbContext CreateDb() => new(
-        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options);
+        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options);
 
     private async Task<TestPcpClient> ConnectRegisteredAsync()
     {
@@ -92,7 +91,7 @@ public sealed class UserTests : IAsyncLifetime
         Assert.NotNull(device.OwnerUserId);
         var admin = await db.Users.AsNoTracking().SingleAsync(u => u.Username == DbInitializer.AdminUsername);
         Assert.Equal(admin.Id, device.OwnerUserId);
-        Assert.True(await db.AuditLogs.AnyAsync(a => a.Event == "login" && a.DeviceId == device.Id));
+        Assert.True(await db.WaitAuditAsync(a => a.Event == "login" && a.DeviceId == device.Id));
     }
 
     [Fact]
@@ -129,9 +128,8 @@ public sealed class UserTests : IAsyncLifetime
         Assert.Equal(ErrorCode.ForbiddenPassive, error2!.Code);
 
         await using var db = CreateDb();
-        var denies = await db.AuditLogs.AsNoTracking()
-            .Where(a => a.Event == "passive_deny").ToListAsync();
-        Assert.Equal(2, denies.Count);
+        // 错误帧先于审计落库（路由器序）：轮询等待第二行 commit，避免读早于写
+        Assert.Equal(2, await db.WaitAuditCountAsync(a => a.Event == "passive_deny", 2));
 
         // 心跳（被动类 0x30）不受影响
         await client.SendAsync(new Heartbeat(client.NextSeq(), client.Now(), MsgType.Heartbeat));

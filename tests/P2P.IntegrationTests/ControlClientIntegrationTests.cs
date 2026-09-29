@@ -26,7 +26,7 @@ internal sealed class StubFactory(Func<AppDbContext> create) : IDbContextFactory
 /// </summary>
 public sealed class ControlClientIntegrationTests : IAsyncLifetime
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _db = new();
     private readonly DeviceRegistry _registry = new();
     private readonly List<SignalingCoordinator> _signalings = [];
     private readonly List<RelayService> _relays = [];
@@ -36,7 +36,6 @@ public sealed class ControlClientIntegrationTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        _connection.Open();
         _factory = new StubFactory(CreateDb);
         using (var init = _factory.CreateDbContext())
             DbInitializer.Initialize(init);
@@ -49,11 +48,11 @@ public sealed class ControlClientIntegrationTests : IAsyncLifetime
         foreach (var s in _servers) await s.DisposeAsync();
         foreach (var r in _relays) await r.DisposeAsync();
         foreach (var s in _signalings) await s.DisposeAsync();
-        _connection.Dispose();
+        _db.Dispose();
     }
 
     private AppDbContext CreateDb() => new(
-        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options);
+        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options);
 
     /// <summary>同端口可重启（ControlServer SO_REUSEADDR），支撑断服重连场景。</summary>
     private async Task<ControlServer> StartServerAsync(int port)

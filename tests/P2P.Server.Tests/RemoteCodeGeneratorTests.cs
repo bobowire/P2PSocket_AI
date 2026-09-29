@@ -8,14 +8,13 @@ namespace P2P.Server.Tests;
 
 public sealed class RemoteCodeGeneratorTests : IDisposable
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _dbFile = new();
     private readonly AppDbContext _db;
 
     public RemoteCodeGeneratorTests()
     {
-        _connection.Open();
         _db = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>()
-            .UseSqlite(_connection).Options);
+            .UseSqlite(_dbFile.DataSource).Options);
         DbInitializer.Initialize(_db);
     }
 
@@ -78,6 +77,6 @@ public sealed class RemoteCodeGeneratorTests : IDisposable
     public void Dispose()
     {
         _db.Dispose();
-        _connection.Dispose();
+        _dbFile.Dispose();
     }
 }

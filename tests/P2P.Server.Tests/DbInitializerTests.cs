@@ -8,14 +8,13 @@ namespace P2P.Server.Tests;
 
 public sealed class DbInitializerTests : IDisposable
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _dbFile = new();
     private readonly AppDbContext _db;
 
     public DbInitializerTests()
     {
-        _connection.Open(); // 内存库须保持连接存活
         _db = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>()
-            .UseSqlite(_connection).Options);
+            .UseSqlite(_dbFile.DataSource).Options);
     }
 
     [Fact]
@@ -155,6 +154,6 @@ public sealed class DbInitializerTests : IDisposable
     public void Dispose()
     {
         _db.Dispose();
-        _connection.Dispose();
+        _dbFile.Dispose();
     }
 }

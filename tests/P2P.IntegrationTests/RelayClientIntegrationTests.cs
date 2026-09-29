@@ -19,7 +19,7 @@ namespace P2P.IntegrationTests;
 /// </summary>
 public sealed class RelayClientIntegrationTests : IAsyncLifetime
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _db = new();
     private readonly DeviceRegistry _registry = new();
     private readonly List<ControlClient> _clients = [];
     private readonly List<RelayTransport> _transports = [];
@@ -32,7 +32,6 @@ public sealed class RelayClientIntegrationTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        _connection.Open();
         _factory = new StubFactory(CreateDb);
         using (var init = _factory.CreateDbContext())
             DbInitializer.Initialize(init);
@@ -63,12 +62,12 @@ public sealed class RelayClientIntegrationTests : IAsyncLifetime
         await _relay.DisposeAsync();
         await _signaling.DisposeAsync();
         await Task.Delay(200); // Sqlite 拆除竞态宽限（同族测试已知瞬态）
-        try { _connection.Dispose(); }
+        try { _db.Dispose(); }
         catch (InvalidOperationException) { }
     }
 
     private AppDbContext CreateDb() => new(
-        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options);
+        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options);
 
     // ── 世界构建 ───────────────────────────────────────────────────────
 

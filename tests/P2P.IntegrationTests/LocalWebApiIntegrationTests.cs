@@ -32,7 +32,7 @@ namespace P2P.IntegrationTests;
 /// </summary>
 public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _db = new();
     private readonly DeviceRegistry _registry = new();
     private readonly List<SignalingCoordinator> _signalings = [];
     private readonly List<RelayService> _relays = [];
@@ -44,7 +44,6 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        _connection.Open();
         _factory = new StubFactory(CreateDb);
         using (var init = _factory.CreateDbContext())
             DbInitializer.Initialize(init);
@@ -62,13 +61,13 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
         // 服务端收尾审计/在线落库与服务端销毁并发时，SqliteConnection.Close 内部枚举可能竞态
         // （与 GroupTests 同源的已知瞬态）：宽限后仍异常则吞掉，不连坐测试结果
         await Task.Delay(200);
-        try { _connection.Dispose(); }
+        try { _db.Dispose(); }
         catch (InvalidOperationException) { }
         try { Directory.Delete(_rootDir, true); } catch (IOException) { }
     }
 
     private AppDbContext CreateDb() => new(
-        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options);
+        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options);
 
     private async Task<ControlServer> StartServerAsync(int port)
     {

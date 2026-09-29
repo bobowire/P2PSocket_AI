@@ -17,7 +17,7 @@ namespace P2P.Server.Tests;
 /// </summary>
 public sealed class LanSegmentTests : IAsyncLifetime
 {
-    private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly TestDatabase _db = new();
     private readonly DeviceRegistry _registry = new();
     private readonly List<TestPcpClient> _clients = [];
     private ControlServer _server = null!;
@@ -26,7 +26,6 @@ public sealed class LanSegmentTests : IAsyncLifetime
 
     public Task InitializeAsync()
     {
-        _connection.Open();
         var factory = new StubFactory(CreateDb);
         using var init = factory.CreateDbContext();
         DbInitializer.Initialize(init);
@@ -54,11 +53,11 @@ public sealed class LanSegmentTests : IAsyncLifetime
         foreach (var c in _clients) await c.DisposeAsync();
         await _server.DisposeAsync();
         await _signaling.DisposeAsync();
-        _connection.Dispose();
+        _db.Dispose();
     }
 
     private AppDbContext CreateDb() => new(
-        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options);
+        new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options);
 
     private async Task<(TestPcpClient Client, Guid DeviceId)> ConnectLoggedInAsync(string deviceName)
     {
@@ -240,7 +239,7 @@ public sealed class LanSegmentTests : IAsyncLifetime
         Assert.Equal("l3_segment_not_covered", err.HttpLikeMsg);
 
         await using var db = CreateDb();
-        Assert.True(await db.AuditLogs.AnyAsync(x =>
+        Assert.True(await db.WaitAuditAsync(x =>
             x.Event == "mapping_deny" && x.DeviceId == aId && x.Detail!.Contains("l3_segment_not_covered")));
     }
 
@@ -276,7 +275,7 @@ public sealed class LanSegmentTests : IAsyncLifetime
         Assert.Equal("mapping_not_found", err2.HttpLikeMsg);
 
         await using var db = CreateDb();
-        Assert.True(await db.AuditLogs.AnyAsync(x =>
+        Assert.True(await db.WaitAuditAsync(x =>
             x.Event == "punch_deny" && x.DeviceId == aId && x.Detail!.Contains("l3_segment_not_covered")));
     }
 
@@ -306,7 +305,7 @@ public sealed class LanSegmentTests : IAsyncLifetime
         await using var db = CreateDb();
         Assert.False(await db.LanSegments.AnyAsync(s => s.Id == seg1)); // 段已删
         Assert.True(await db.LanSegments.AnyAsync(s => s.Id == seg2));
-        Assert.True(await db.AuditLogs.AnyAsync(x => x.Event == "lan_segment_remove"));
+        Assert.True(await db.WaitAuditAsync(x => x.Event == "lan_segment_remove"));
     }
 
     [Fact]
