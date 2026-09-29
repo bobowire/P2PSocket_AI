@@ -20,6 +20,10 @@ public interface INicManager
     /// <summary>只读健康探测（FR-C-202，M2-24）：适配器存在性 + 期望 IP 绑定一致性。
     /// 不修改任何状态；探测手段不可用时按健康返回（不因探测失败触发重建）。</summary>
     NicHealth CheckHealth(IPAddress expectedIp);
+
+    /// <summary>移除本产品名下的遗留虚拟网卡（非本管理器实例建立；FR-C-203 卸载清理，M2-25）。
+    /// 返回是否实际移除（无遗留=false）。幂等；与 RemoveAsync 独立可各自调用。</summary>
+    Task<bool> RemoveLeftoverAsync(CancellationToken ct = default);
 }
 
 /// <summary>网卡就绪句柄：适配器名 + 已应用的虚拟 IP。</summary>

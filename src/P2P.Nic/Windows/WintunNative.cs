@@ -42,4 +42,14 @@ internal static class WintunNative
     // VOID WINAPI WintunEndSession(WINTUN_SESSION_HANDLE Session);
     [DllImport(Library, ExactSpelling = true)]
     internal static extern void WintunEndSession(IntPtr session);
+
+    // BOOL WINAPI WintunDeleteAdapter(WINTUN_ADAPTER_HANDLE Adapter, BOOL ForceCloseSessions,
+    //                                  _Out_opt_ BOOL *RebootRequired);
+    // 删除适配器（含 Open 来源的遗留句柄）；ForceCloseSessions=强制关闭占用句柄的会话。
+    // 卸载清理（FR-C-203、M2-25）用于移除本进程未建立的遗留适配器。
+    [DllImport(Library, SetLastError = true, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool WintunDeleteAdapter(IntPtr adapter,
+        [MarshalAs(UnmanagedType.Bool)] bool forceCloseSessions,
+        [MarshalAs(UnmanagedType.Bool)] out bool rebootRequired);
 }

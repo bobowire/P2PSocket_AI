@@ -55,6 +55,13 @@ public sealed class NicHealthMonitorTests
             return Task.CompletedTask;
         }
 
+        public Task<bool> RemoveLeftoverAsync(CancellationToken ct = default)
+        {
+            if (!Exists) return Task.FromResult(false);
+            Exists = false;
+            return Task.FromResult(true);
+        }
+
         public NicHealth CheckHealth(IPAddress expectedIp)
             => !Exists ? new NicHealth(NicHealthState.AdapterMissing, null)
             : BoundIp is null || !BoundIp.Equals(expectedIp)

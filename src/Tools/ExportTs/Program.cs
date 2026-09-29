@@ -260,4 +260,6 @@ internal sealed class NullNicManager : INicManager
     public Task RemoveAsync(CancellationToken ct = default) => Task.CompletedTask;
 
     public NicHealth CheckHealth(IPAddress expectedIp) => new(NicHealthState.Healthy, expectedIp);
+
+    public Task<bool> RemoveLeftoverAsync(CancellationToken ct = default) => Task.FromResult(false);
 }

@@ -214,4 +214,12 @@ internal sealed class StubNicManager : INicManager
         : BoundIp is null || !BoundIp.Equals(expectedIp)
             ? new NicHealth(NicHealthState.IpMismatch, BoundIp)
             : new NicHealth(NicHealthState.Healthy, BoundIp);
+
+    /// <summary>遗留适配器移除（M2-25 卸载测）：在位即移除（Exists→false），返回是否实际移除。</summary>
+    public Task<bool> RemoveLeftoverAsync(CancellationToken ct = default)
+    {
+        if (!Exists) return Task.FromResult(false);
+        Exists = false;
+        return Task.FromResult(true);
+    }
 }

@@ -3,7 +3,8 @@
 // 地址并拉起接口（失败降级 ip 命令，任务清单 M1-21 明示允许）→ 持有 fd 保活（05 §1.3：
 // 接口生命周期与 fd 绑定，未设 TUNSETPERSIST，close 即移除）。运行期自愈（FR-C-202，M2-24）：
 // CheckHealth 只读探测原语（sysfs 存在性+SIOCGIFADDR 主地址），检测循环与重建编排归客户端宿主
-// NicHealthMonitor（P2P.Client/Nic）。
+// NicHealthMonitor（P2P.Client/Nic）。卸载清理（FR-C-203，M2-25）：RemoveLeftoverAsync 移除
+// 非本实例持有的遗留接口（ip link delete）。
 using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -113,6 +114,13 @@ public sealed class LinuxTunNicManager : INicManager, IAsyncDisposable
             ? new NicHealth(NicHealthState.Healthy, bound)
             : new NicHealth(NicHealthState.IpMismatch, bound);
     }
+
+    /// <summary>遗留接口移除（FR-C-203，M2-25）：sysfs 在位（他进程持 fd 或服务停转残窗）→
+    /// `ip link delete`（rtnetlink RTM_DELLINK 属 A-11 实机补强；ip 命令缺失返回 false 不致命）。
+    /// 无同名接口返回 false（幂等）。</summary>
+    public Task<bool> RemoveLeftoverAsync(CancellationToken ct = default)
+        => Task.FromResult(File.Exists("/sys/class/net/" + InterfaceName)
+            && RunIp($"link delete {InterfaceName}", tolerateExists: false));
 
     public ValueTask DisposeAsync() => new(RemoveAsync());
 

@@ -121,6 +121,24 @@ public sealed class WintunNicManager : INicManager, IAsyncDisposable
         }
     }
 
+    /// <summary>遗留适配器移除（FR-C-203，M2-25）：Open 探得同名适配器（本进程未建立——
+    /// 服务停止后残留或他实例遗留）→ WintunDeleteAdapter 强制关闭占用会话并删除；
+    /// 无同名适配器返回 false（幂等）。</summary>
+    public Task<bool> RemoveLeftoverAsync(CancellationToken ct = default)
+    {
+        var adapter = WintunNative.WintunOpenAdapter(AdapterName);
+        if (adapter == IntPtr.Zero) return Task.FromResult(false);
+        try
+        {
+            return Task.FromResult(WintunNative.WintunDeleteAdapter(adapter,
+                forceCloseSessions: true, out _));
+        }
+        finally
+        {
+            WintunNative.WintunCloseAdapter(adapter); // Delete 请求已提交：释放探测句柄
+        }
+    }
+
     public ValueTask DisposeAsync() => new(RemoveAsync());
 
     private void ApplyAddress(IPAddress virtualIp)

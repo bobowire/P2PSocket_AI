@@ -271,6 +271,68 @@ public sealed class ClientRuntimeIntegrationTests : IAsyncLifetime
         }
     }
 
+    // ── ④ 卸载清理（M2-25，FR-C-203）：解绑确认 + 残留全清 + purge ──
+
+    [Fact]
+    public async Task 卸载清理_unbind确认_网卡残留监听全清_purge删除配置()
+    {
+        var b = await SeedRegisteredWithMappingAsync("un-b", null);
+        var a = await SeedRegisteredWithMappingAsync("un-a", b);
+        var dirA = Path.Combine(_rootDir, "un-a");
+
+        // 起服务：映射恢复=监听已绑（punch→failed 确定性，同用例①口径）
+        var runtime = new ClientRuntime(new ClientRuntimeOptions { BaseDir = dirA, NicOverride = _nic });
+        await runtime.StartAsync();
+        using (var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{runtime.WebPort}") })
+            await WaitStateAsync(http, "failed");
+        var state = new StateStore(dirA);
+        state.Load();
+        var port = state.State.Mappings.Single(m => m.Enabled).LocalPort;
+        await runtime.DisposeAsync(); // 服务停止：全部映射监听释放
+
+        // 监听已自由（卸载链路的前置：释放全部映射监听）
+        var rebind = new TcpListener(IPAddress.Loopback, port);
+        rebind.Start();
+        rebind.Stop();
+
+        // 卸载（替身在位=遗留适配器模拟；--unbind + --purge）
+        var report = await ClientUninstaller.RunAsync(new UninstallOptions
+        { BaseDir = dirA, Unbind = true, Purge = true, NicOverride = _nic });
+
+        Assert.True(report.UnbindConfirmed, "0x12 解绑须确认（服务端断连）");
+        Assert.True(report.NicRemoved);
+        Assert.True(report.LeftoverRemoved, "遗留适配器须移除");
+        Assert.True(report.ConfigDeleted);
+        Assert.False(_nic.Exists); // 适配器/监听/文件残留清单为空
+        Assert.False(Directory.Exists(dirA));
+
+        // 服务端侧：0x12 全关联清理（设备行+本人映射）
+        await using var db = _factory.CreateDbContext();
+        Assert.False(await db.Devices.AnyAsync(d => d.Id == a.DeviceId));
+        Assert.False(await db.Mappings.AnyAsync(m => m.OwnerDeviceId == a.DeviceId
+            || m.TargetDeviceId == a.DeviceId));
+    }
+
+    [Fact]
+    public async Task 卸载清理_默认keep_config_配置与服务端记录保留()
+    {
+        var a = await SeedRegisteredWithMappingAsync("un-keep", null);
+        var dir = Path.Combine(_rootDir, "un-keep");
+        var runtime = new ClientRuntime(new ClientRuntimeOptions { BaseDir = dir, NicOverride = _nic });
+        await runtime.StartAsync();
+        await runtime.DisposeAsync();
+
+        var report = await ClientUninstaller.RunAsync(new UninstallOptions { BaseDir = dir, NicOverride = _nic });
+
+        Assert.False(report.UnbindConfirmed); // 未请求解绑
+        Assert.False(report.ConfigDeleted);   // --keep-config 默认
+        Assert.True(Directory.Exists(dir));
+        Assert.True(File.Exists(Path.Combine(dir, "state.json")));
+        await using var db = _factory.CreateDbContext();
+        Assert.True(await db.Devices.AnyAsync(d => d.Id == a.DeviceId)); // 服务端记录保留
+    }
+
+
     // ── ③ 网卡降级不阻断：EnsureAsync 失败 → 通道/本地 Web 照常运行 ──
 
     [Fact]
@@ -311,5 +373,7 @@ public sealed class ClientRuntimeIntegrationTests : IAsyncLifetime
         public Task RemoveAsync(CancellationToken ct = default) => Task.CompletedTask;
 
         public NicHealth CheckHealth(IPAddress expectedIp) => new(NicHealthState.AdapterMissing, null);
+
+        public Task<bool> RemoveLeftoverAsync(CancellationToken ct = default) => Task.FromResult(false);
     }
 }
