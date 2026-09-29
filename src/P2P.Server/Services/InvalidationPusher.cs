@@ -15,17 +15,19 @@ namespace P2P.Server.Services;
 public sealed class InvalidationPusher(
     IDbContextFactory<AppDbContext> dbFactory, DeviceRegistry registry)
 {
-    /// <summary>登出（L1 失效）：本人 enabled 映射全部失效（PRD 05 §4"任意一层失效"）。</summary>
-    public async Task PushOwnedAsync(Guid ownerDeviceId, InvalidationReason reason)
+    /// <summary>登出（L1 失效）：本人 enabled 映射全部失效（PRD 05 §4"任意一层失效"）；
+    /// 用户禁用复用本入口携 newCapability=passive 降级（M2-13，FR-S-204）。</summary>
+    public async Task PushOwnedAsync(Guid ownerDeviceId, InvalidationReason reason,
+        CapabilityMode? newCapability = null)
     {
         await using var db = await dbFactory.CreateDbContextAsync();
         var ids = await db.Mappings.AsNoTracking()
             .Where(m => m.OwnerDeviceId == ownerDeviceId && m.Enabled)
             .Select(m => m.Id)
             .ToArrayAsync();
-        if (ids.Length == 0)
-            return;
-        await PushByOwnerAsync(new Dictionary<Guid, Guid[]> { [ownerDeviceId] = ids }, reason);
+        if (ids.Length == 0 && newCapability is null)
+            return; // 空集且无能力变化才静默；降级提示独立于映射集合（客户端要即时降级登录态）
+        await PushByOwnerAsync(new Dictionary<Guid, Guid[]> { [ownerDeviceId] = ids }, reason, newCapability);
     }
 
     /// <summary>远程码重置（0x14，PRD 05 §5）：引用该设备的存量映射失效——码是定位别名（D7），
@@ -75,8 +77,8 @@ public sealed class InvalidationPusher(
     {
         foreach (var (ownerId, ids) in byOwner)
         {
-            if (ids.Length == 0 || registry.TryGet(ownerId) is not { } session)
-                continue; // 离线跳过（提示帧语义）
+            if ((ids.Length == 0 && newCapability is null) || registry.TryGet(ownerId) is not { } session)
+                continue; // 离线跳过（提示帧语义）；降级提示允许空映射集
             try
             {
                 await session.PushAsync(new Invalidation(session.NextSeq(), session.ServerTimestamp(),

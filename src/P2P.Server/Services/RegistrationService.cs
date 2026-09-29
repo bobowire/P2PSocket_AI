@@ -42,6 +42,14 @@ public sealed class RegistrationService(
 
         if (existing is not null)
         {
+            if (existing.Disabled)
+            {
+                // 读侧拒绝（FR-S-105，M2-13）：禁用设备不得借覆盖式恢复重签凭据绕回
+                await session.SendErrorAsync(ErrorCode.Forbidden, "device_disabled");
+                await session.CloseAsync("device_disabled");
+                return;
+            }
+
             if (registry.IsOnline(existing.Id))
             {
                 // 防伪造 MAC 抢注（OQ-14）：在线记录拒绝，需管理员解绑

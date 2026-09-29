@@ -68,6 +68,7 @@ public sealed class ControlSession : IAsyncDisposable
         RemoteEndPoint = remoteEndPoint;
         LocalEndPoint = localEndPoint;
         LastSeen = _time.GetLocalNow();
+        LastAdminCheck = LastSeen;
         _runLoop = RunAsync(_cts.Token);
         _sendLoop = SendLoopAsync(_cts.Token);
     }
@@ -86,6 +87,9 @@ public sealed class ControlSession : IAsyncDisposable
 
     /// <summary>最近一次心跳/握手时刻（PresenceMonitor 离线判定依据，FR-S-104）。</summary>
     public DateTimeOffset LastSeen { get; private set; }
+
+    /// <summary>上次管理标志检查时刻（PresenceMonitor 兜底节流，M2-13；跨进程 CLI 写库 ~30s 窗口收口）。</summary>
+    public DateTimeOffset LastAdminCheck { get; set; }
 
     /// <summary>能力模式（02 §2.5）：会话级；登录→normal、登出→passive；初始 normal（未降级）。</summary>
     public CapabilityMode Capability { get; set; } = CapabilityMode.Normal;
@@ -267,7 +271,7 @@ public sealed class ControlSession : IAsyncDisposable
             return;
         }
 
-        // 已注册设备：查库定状态；未注册：NeedRegister
+        // 已注册设备：查库定状态；未注册：NeedRegister；禁用设备直接拒绝重连（FR-S-105，M2-13）
         if (hello.DeviceId is { } devId)
         {
             await using var db = await _dbFactory.CreateDbContextAsync(ct).ConfigureAwait(false);
@@ -280,6 +284,12 @@ public sealed class ControlSession : IAsyncDisposable
                 await SendAsync(new HelloAck(NextSeq(), NowMs64, MsgType.Hello, _options.ServerVersion,
                     ProtocolVersion.Current, _nonceS, HelloStatus.Ok, (ulong)NowMs), ct).ConfigureAwait(false);
                 _state = SessionState.AwaitingProof;
+                return;
+            }
+            if (device is not null)
+            {
+                // 读侧拒绝：不禁用设备借 NeedRegister 绕回（覆盖式恢复会重签凭据）
+                await CloseAsync("device_disabled").ConfigureAwait(false);
                 return;
             }
         }
