@@ -210,6 +210,7 @@ public sealed class ControlSession : IAsyncDisposable
 
     private static bool ExpectedTypeKnown(byte msgType)
         => msgType is MsgType.Hello or MsgType.Proof or MsgType.Register or MsgType.RegisterAck
+            or MsgType.RemoteCodeReset
             or MsgType.UnbindMe or MsgType.DeviceUpdate or MsgType.UserRegister or MsgType.UserLogin
             or MsgType.UserLogout or MsgType.Heartbeat or MsgType.DeviceList or MsgType.GroupCreate
             or MsgType.GroupJoin or MsgType.GroupLeave or MsgType.JoinRequests or MsgType.GroupInviteGen
@@ -226,6 +227,7 @@ public sealed class ControlSession : IAsyncDisposable
         MsgType.UserLogin => PcpCodec.Decode<UserLogin>(msgpack),
         MsgType.UserLogout => PcpCodec.Decode<UserLogout>(msgpack),
         MsgType.Register => PcpCodec.Decode<Register>(msgpack),
+        MsgType.RemoteCodeReset => PcpCodec.Decode<RemoteCodeReset>(msgpack), // 0x14 远程码重置（M2-12）
         MsgType.UnbindMe => PcpCodec.Decode<UnbindMe>(msgpack),
         MsgType.DeviceList => PcpCodec.Decode<DeviceListRequest>(msgpack),
         MsgType.GroupCreate => PcpCodec.Decode<GroupCreate>(msgpack),

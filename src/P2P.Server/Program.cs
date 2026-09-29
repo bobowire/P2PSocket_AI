@@ -65,6 +65,8 @@ builder.Services.AddSingleton<RegistrationService>();
 builder.Services.AddSingleton<UserService>();
 // 0x41 列表变更推送（M2-10，FR-S-403）：订阅 DeviceRegistry 在线事件 + GroupService 成员变更触发
 builder.Services.AddSingleton<DeviceListPusher>();
+// 0x75 失效推送（M2-12，FR-C-702）：按授权链反查受影响映射逐 owner 推送（登出/远程码重置/组关系终止）
+builder.Services.AddSingleton<InvalidationPusher>();
 builder.Services.AddSingleton<GroupService>();
 builder.Services.AddSingleton<MappingService>();
 // 0x63 内网段白名单（M2-11，FR-C-701/702）：段 CRUD + 移除联动 0x75 失效推送

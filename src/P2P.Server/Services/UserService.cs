@@ -8,12 +8,13 @@ namespace P2P.Server.Services;
 /// <summary>
 /// 用户与能力模式处理（02 §2.4 0x20/0x21/0x22/0x13；FR-S-201/202/106）：
 /// 注册受 registration_open 开关控制；登录绑定设备 owner 并切 normal；
-/// 登出切 passive（能力模式为会话态，05 §8）。
+/// 登出切 passive（能力模式为会话态，05 §8）+ 本人映射 0x75(logged_out) 失效（M2-12，PRD 05 §4 L1 失效）。
 /// </summary>
 public sealed class UserService(
     IDbContextFactory<AppDbContext> dbFactory,
     AuditLogger audit,
-    TimeProvider? time = null)
+    TimeProvider? time = null,
+    InvalidationPusher? invalidation = null)
 {
     private readonly TimeProvider _time = time ?? TimeProvider.System;
 
@@ -87,6 +88,9 @@ public sealed class UserService(
         session.OwnerUserId = null;
         await session.SendAsync(new UserLogoutAck(session.NextSeq(), session.ServerTimestamp(),
             MsgType.UserLogout, true));
+        // L1 失效（PRD 05 §4）：本人 enabled 映射全部失效停转发——Ack 先于推送（M2-10 纪律）
+        if (invalidation is not null)
+            await invalidation.PushOwnedAsync(session.DeviceId, InvalidationReason.LoggedOut);
     }
 
     /// <summary>0x13 设备改名（本机管理类，passive 允许——02 §2.5 矩阵）。</summary>

@@ -16,6 +16,7 @@ public sealed class GroupService(
     DeviceRegistry registry,
     AuditLogger audit,
     DeviceListPusher? pusher = null,
+    InvalidationPusher? invalidation = null,
     TimeProvider? time = null)
 {
     /// <summary>0x40 分页上限（OQ-16：默认 100，钳制区间 1~200）。</summary>
@@ -157,6 +158,9 @@ public sealed class GroupService(
                 detail: new { msg.GroupId });
             if (pusher is not null)
                 await pusher.NotifyGroupMembersAsync(msg.GroupId, session.DeviceId); // 0x41（M2-10）
+            // 0x75 group_left（M2-12）：切断边映射失效（残余可见性复核——同账号/另共同组保留）
+            if (invalidation is not null)
+                await invalidation.PushMemberSeveredAsync(session.DeviceId, InvalidationReason.GroupLeft);
         }
     }
 
@@ -387,8 +391,8 @@ public sealed class GroupService(
             await session.SendErrorAsync(ErrorCode.Conflict, "default_group_immutable");
             return;
         }
-        // 成员清单先捕获（删除后无从查询，0x41 收件人来源）
-        var members = pusher is null ? [] : await db.GroupMembers.AsNoTracking()
+        // 成员清单先捕获（删除后无从查询，0x41 收件人与 0x75 反查候选来源）
+        var members = pusher is null && invalidation is null ? [] : await db.GroupMembers.AsNoTracking()
             .Where(m => m.GroupId == group.Id).Select(m => m.DeviceId).ToListAsync();
         // 联动清理：成员与准入申请（映射授权为动态计算，可见性随之收缩，05 §5）
         await db.GroupMembers.Where(m => m.GroupId == group.Id).ExecuteDeleteAsync();
@@ -398,6 +402,9 @@ public sealed class GroupService(
             MsgType.GroupDissolve, true));
         if (pusher is not null && members.Count > 0)
             await pusher.NotifyDevicesAsync(members); // 0x41（M2-10）
+        // 0x75 group_dissolved（M2-12）：组内两两切断复核（同账号对保留）
+        if (invalidation is not null && members.Count > 0)
+            await invalidation.PushGroupDissolvedAsync(members);
     }
 
     // ── 0x57 所有者移出成员（FR-S-307）───────────────────────────────
@@ -435,6 +442,9 @@ public sealed class GroupService(
                 detail: new { msg.GroupId, msg.MemberDeviceId });
             if (pusher is not null)
                 await pusher.NotifyGroupMembersAsync(msg.GroupId, msg.MemberDeviceId); // 0x41（M2-10）
+            // 0x75 group_dissolved（M2-12，枚举口径：0x56 解散/0x57 移出同值——组关系终止）
+            if (invalidation is not null)
+                await invalidation.PushMemberSeveredAsync(msg.MemberDeviceId, InvalidationReason.GroupDissolved);
         }
     }
 

@@ -1,6 +1,6 @@
 # P2P 内网穿透产品 · 技术设计文档
 
-> 版本：v1.23　创建日期：2026-08-19　状态：待评审
+> 版本：v1.24　创建日期：2026-08-19　状态：待评审
 > 依据：[产品需求文档 PRD v0.6](../prd/README.md)（决策 D1~D21，D3 经 v0.4 修订；开放问题 OQ-1~OQ-19 已全部决议）
 > 定位：开发阶段的**施工图纸**——所有实现以本文档为准；与 PRD 冲突时以 PRD 为准并提出修订。
 
@@ -96,3 +96,4 @@
 | 2026-09-27 | v1.21 | M2-09 落地同步：05 §5 补分组服务全量实现注记（0x51/0x52/0x53/0x54/0x57，FR-S-303~307）——**创建设备即首成员**（语义定案：0x50 建组同时写 group_members，否则共同分组可见性口径下创建者与跨账号入组设备互不可见，FR-S-306 无法闭环；M1 直写库构造掩盖了缺口）；0x51 登录前置、码无效/撤销一律 3001、已是成员幂等 Ack、free 即入+清残留 pending、approval 建单去重回 3002；0x53 List/Approve/Reject 仅所有者（已处理申请 Ok=false 诚实应答）；0x54 六位去混淆字符集（31 字符，03 §3）加密随机+UNIQUE 撞码重试、每分组至多一码=覆盖式、审计不含码值（AI-17）；0x52/0x57 删行+清 pending（非成员 Ok=false 幂等）；默认分组准入策略 server_config 键 default_join_policy（Seed 建组时读取、非法回退 free，FR-S-304）；0x75 联动触发点归 M2-12 |
 | 2026-09-28 | v1.22 | M2-10 落地同步：05 §5 补 0x41 推送实现注记（FR-S-403/TD-16）——独立 DeviceListPusher 单例（构造订阅 DeviceRegistry 上线/离线事件[换线旧会话按 (deviceId,session) 配对移除 no-op 不误触]、GroupService 成员变更 Ack+审计后显式调用、远程码重置触发归 M2-12）；收件人=与 0x40 可见性同口径的逆向查询（同账号∪共同分组≠自身、并集去重）；解散先捕获成员清单再删行；哑节点 Passive 不下发、离线跳过、单收件人失败静默（提示帧语义，轮询 0x40 兜底）；推送与 Ack 共用会话 seq 严格递增；presence 推送 fire-and-forget 不阻塞读循环、分组推送 await 且 Ack 先行；GroupService 可选参数注入 pusher（DI 默认值，既有夹具零改动）；客户端 0x41 接线归 M2-15 |
 | 2026-09-28 | v1.23 | M2-11 落地同步：05 §2.5 附实现注记 + 05 §5 补白名单实现注记（FR-C-701/702、SEC-52/53）——0x63 三分支语义（新建须 Enabled=true、更新 Cidr、移除=Cidr 不消费的协议容错；归属校验限定本人防跨设备探测）；CIDR 规范化取 .NET IPNetwork 语义（裸 IP=主机地址补满前缀，全开放须显式 0.0.0.0/0 或 ::/0；落库统一规范形态）；L3 双路径=0x60 L2 后校验（create/edit 共用）+ 0x70 TriggerMappingId 查映射**现值**再校验（伪造 id → 1002、段收窄后旧映射 → 4002、SQLite 无 CIDR 数学 → 段集内存过滤、self 恒放行、非法地址 fail closed）；移除联动 0x75 仅携受影响映射（disabled 映射不入集——重启用 0x60 再过 L3；更新不触发 0x75——由现值再校验兜底）；客户端执行点=lan-segments.json 本地镜像（03 §5 补录）+ MappingEngine 注入 enabledCidrsProvider（null=空集 fail closed 保持 M1 语义）；UDP 侧同口径归 M2-20、本地 API/0x63 上报接线归 M2-27、0x75 置 invalid 归 M2-15 |
+| 2026-09-29 | v1.24 | M2-12 落地同步：05 §5 补失效推送实现注记（FR-S-903/FR-C-702、02 §2.4）——InvalidationPusher 独立服务（授权链反查逐 owner 推送；离线跳过/单收件人静默/disabled 映射不入集）；五种触发点反查口径（logged_out=本人 enabled 全量；remote_code_reset 按 TargetDeviceId 反查保守全量失效——D7 码是定位别名；group_left/移出=切断边任一端为离开者；group_dissolved=两端均原成员）；残余可见性复核 IsStillVisibleAsync（同账号 ∪ 共同分组与 VisibleDevices 同口径——另一共同组/同账号对保留防过度失效）；0x14 处理凭连接级设备身份无须登录（passive 允许）、RemoteCodeGenerator 换值旧码立即 4003、审计不含码值（AI-17）、Ack→0x75→0x41 帧序；GroupDissolved=6 兼 0x56/0x57、GroupLeft=5 仅 0x52；user_disabled/device_disabled 触发点归 M2-13 |

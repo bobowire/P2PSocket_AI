@@ -9,7 +9,8 @@ namespace P2P.Server.Services;
 /// M2-07 挂载中继 0x74 RelayAllocate；M2-19 挂载回切 0x73 PunchRetry；
 /// M2-08 挂载上报族 0x62/0x64/0x72（审计/流量累计/打洞结果）；
 /// M2-09 挂载分组全量 0x51/0x52/0x53/0x54/0x57（凭码入组/自退/审批/邀请码/移出）；
-/// M2-11 挂载白名单 0x63 LanSegmentsUpsert（passive 允许，本机管理类）。
+/// M2-11 挂载白名单 0x63 LanSegmentsUpsert（passive 允许，本机管理类）；
+/// M2-12 挂载 0x14 RemoteCodeReset（远程码重置；passive 允许，本机管理类）。
 /// </summary>
 public sealed class ControlMessageRouter
 {
@@ -56,6 +57,9 @@ public sealed class ControlMessageRouter
                 break;
             case UnbindMe unbind:
                 await _registration.HandleUnbindAsync(session, unbind);
+                break;
+            case RemoteCodeReset codeReset: // 0x14 远程码重置（M2-12，FR-S-903；passive 允许，不入主动类清单）
+                await _registration.HandleRemoteCodeResetAsync(session, codeReset);
                 break;
             case UserRegister userRegister:
                 await _user.HandleUserRegisterAsync(session, userRegister);
