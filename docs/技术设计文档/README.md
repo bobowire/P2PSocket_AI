@@ -1,6 +1,6 @@
 # P2P 内网穿透产品 · 技术设计文档
 
-> 版本：v1.25　创建日期：2026-08-19　状态：待评审
+> 版本：v1.26　创建日期：2026-08-19　状态：待评审
 > 依据：[产品需求文档 PRD v0.6](../prd/README.md)（决策 D1~D21，D3 经 v0.4 修订；开放问题 OQ-1~OQ-19 已全部决议）
 > 定位：开发阶段的**施工图纸**——所有实现以本文档为准；与 PRD 冲突时以 PRD 为准并提出修订。
 
@@ -98,3 +98,4 @@
 | 2026-09-28 | v1.23 | M2-11 落地同步：05 §2.5 附实现注记 + 05 §5 补白名单实现注记（FR-C-701/702、SEC-52/53）——0x63 三分支语义（新建须 Enabled=true、更新 Cidr、移除=Cidr 不消费的协议容错；归属校验限定本人防跨设备探测）；CIDR 规范化取 .NET IPNetwork 语义（裸 IP=主机地址补满前缀，全开放须显式 0.0.0.0/0 或 ::/0；落库统一规范形态）；L3 双路径=0x60 L2 后校验（create/edit 共用）+ 0x70 TriggerMappingId 查映射**现值**再校验（伪造 id → 1002、段收窄后旧映射 → 4002、SQLite 无 CIDR 数学 → 段集内存过滤、self 恒放行、非法地址 fail closed）；移除联动 0x75 仅携受影响映射（disabled 映射不入集——重启用 0x60 再过 L3；更新不触发 0x75——由现值再校验兜底）；客户端执行点=lan-segments.json 本地镜像（03 §5 补录）+ MappingEngine 注入 enabledCidrsProvider（null=空集 fail closed 保持 M1 语义）；UDP 侧同口径归 M2-20、本地 API/0x63 上报接线归 M2-27、0x75 置 invalid 归 M2-15 |
 | 2026-09-29 | v1.24 | M2-12 落地同步：05 §5 补失效推送实现注记（FR-S-903/FR-C-702、02 §2.4）——InvalidationPusher 独立服务（授权链反查逐 owner 推送；离线跳过/单收件人静默/disabled 映射不入集）；五种触发点反查口径（logged_out=本人 enabled 全量；remote_code_reset 按 TargetDeviceId 反查保守全量失效——D7 码是定位别名；group_left/移出=切断边任一端为离开者；group_dissolved=两端均原成员）；残余可见性复核 IsStillVisibleAsync（同账号 ∪ 共同分组与 VisibleDevices 同口径——另一共同组/同账号对保留防过度失效）；0x14 处理凭连接级设备身份无须登录（passive 允许）、RemoteCodeGenerator 换值旧码立即 4003、审计不含码值（AI-17）、Ack→0x75→0x41 帧序；GroupDissolved=6 兼 0x56/0x57、GroupLeft=5 仅 0x52；user_disabled/device_disabled 触发点归 M2-13 |
 | 2026-09-29 | v1.25 | M2-13 落地同步：05 §5 补禁用与解绑实现注记（FR-S-105/204/103）——AdminService 统一执行点（CLI 五开关壳[M1-19 模式]/测试直调/M3 Web 共用）；设备禁用先推 0x75(device_disabled) 后踢线，读侧拒绝补齐 Hello[禁用直接断连不落 NeedRegister——堵借覆盖式恢复重签凭据绕回]与注册恢复[2003]两处；用户禁用名下在线设备降级 passive+0x75 携 newCapability（PushOwnedAsync 扩参、空映射集也推）不踢线，恢复路径=重连+登录（0x21 属主动类清单）；解绑清理集合对齐 0x12+同 MAC 重注册全新身份；跨进程 CLI 窗口由 PresenceMonitor 心跳兜底（admin_check_interval 节流读库复核+幂等闸） |
+| 2026-09-29 | v1.26 | M2-14 落地同步：05 §5 补 UpdateInfo 实现注记（FR-S-804/OQ-5、02 §7）——0x03 统一应答（update_* 四键 + maxProtocol 代码注入 + minProtocol clamp）；版本不符受理窗（5004 后 0x03 唯一受理应答后断/非 0x03 即断/75s 空闲兜底）；已建立会话 signed 受理连接保持 |

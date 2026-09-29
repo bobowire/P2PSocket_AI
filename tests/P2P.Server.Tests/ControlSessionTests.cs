@@ -157,7 +157,8 @@ public sealed class ControlSessionTests : IAsyncLifetime
         var client = await ConnectAsync();
         var ack = await client.HelloAsync(deviceId: null, version: 99);
         Assert.Equal(HelloStatus.VersionNotSupported, ack.Status);
-        Assert.True(await client.WaitClosedAsync(), "版本不匹配应断连");
+        // M2-14（02 §7）：5004 后保持 0x03 受理窗口——应答/越界消息/空闲兜底才断（UpdateInfoTests 覆盖）
+        Assert.False(await client.WaitClosedAsync(800), "版本不符后应保持 0x03 受理窗口");
     }
 
     [Fact]

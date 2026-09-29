@@ -38,6 +38,7 @@ public sealed class ControlSession : IAsyncDisposable
         Channel.CreateBounded<(byte[], TaskCompletionSource)>(new BoundedChannelOptions(256) { FullMode = BoundedChannelFullMode.Wait });
 
     private SessionState _state = SessionState.AwaitingHello;
+    private bool _versionRejected;   // 版本协商失败：0x03 受理窗口（02 §7，M2-14）
     private byte[] _connMacKey = [];
     private byte[] _deviceSecret = [];
     private byte[] _nonceC = [];
@@ -145,6 +146,15 @@ public sealed class ControlSession : IAsyncDisposable
 
     private async Task HandleFrameUnsignedAsync(byte[] body, CancellationToken ct)
     {
+        if (_versionRejected)
+        {
+            // 版本协商失败窗口（02 §7）：0x03 唯一受理——应答升级引导后即断；其余消息直接断
+            if (PcpCodec.Peek(body).MsgType == MsgType.UpdateInfo)
+                await SendUpdateInfoAsync(ct).ConfigureAwait(false);
+            await CloseAsync("version_not_supported").ConfigureAwait(false);
+            return;
+        }
+
         var header = PcpCodec.Peek(body);
         switch (_state)
         {
@@ -214,6 +224,7 @@ public sealed class ControlSession : IAsyncDisposable
 
     private static bool ExpectedTypeKnown(byte msgType)
         => msgType is MsgType.Hello or MsgType.Proof or MsgType.Register or MsgType.RegisterAck
+            or MsgType.UpdateInfo
             or MsgType.RemoteCodeReset
             or MsgType.UnbindMe or MsgType.DeviceUpdate or MsgType.UserRegister or MsgType.UserLogin
             or MsgType.UserLogout or MsgType.Heartbeat or MsgType.DeviceList or MsgType.GroupCreate
@@ -231,6 +242,7 @@ public sealed class ControlSession : IAsyncDisposable
         MsgType.UserLogin => PcpCodec.Decode<UserLogin>(msgpack),
         MsgType.UserLogout => PcpCodec.Decode<UserLogout>(msgpack),
         MsgType.Register => PcpCodec.Decode<Register>(msgpack),
+        MsgType.UpdateInfo => PcpCodec.Decode<UpdateInfoRequest>(msgpack), // 0x03 升级引导（M2-14）
         MsgType.RemoteCodeReset => PcpCodec.Decode<RemoteCodeReset>(msgpack), // 0x14 远程码重置（M2-12）
         MsgType.UnbindMe => PcpCodec.Decode<UnbindMe>(msgpack),
         MsgType.DeviceList => PcpCodec.Decode<DeviceListRequest>(msgpack),
@@ -265,9 +277,10 @@ public sealed class ControlSession : IAsyncDisposable
 
         if (hello.ProtocolVersion != ProtocolVersion.Current)
         {
+            // 02 §7 拒绝策略（M2-14）：5004 后进入受理窗口——0x03 唯一可发（升级引导），随后断开
             await SendAsync(new HelloAck(NextSeq(), NowMs64, MsgType.Hello, _options.ServerVersion,
                 ProtocolVersion.Current, RandomGenerator.Bytes(16), HelloStatus.VersionNotSupported, (ulong)NowMs), ct).ConfigureAwait(false);
-            await CloseAsync("version_not_supported").ConfigureAwait(false); // 0x03 UpdateInfo 属 M2
+            _versionRejected = true;
             return;
         }
 
@@ -321,6 +334,21 @@ public sealed class ControlSession : IAsyncDisposable
         LastSeen = _time.GetLocalNow();
         _registry.Register(this);
         await SendAsync(new ProofAck(NextSeq(), NowMs64, MsgType.Proof, true), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 0x03 升级信息应答（M2-14，FR-S-804/OQ-5、02 §7 冻结接口永不变更）：
+    /// latestVersion/url/notes 出 server_config（update_* 键），maxProtocol=宿主编译协议版本
+    /// （代码即真相），minProtocol 键配置并 clamp 进 [1, Current]。版本不符窗口与已建立会话共用。
+    /// </summary>
+    public async Task SendUpdateInfoAsync(CancellationToken ct = default)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct).ConfigureAwait(false);
+        var cfg = new ServerConfigStore(db);
+        var min = Math.Clamp(cfg.GetInt("update_min_protocol"), 1, ProtocolVersion.Current);
+        await SendAsync(new UpdateInfoResponse(NextSeq(), NowMs64, MsgType.UpdateInfo,
+            cfg.Get("update_latest_version"), (ushort)min, ProtocolVersion.Current,
+            cfg.Get("update_url"), cfg.Get("update_notes")), ct).ConfigureAwait(false);
     }
 
     // ── 发送（写队列串行化；Established 后签名）──────────────────────────

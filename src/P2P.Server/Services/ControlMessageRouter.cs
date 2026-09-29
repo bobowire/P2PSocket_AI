@@ -55,6 +55,9 @@ public sealed class ControlMessageRouter
             case Register reg:
                 await _registration.HandleRegisterAsync(session, reg);
                 break;
+            case UpdateInfoRequest: // 0x03 升级引导（M2-14，FR-S-804；冻结接口，无附加载荷）
+                await session.SendUpdateInfoAsync();
+                break;
             case UnbindMe unbind:
                 await _registration.HandleUnbindAsync(session, unbind);
                 break;

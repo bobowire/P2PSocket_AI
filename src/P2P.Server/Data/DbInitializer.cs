@@ -29,6 +29,11 @@ public static class DbInitializer
         ("stun_rate_per_device", "10"),
         ("stun_circuit_pps", "2000"),
         ("default_join_policy", "free"), // FR-S-304：默认分组准入策略（free|approval）
+        // 0x03 升级信息（M2-14，FR-S-804/OQ-5）：latest/min/url/notes 出配置，max=宿主编译协议版本
+        ("update_latest_version", "0.1.0"),
+        ("update_min_protocol", "1"),
+        ("update_url", ""),
+        ("update_notes", ""),
     ];
 
     public static void Initialize(AppDbContext db)
