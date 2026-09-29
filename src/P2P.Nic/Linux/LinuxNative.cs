@@ -22,6 +22,13 @@ internal static class LinuxNative
     public const int IfReqSize = 40;         // sizeof(struct ifreq)，64 位 Linux
     public const int IfFlagsOffset = 16;     // ifr_name[16] 之后的联合体首字段：ifr_flags(short)/ifr_ifindex(int)
 
+    // ── 健康探测（M2-24，FR-C-202）：sysfs 存在性 + SIOCGIFADDR 主地址 ──
+    public const int AfInet = 2;             // AF_INET
+    public const int SockDgram = 2;          // SOCK_DGRAM
+    public const int IpProtoUdp = 17;        // IPPROTO_UDP
+    public const uint SiocGifAddr = 0x8915;  // name -> ifr_addr（接口 IPv4 主地址，sockios.h）
+    public const int IfAddrOffset = 16;      // ifr_name[16] 之后联合体的 ifr_addr（sockaddr_in）
+
     // ── netlink.h / rtnetlink.h / if_addr.h（rtnetlink 配址与拉起）──
     public const int AfNetlink = 16;         // AF_NETLINK
     public const int SockRaw = 3;            // SOCK_RAW

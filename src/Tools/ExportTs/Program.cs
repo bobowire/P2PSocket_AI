@@ -258,4 +258,6 @@ internal sealed class NullNicManager : INicManager
         => Task.FromResult(new NicHandle("export-ts", virtualIp));
 
     public Task RemoveAsync(CancellationToken ct = default) => Task.CompletedTask;
+
+    public NicHealth CheckHealth(IPAddress expectedIp) => new(NicHealthState.Healthy, expectedIp);
 }

@@ -185,20 +185,33 @@ public sealed class RegistrationIntegrationTests : IAsyncLifetime
     }
 }
 
-/// <summary>网卡替身：记录 Ensure 收到的虚拟地址（A-1 出口验证；真实网卡归 M1-37 实机冒烟）。</summary>
+/// <summary>网卡替身：记录 Ensure 收到的虚拟地址（A-1 出口验证；真实网卡归 M1-37 实机冒烟）。
+/// M2-24：外部可改 Exists/BoundIp 模拟网卡被删/IP 被改，CheckHealth 如实上报。</summary>
 internal sealed class StubNicManager : INicManager
 {
     public List<IPAddress> Ensured { get; } = [];
+    /// <summary>替身适配器在位开关（测试模拟外部删除）。</summary>
+    public volatile bool Exists = true;
+    /// <summary>替身当前绑定 IP（null=在位但无绑定；测试模拟 IP 被改动）。</summary>
+    public IPAddress? BoundIp;
 
-#pragma warning disable CS0067 // 接口事件保留位（FR-C-202 自愈属 M2）
+#pragma warning disable CS0067 // 接口事件保留位（自愈异常经 NicHealthMonitor 日志展示）
     public event Action<string>? Degraded;
 #pragma warning restore CS0067
 
     public Task<NicHandle> EnsureAsync(IPAddress virtualIp, CancellationToken ct = default)
     {
         Ensured.Add(virtualIp);
+        Exists = true; // Ensure 即重建：适配器在位 + 恢复绑定
+        BoundIp = virtualIp;
         return Task.FromResult(new NicHandle("stub-0", virtualIp));
     }
 
     public Task RemoveAsync(CancellationToken ct = default) => Task.CompletedTask;
+
+    public NicHealth CheckHealth(IPAddress expectedIp)
+        => !Exists ? new NicHealth(NicHealthState.AdapterMissing, null)
+        : BoundIp is null || !BoundIp.Equals(expectedIp)
+            ? new NicHealth(NicHealthState.IpMismatch, BoundIp)
+            : new NicHealth(NicHealthState.Healthy, BoundIp);
 }

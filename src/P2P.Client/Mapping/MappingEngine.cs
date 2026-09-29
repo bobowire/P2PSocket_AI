@@ -15,6 +15,8 @@
 //   端点首包建 channel+OPEN 后乐观直发 UDP_DGRAM（不等 OPEN_OK）；OPEN_FAIL→该端点丢包+映射 failed；
 //   服务侧每 channel 一个随机源端口 UdpClient（Connect 目标）+L3 校验同 TCP；双向空闲 60s 回收
 //   （CLOSE+双端释放）；每映射并发 channel ≤256 超限丢弃+计数；>1368B 数据报 FRAG 分片/重组在会话层。
+// - listen_failed 自动重试（M2-24，FR-C-902 附）：监听绑定失败（AddressNotAvailable 等——
+//   Wintun 进程切换窗口 IP 未生效的规律复现）入重试集，周期+网卡恢复沿重绑直至成功，无需手工 retry。
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
@@ -67,6 +69,10 @@ public sealed record MappingEngineOptions
 
     /// <summary>每 UDP 映射并发 channel 上限（05 §2.4 默认 256；防 DNS 风暴型放大，超限丢弃+计数）。</summary>
     public int UdpMaxChannels { get; init; } = 256;
+
+    /// <summary>listen_failed 自动重试周期（M2-24，FR-C-902 附：Wintun 进程切换窗口 IP 未生效
+    /// 的规律复现收口）：默认 5s；重试直至绑定成功（网卡就绪即收敛），测试注入缩短。</summary>
+    public TimeSpan ListenRetryInterval { get; init; } = TimeSpan.FromSeconds(5);
 }
 
 /// <summary>
@@ -87,7 +93,13 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
     private readonly ConcurrentDictionary<Guid, Runtime> _mappings = new();
     private readonly ConcurrentDictionary<(Guid SessionId, uint ChannelId), ChannelEntry> _channels = new();
     private readonly ConcurrentDictionary<(Guid SessionId, uint ChannelId), UdpChannelEntry> _udpChannels = new();
+    /// <summary>listen_failed 待重试映射集（M2-24）：键=映射 id；成功绑定/停用/失效即摘除。</summary>
+    private readonly ConcurrentDictionary<Guid, byte> _listenRetry = new();
+    /// <summary>重试轮串行闸（M2-24）：周期循环与网卡恢复沿可能并发触发；非阻塞——
+    /// 已有轮次在跑则本次跳过（在飞轮次覆盖在册项，后续周期兜底新增）。</summary>
+    private readonly SemaphoreSlim _listenRetryGate = new(1, 1);
     private readonly Task _udpSweepLoop;
+    private readonly Task _listenRetryLoop;
     private readonly CancellationTokenSource _cts = new();
     private int _disposed;
 
@@ -125,6 +137,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         _tunnels.SessionDisconnected += OnTunnelDisconnected;
         _tunnels.SessionAttached += OnTunnelAttached;
         _udpSweepLoop = UdpSweepLoopAsync(_cts.Token);
+        _listenRetryLoop = ListenRetryLoopAsync(_cts.Token);
     }
 
     /// <summary>更新监听绑定地址（01 §3.2 监听绑虚拟 IP）。向导路径冷启动时 VirtualIp 尚空、
@@ -181,6 +194,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
             catch (SocketException e)
             {
                 SetState(rt, MappingState.Failed, $"listen_failed: {e.SocketErrorCode}");
+                _listenRetry[config.MappingId] = 0; // 自动重试直至网卡就绪（M2-24）
                 return Task.CompletedTask;
             }
             rt.UdpListener = listener;
@@ -196,6 +210,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
             catch (SocketException e)
             {
                 SetState(rt, MappingState.Failed, $"listen_failed: {e.SocketErrorCode}");
+                _listenRetry[config.MappingId] = 0; // 自动重试直至网卡就绪（M2-24）
                 return Task.CompletedTask;
             }
             rt.Listener = listener;
@@ -248,6 +263,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
 
     private async Task TeardownAsync(Runtime rt, MappingState final, string? detail)
     {
+        _listenRetry.TryRemove(rt.Config.MappingId, out _); // 停用/失效/引擎释放：摘出重试集（M2-24）
         rt.Listener?.Stop(); // accept 循环随之退出
         if (rt.AcceptLoop is not null) { try { await rt.AcceptLoop; } catch { /* 监听关闭 */ } }
         rt.UdpListener?.Close(); // UDP 接收循环随之退出
@@ -669,6 +685,55 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         catch (OperationCanceledException) { /* 引擎释放 */ }
     }
 
+    // ── listen_failed 自动重试（M2-24，FR-C-902 附）──────────────────
+
+    /// <summary>重试周期循环：对重试集内映射执行一轮重绑定。另有 NicHealthMonitor.Restored
+    /// 恢复沿触发的外加一轮（立即响应网卡重建，不必等下个周期）。</summary>
+    private async Task ListenRetryLoopAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(_options.ListenRetryInterval);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
+                await RetryListenFailedAsync(ct);
+        }
+        catch (OperationCanceledException) { /* 引擎释放 */ }
+    }
+
+    /// <summary>listen_failed 映射重试一轮（周期循环与网卡恢复沿共用入口）：Failed 且无监听 →
+    /// 全量重新启用（重新绑端口，即手工 RetryAsync 同路径——不再需要手工 retry）。
+    /// 先摘后启：成功即出列，失败由 EnableAsync 重新登记（重试集不叠加）。</summary>
+    public async Task RetryListenFailedAsync(CancellationToken ct = default)
+    {
+        if (!await _listenRetryGate.WaitAsync(0, ct).ConfigureAwait(false))
+            return; // 已有轮次在飞：跳过本次触发（在飞轮次覆盖在册项，后续周期兜底）
+        try
+        {
+            foreach (var mappingId in _listenRetry.Keys.ToList())
+            {
+                if (ct.IsCancellationRequested) return;
+                if (!_mappings.TryGetValue(mappingId, out var rt))
+                {
+                    _listenRetry.TryRemove(mappingId, out _); // 已不在（外部停用竞态）：收敛出列
+                    continue;
+                }
+                if (rt.Listener is not null || rt.UdpListener is not null)
+                {
+                    _listenRetry.TryRemove(mappingId, out _); // 已恢复（手工 retry 竞态）：出列
+                    continue;
+                }
+                if (rt.State != MappingState.Failed) continue; // 其他无监听态（invalid 等）不重试
+                _listenRetry.TryRemove(mappingId, out _);
+                Log?.Invoke($"映射 {rt.Config.Name} 监听自动重试（listen_failed 自愈，M2-24）");
+                await EnableAsync(rt.Config);
+            }
+        }
+        finally
+        {
+            _listenRetryGate.Release();
+        }
+    }
+
     // ── 状态机驱动 ────────────────────────────────────────────────────
 
     private void OnPunchCompleted(PunchOutcome outcome)
@@ -850,8 +915,11 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         foreach (var rt in _mappings.Values.ToList())
             await TeardownAsync(rt, MappingState.Disabled, "engine_disposed");
         _mappings.Clear();
+        _listenRetry.Clear();
         _cts.Cancel();
         try { await _udpSweepLoop; } catch { /* 取消即退出 */ }
+        try { await _listenRetryLoop; } catch { /* 取消即退出 */ }
         _cts.Dispose();
+        _listenRetryGate.Dispose();
     }
 }

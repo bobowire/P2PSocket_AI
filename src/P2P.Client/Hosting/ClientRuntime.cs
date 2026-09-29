@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using P2P.Client.Control;
 using P2P.Client.Mapping;
+using P2P.Client.Nic;
 using P2P.Client.Punch;
 using P2P.Client.Registration;
 using P2P.Client.Storage;
@@ -48,6 +49,10 @@ public sealed record ClientRuntimeOptions
     /// <summary>0x64 流量上报周期覆盖缝（M2-22）：生产 null=30s（02 §2.4 定值）；
     /// 集成测试注入亚秒级以验证周期落库与停机补报。</summary>
     public TimeSpan? StatsIntervalOverride { get; init; }
+
+    /// <summary>网卡健康探测周期覆盖缝（M2-24）：生产 null=30s（05 §1.2 定值，FR-C-202）；
+    /// 集成测试注入亚秒级以验证替身移除→自动重建→恢复沿。</summary>
+    public TimeSpan? NicProbeIntervalOverride { get; init; }
 }
 
 /// <summary>客户端全组件生命周期（单一属主；启动序=01 §4.1，停机序为其逆序）。</summary>
@@ -70,6 +75,7 @@ public sealed class ClientRuntime : IAsyncDisposable
     private ClientRegistrationService _wizard = null!;
     private LocalApiServices _api = null!;
     private WebApplication _app = null!;
+    private NicHealthMonitor? _nicMonitor;
     private Task? _relayRetryLoop;
     private int _registeredPathStarted;
     private int _disposed;
@@ -181,7 +187,7 @@ public sealed class ClientRuntime : IAsyncDisposable
         if (Interlocked.Exchange(ref _registeredPathStarted, 1) == 1) return;
         try
         {
-            // 虚拟 IP 应用（FR-C-201）：失败降级告警不阻断（05 §1.1；自愈 FR-C-202 属 M2）
+            // 虚拟 IP 应用（FR-C-201）：失败降级告警不阻断（05 §1.1；自愈 FR-C-202 属 M2-24 自愈循环兜底）
             if (IPAddress.TryParse(_state.State.VirtualIp, out var vip))
             {
                 // 监听绑定地址切换（01 §3.2）：向导路径冷启动时 VirtualIp 尚空、引擎初值是 Loopback
@@ -190,6 +196,19 @@ public sealed class ClientRuntime : IAsyncDisposable
                 _engine.UpdateVirtualIp(vip);
                 try { await _nic.EnsureAsync(vip, CancellationToken.None); }
                 catch (Exception e) { Log?.Invoke($"[nic] 虚拟网卡降级运行：{e.Message}（本地 Web 告警展示）"); }
+
+                // 网卡自愈循环（M2-24，FR-C-202/05 §1.2）：30s 探测存在性与 IP 一致性，异常重建恢复。
+                // 启动 Ensure 失败同样纳入（首探测即重建尝试）；恢复沿立即重试 listen_failed 映射
+                //（引擎侧另有周期兜底，M1 附录 A.4 重启竞态收口——不再需要手工 retry）。
+                _nicMonitor = new NicHealthMonitor(_nic, vip, _options.NicProbeIntervalOverride);
+                _nicMonitor.Log += m => Log?.Invoke(m);
+                _nicMonitor.Restored += () => _ = Task.Run(async () =>
+                {
+                    try { await _engine.RetryListenFailedAsync(); }
+                    catch (Exception e) when (e is ObjectDisposedException or OperationCanceledException)
+                    { /* 停机竞态：引擎已释放 */ }
+                    catch (Exception e) { Log?.Invoke($"[engine] 恢复沿监听重试失败：{e.Message}"); }
+                });
             }
             else Log?.Invoke($"[nic] 虚拟 IP 非法（{_state.State.VirtualIp}），网卡未应用");
 
@@ -514,6 +533,7 @@ public sealed class ClientRuntime : IAsyncDisposable
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
         _control.ServerPush -= OnServerPush;
         try { await _cts.CancelAsync(); } catch { /* 已取消 */ }
+        if (_nicMonitor is not null) await _nicMonitor.DisposeAsync(); // 先停自愈循环（其恢复沿会驱动引擎）
         try { await _app.DisposeAsync(); } catch { /* Kestrel 收尾 */ }
         await _api.DisposeAsync();   // Hub 停推
         await _reporter.DisposeAsync(); // 0x64 停机补报（须先于引擎/控制通道：读快照、走连接）

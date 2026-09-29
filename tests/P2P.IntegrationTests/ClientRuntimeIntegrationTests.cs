@@ -297,10 +297,11 @@ public sealed class ClientRuntimeIntegrationTests : IAsyncLifetime
         }
     }
 
-    /// <summary>网卡失败替身：EnsureAsync 恒抛（降级路径验证）。</summary>
+    /// <summary>网卡失败替身：EnsureAsync 恒抛（降级路径验证）。CheckHealth 亦报缺失
+    ///（自愈循环会周期重试 Ensure——默认 30s 周期在测试时长内不触发）。</summary>
     private sealed class FailingNicManager : INicManager
     {
-#pragma warning disable CS0067 // 接口事件保留位（FR-C-202 属 M2）
+#pragma warning disable CS0067 // 接口事件保留位
         public event Action<string>? Degraded;
 #pragma warning restore CS0067
 
@@ -308,5 +309,7 @@ public sealed class ClientRuntimeIntegrationTests : IAsyncLifetime
             => throw new NicException("测试注入：网卡应用失败");
 
         public Task RemoveAsync(CancellationToken ct = default) => Task.CompletedTask;
+
+        public NicHealth CheckHealth(IPAddress expectedIp) => new(NicHealthState.AdapterMissing, null);
     }
 }

@@ -2,7 +2,8 @@
 // 复用同名适配器（WintunOpenAdapter）失败则创建（WintunCreateAdapter）→ 开启最小 ring 会话保活
 // （会话存续期间适配器保持 up，M1 不读写 ring）→ IP Helper 写入 /32 on-link 单播地址（不依赖 netsh）。
 // RemoveAsync 结束会话并关闭适配器：自建适配器随 WintunCloseAdapter 一并移除（删除干净）。
-// 运行期自愈（FR-C-202）与网段冲突告警（FR-C-204）按里程碑映射（09）属 M2/M3，此处不实现。
+// 运行期自愈（FR-C-202，M2-24）：CheckHealth 只读探测原语（存在性+IP 一致性），
+// 30s 检测循环与重建编排归客户端宿主 NicHealthMonitor（P2P.Client/Nic）；网段冲突告警（FR-C-204）属 M3。
 using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Net;
@@ -30,8 +31,9 @@ public sealed class WintunNicManager : INicManager, IAsyncDisposable
     private NicHandle? _handle;
     private bool _createdByUs; // WintunCloseAdapter 仅对自建适配器执行移除
 
-    /// <summary>运行期降级告警（05 §1.1 接口成员；M1-20 无自愈扫描，恒不触发——FR-C-202 属 M2）。</summary>
-#pragma warning disable CS0067 // 事件在 M2 自愈扫描接入后才会触发
+    /// <summary>运行期降级告警（05 §1.1 接口成员；M2-24 起自愈异常经 NicHealthMonitor 日志展示，
+    /// 本实现不触发（探测结果由宿主循环消费））。</summary>
+#pragma warning disable CS0067
     public event Action<string>? Degraded;
 #pragma warning restore CS0067
 
@@ -92,6 +94,31 @@ public sealed class WintunNicManager : INicManager, IAsyncDisposable
     {
         lock (_gate) Teardown();
         return Task.CompletedTask;
+    }
+
+    /// <summary>健康探测（FR-C-202，M2-24）：WintunOpenAdapter 探存在性（零=被删除）→
+    /// 该适配器 LUID 在单播地址表中的绑定与期望比对。探测句柄独立 Open/Close，不碰运行会话；
+    /// 枚举失败按健康返回（探测手段不可用不触发重建）。</summary>
+    public NicHealth CheckHealth(IPAddress expectedIp)
+    {
+        ArgumentNullException.ThrowIfNull(expectedIp);
+        var adapter = WintunNative.WintunOpenAdapter(AdapterName);
+        if (adapter == IntPtr.Zero)
+            return new NicHealth(NicHealthState.AdapterMissing, null);
+        try
+        {
+            WintunNative.WintunGetAdapterLUID(adapter, out var luid);
+            var bound = QueryLocalAddresses().FirstOrDefault(a => a.InterfaceLuid == luid);
+            if (bound.Address is null)
+                return new NicHealth(NicHealthState.IpMismatch, null);
+            return bound.Address.Equals(expectedIp)
+                ? new NicHealth(NicHealthState.Healthy, bound.Address)
+                : new NicHealth(NicHealthState.IpMismatch, bound.Address);
+        }
+        finally
+        {
+            WintunNative.WintunCloseAdapter(adapter); // Open 来源句柄：Close 仅释放不删适配器
+        }
     }
 
     public ValueTask DisposeAsync() => new(RemoveAsync());

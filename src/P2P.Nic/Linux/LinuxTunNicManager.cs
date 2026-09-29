@@ -1,8 +1,9 @@
 // M1-21 Linux 虚拟网卡管理（FR-C-201、05 §1.3）：
 // 打开 /dev/net/tun → ioctl TUNSETIFF(IFF_TUN|IFF_NO_PI) 绑定接口名 p2p-tun → rtnetlink 配置 /32
 // 地址并拉起接口（失败降级 ip 命令，任务清单 M1-21 明示允许）→ 持有 fd 保活（05 §1.3：
-// 接口生命周期与 fd 绑定，未设 TUNSETPERSIST，close 即移除）。运行期自愈（FR-C-202）按
-// 里程碑映射（09）属 M2，此处不实现。
+// 接口生命周期与 fd 绑定，未设 TUNSETPERSIST，close 即移除）。运行期自愈（FR-C-202，M2-24）：
+// CheckHealth 只读探测原语（sysfs 存在性+SIOCGIFADDR 主地址），检测循环与重建编排归客户端宿主
+// NicHealthMonitor（P2P.Client/Nic）。
 using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -31,8 +32,9 @@ public sealed class LinuxTunNicManager : INicManager, IAsyncDisposable
     private IPAddress? _appliedIp;
     private NicHandle? _handle;
 
-    /// <summary>运行期降级告警（05 §1.1 接口成员；M1-21 无自愈扫描，恒不触发——FR-C-202 属 M2）。</summary>
-#pragma warning disable CS0067 // 事件在 M2 自愈扫描接入后才会触发
+    /// <summary>运行期降级告警（05 §1.1 接口成员；M2-24 起自愈异常经 NicHealthMonitor 日志展示，
+    /// 本实现不触发（探测结果由宿主循环消费））。</summary>
+#pragma warning disable CS0067
     public event Action<string>? Degraded;
 #pragma warning restore CS0067
 
@@ -83,6 +85,33 @@ public sealed class LinuxTunNicManager : INicManager, IAsyncDisposable
         // close fd：非持久 TUN 接口随 fd 释放自动移除，地址随之消失（05 §1.3）
         lock (_gate) Teardown();
         return Task.CompletedTask;
+    }
+
+    /// <summary>健康探测（FR-C-202，M2-24）：sysfs 存在性（接口随 fd 生命周期，外部
+    /// `ip link del` 亦摘除 sysfs 节点）→ SIOCGIFADDR 取接口 IPv4 主地址比对。
+    /// 探测手段不可用（无 socket/errno）按健康返回（不触发重建）。</summary>
+    public NicHealth CheckHealth(IPAddress expectedIp)
+    {
+        ArgumentNullException.ThrowIfNull(expectedIp);
+        if (!File.Exists("/sys/class/net/" + InterfaceName))
+            return new NicHealth(NicHealthState.AdapterMissing, null);
+
+        var fd = LinuxNative.socket(LinuxNative.AfInet, LinuxNative.SockDgram, LinuxNative.IpProtoUdp);
+        if (fd < 0) return new NicHealth(NicHealthState.Healthy, expectedIp); // 探测不可用：按健康
+        // ifreq：ifr_name[16] + ifr_addr(sockaddr_in：family@16、port@18、addr@20 网络序)
+        var ifr = new byte[LinuxNative.IfReqSize];
+        Encoding.ASCII.GetBytes(InterfaceName, ifr);
+        using var handle = new SafeFileHandle((IntPtr)fd, ownsHandle: true); // Dispose 即 close(fd)
+        if (LinuxNative.ioctl(handle, LinuxNative.SiocGifAddr, ifr) != 0)
+            return new NicHealth(NicHealthState.IpMismatch, null); // 接口无 IPv4 地址
+        if (BinaryPrimitives.ReadUInt16LittleEndian(ifr.AsSpan(LinuxNative.IfAddrOffset)) != LinuxNative.AfInet)
+            return new(NicHealthState.IpMismatch, null);
+        Span<byte> addr = stackalloc byte[4];
+        ifr.AsSpan(LinuxNative.IfAddrOffset + 4, 4).CopyTo(addr);
+        var bound = new IPAddress(addr);
+        return bound.Equals(expectedIp)
+            ? new NicHealth(NicHealthState.Healthy, bound)
+            : new NicHealth(NicHealthState.IpMismatch, bound);
     }
 
     public ValueTask DisposeAsync() => new(RemoveAsync());
