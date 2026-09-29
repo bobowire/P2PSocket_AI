@@ -16,6 +16,7 @@ public static class PtpFrameType
     public const byte UdpDgram = 0x09;    // UDP 映射数据报（M2-20，FR-C-303；channelId 在帧头）
     public const byte Window = 0x0A;      // M2
     public const byte Frag = 0x0B;        // UDP_DGRAM 分片（M2-20 定案 0x0B，02 §4.2 回填）
+    public const byte RekeyAck = 0x0C;    // REKEY 应答（M2-21 定案 0x0C，02 §4.2 回填；OPEN/OPEN_RESULT、PING/PONG 同款分立惯例）
 
     // ── 握手帧（明文传输；counter=0、channelId=0，不进防重放窗口）────────
     public const byte THello1 = 0x11;     // A→B {sessionId, ephA, nonceA}

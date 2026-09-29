@@ -278,7 +278,7 @@ public sealed class Puncher : IPuncher, IDisposable
                         {
                             KeepaliveInterval = TimeSpan.FromSeconds(_options.KeepaliveSec),
                             HandshakeTimeout = _options.PunchTimeout,
-                        });
+                        }, staticKey: _staticKey, peerStaticPub: ack.Peer.StaticPubKey);
                     return PunchOutcome.Success(ack.SessionId, ack.Peer.DeviceId, session,
                         winner.LocalEndPoint!, winner.RemoteEndPoint!);
                 }

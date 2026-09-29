@@ -1,9 +1,9 @@
 // M1-27 MappingEngine（05 §2，FR-C-301/302/306、D15、02 §4.5）：
 // - 每条启用映射一个 TcpListener.Bind(virtualIp:localPort)，accept → 分配 channelId →
 //   OPEN{proto, targetAddr, targetPort} → OPEN_OK 后双向 splice；
-// - 背压（05 §2.3 M1 简化）：每 channel 出站在飞上限 256KiB（按 ChunkSize 分槽），满则暂停读本地 socket
-//   （TCP 窗口反压应用）；
-//   入站写队列 256KiB 有界，满则断开该 channel（本地应用不消费）；
+// - 背压（M2-21，05 §2.3）：出站=每 channel 64KiB WINDOW 信用（TunnelSession.SendDataAsync 内挂起
+//   =暂停读本地 socket；对端 SpliceIn 消费后回 WINDOW 恢复）；入站写队列 256KiB 有界兜底
+//   （信用窗 64KiB < 队列容量，正常不触达满则断开路径）；
 // - 状态机 disabled→punching→direct/relay/failed（M2-18：relay 态=打洞失败且回退开→中继承载；
 //   invalid=授权失效（M2-15：0x75 到达 MarkInvalid）；
 //   enable 前隧道复用检查：设备对隧道存活 → 直达 direct 不排队（02 §4.5 复用规则）；
@@ -736,9 +736,6 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
 
     // ── splice 与 channel 生命周期 ───────────────────────────────────
 
-    /// <summary>出站槽位数（在飞字节上限 backlog ÷ 每块 ChunkSize，至少 1）。</summary>
-    private static int OutboundSlots(int backlog) => Math.Max(1, backlog / ChunkSize);
-
     private sealed class ChannelEntry(Guid? mappingId, Socket socket, TunnelSession session,
         uint channelId, int backlog)
     {
@@ -750,12 +747,9 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         public Socket Socket { get; } = socket;
         public TunnelSession Session { get; } = session;
         public uint ChannelId { get; } = channelId;
-        /// <summary>出站槽位配额：backlog/ChunkSize 个槽（每槽一个 ≤ChunkSize 分块，在飞字节 ≤backlog）。
-        /// 满则暂停读本地 socket（05 §2.3）。注：SemaphoreSlim 无"一次申请 n 许可"重载
-        /// （WaitAsync(int,ct) 是超时语义），故按分块槽位计而非字节计。</summary>
-        public SemaphoreSlim OutQuota { get; } = new(OutboundSlots(backlog), OutboundSlots(backlog));
         /// <summary>隧道→本地 有界写队列。容量按字节上限折算为条数（单条 ≤ChunkSize，
-        /// backlog=256KiB → 191 条 ≈ 256KiB；满则 OnData 断开该 channel，05 §2.3）。</summary>
+        /// backlog=256KiB → 191 条 ≈ 256KiB；M2-21 起对端发送受 64KiB 信用约束，
+        /// 队列为本地应用慢消费的兜底（正常不触达满则断开路径），05 §2.3）。</summary>
         public Channel<byte[]> Inbound { get; } = Channel.CreateBounded<byte[]>(
             new BoundedChannelOptions(Math.Max(1, backlog / ChunkSize)) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
         public CancellationTokenSource Cts { get; } = new();
@@ -770,7 +764,8 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         entry.InLoop = SpliceInAsync(entry, entry.Cts.Token);
     }
 
-    /// <summary>本地→隧道：读本地 socket（≤ChunkSize）→ 配额 → DATA。配额满=暂停读（05 §2.3）。</summary>
+    /// <summary>本地→隧道：读本地 socket（≤ChunkSize）→ DATA。信用耗尽时 SendDataAsync 内部挂起
+    /// = 暂停读本地 socket（M2-21 WINDOW 背压，05 §2.3；对端消费回报到达恢复）。</summary>
     private async Task SpliceOutAsync(ChannelEntry entry, CancellationToken ct)
     {
         var buf = new byte[ChunkSize];
@@ -782,9 +777,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
                 if (n == 0) break; // 本地半关闭
                 var chunk = new byte[n];
                 buf.AsSpan(0, n).CopyTo(chunk);
-                await entry.OutQuota.WaitAsync(ct); // 背压：在飞槽位满则暂停读本地 socket
-                try { await entry.Session.SendDataAsync(entry.ChannelId, chunk, ct); }
-                finally { entry.OutQuota.Release(); }
+                await entry.Session.SendDataAsync(entry.ChannelId, chunk, ct);
                 if (entry.Owner is { } o)
                 {
                     Interlocked.Add(ref o.BytesUp, n); // 流量计数（成功发出后）
@@ -808,6 +801,9 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
             await foreach (var data in entry.Inbound.Reader.ReadAllAsync(ct))
             {
                 await entry.Socket.SendAsync(data, ct);
+                // 消费回报（M2-21，05 §2.3）：本地应用已吸收 → 恢复对端发送信用；失败静默（会话将断链）
+                try { await entry.Session.SendWindowCreditAsync(entry.ChannelId, data.Length, ct); }
+                catch { /* 会话关闭中 */ }
                 if (entry.Owner is { } o)
                 {
                     Interlocked.Add(ref o.BytesDown, data.Length);
@@ -824,6 +820,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
     {
         if (Interlocked.Exchange(ref entry.Closed, 1) == 1) return;
         _channels.TryRemove((entry.Session.SessionId, entry.ChannelId), out _);
+        entry.Session.RemoveChannelCredit(entry.ChannelId); // 摘信用账本（幂等；对端 CLOSE 路径双侧各摘一次）
         if (notifyPeer && !entry.Session.IsClosed)
         {
             try { await entry.Session.SendCloseAsync(entry.ChannelId); }
@@ -842,7 +839,6 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         try { if (entry.OutLoop is not null) await entry.OutLoop; } catch { }
         try { if (entry.InLoop is not null) await entry.InLoop; } catch { }
         entry.Cts.Dispose();
-        entry.OutQuota.Dispose();
     }
 
     public async ValueTask DisposeAsync()

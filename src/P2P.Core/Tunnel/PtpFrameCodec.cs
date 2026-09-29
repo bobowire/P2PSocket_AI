@@ -55,7 +55,7 @@ public static class PtpFrameCodec
         if (ver != PtpHeader.CurrentVer)
             throw new ProtocolException($"PTP 版本不支持：{ver}");
         var type = wire[1];
-        if (!PtpFrameType.IsHandshake(type) && type is < PtpFrameType.Open or > PtpFrameType.Frag)
+        if (!PtpFrameType.IsHandshake(type) && type is < PtpFrameType.Open or > PtpFrameType.RekeyAck)
             throw new ProtocolException($"未知 PTP 帧 type：0x{type:X2}");
         return new PtpHeader(ver, type,
             BinaryPrimitives.ReadUInt32LittleEndian(wire.Slice(2, 4)),

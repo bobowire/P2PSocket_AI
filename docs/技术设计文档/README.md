@@ -1,6 +1,6 @@
 # P2P 内网穿透产品 · 技术设计文档
 
-> 版本：v1.28　创建日期：2026-08-19　状态：待评审
+> 版本：v1.29　创建日期：2026-08-19　状态：待评审
 > 依据：[产品需求文档 PRD v0.6](../prd/README.md)（决策 D1~D21，D3 经 v0.4 修订；开放问题 OQ-1~OQ-19 已全部决议）
 > 定位：开发阶段的**施工图纸**——所有实现以本文档为准；与 PRD 冲突时以 PRD 为准并提出修订。
 
@@ -101,3 +101,4 @@
 | 2026-09-29 | v1.27 | M2-15 落地同步：05 §5 补 ControlClient 下行扩展实现注记（02 §2.4、TD-16）——DecodeKnown 扩容四条（0x41/0x75/0x14Ack/0x63Ack）；0x75 消费分工（newCapability 降级 ControlClient 内联[连接级]/映射失效 ClientRuntime MarkInvalid[预留 hook 启用]）；WsEventNames 补 device_list；0x14 新端点 POST /api/device/reset-remote-code 新码持久化+WS 提示 |
 | 2026-09-29 | v1.26 | M2-14 落地同步：05 §5 补 UpdateInfo 实现注记（FR-S-804/OQ-5、02 §7）——0x03 统一应答（update_* 四键 + maxProtocol 代码注入 + minProtocol clamp）；版本不符受理窗（5004 后 0x03 唯一受理应答后断/非 0x03 即断/75s 空闲兜底）；已建立会话 signed 受理连接保持 |
 | 2026-09-29 | v1.28 | M2-20 落地同步：02 §4.2 帧表 FRAG 行回填 **0x0B**（载荷 {dgramId, index, more, chunk}；明文超 1368B=1400−16头−16tag 按 1352B 切片，more=false 末片，channelId+dgramId 攒齐重组；阈值与承载类型解耦）+ 帧类型合法域上界扩至 0x0B（原 0x0A 会拒收 FRAG 断会话）；05 §2.4 附实现注记（分片/重组在 TunnelSession 帧层、per channel in-flight 8/驻留 10s；channel 双端同构 _udpChannels、访问侧端点表同锁上限检查；OPEN_FAIL 表项保留静默丢弃；空闲扫描 5s×60s 可配）+ §2.5 注 UDP 侧 L3 与 TCP 共用 TryResolveTarget |
+| 2026-09-29 | v1.29 | M2-21 落地同步：02 §4.2 帧表 REKEY_ACK 行回填 **0x0C**（与 REKEY 载荷同构 81B；旧发送钥封印；合法域上界扩至 0x0C）+ §4.4 补切换次序保证（响应方接收环先行→旧钥 ACK→发送钥交换；发起方解析 ACK→派生→双钥切换**内联接收循环**——修复"ACK 唤醒异步任务再轮换"竞态窗：响应方发 ACK 即换钥，紧跟的新代帧在旧环下不可解→SEC-12 误判断链，间歇复现于高频数据流+短轮换周期）；05 §2.3 附背压实现注记（CreditGate 账本在 TunnelSession、SpliceIn 每块消费即回 WINDOW、M1 槽位机制删除、256KiB 入站队列保留兜底）+ §4 附 M2-21 实现注记（TTL 仅发起方/静态钥透传/TriggerRekeyAsync 预留/失败仅日志下轮重试） |
