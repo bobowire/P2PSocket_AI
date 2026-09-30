@@ -742,10 +742,11 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         if (outcome.Ok && outcome.Session is not null && !outcome.Session.IsClosed)
         {
             _tunnels.Attach(outcome.Session);
-            // 承载绑定（02 §4.5）：中继承载（M2-18 回退成功）→ relay 态；直连 → direct
+            // 承载绑定（02 §4.5）：中继承载（M2-18 回退成功）→ relay 态；直连 → direct。
+            // 复用既有会话（M2-37 回切重打失败）不带新端点 → tunnel_reused（与映射 enable 复用同口径）
             var state = outcome.Session.ViaRelay ? MappingState.Relay : MappingState.Direct;
             var detail = outcome.Session.ViaRelay
-                ? $"relay={outcome.PeerEndpoint}"
+                ? outcome.PeerEndpoint is { } relayEp ? $"relay={relayEp}" : "tunnel_reused"
                 : $"local={outcome.LocalEndpoint} peer={outcome.PeerEndpoint}";
             foreach (var rt in targets)
                 if (rt.State is MappingState.Punching or MappingState.Failed)

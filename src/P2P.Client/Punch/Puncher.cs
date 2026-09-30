@@ -8,6 +8,8 @@
 //   连接胜出、其余关闭；N 以 0x71/0x70 Ack 服务端回填值为准（OQ-19）；
 // - M2-18 中继回退（02 §4.5/§6.1①）：打洞 Ack 后失败且回退资格合成真 → 0x74 分配 →
 //   JOIN（先 UDP 后 TCP）→ PTP 握手即经中继（加密与路径解耦：同一 TunnelSession 帧改发 relay 地址）；
+// - M2-37 回退复用（05 §4）：回切重打（M2-19 周期）失败再回退时，设备对已有活中继会话 →
+//   直接复用不重新 0x74（整体替换会经排水窗杀死传输中 channel，60s 周期下长传输必断）；
 // - 0x72 结果上报属 FR-C-404 → M2-22。
 using System.Net;
 using System.Net.Sockets;
@@ -100,6 +102,12 @@ public sealed class Puncher : IPuncher, IDisposable
     /// 服务端错误（5002/1001/4005）以 <see cref="ControlErrorException"/> 抛出。未装配=不尝试回退。</summary>
     public delegate Task<RelayGrant> RelayAllocator(Guid punchSessionId, CancellationToken ct);
 
+    /// <summary>设备对活中继会话查找缝（M2-37，05 §4）：宿主接 TunnelHost.Get（ViaRelay 且未关闭）。
+    /// 命中 → 回切重打失败后的回退直接复用该会话，不再 0x74 新分配整体替换（NET-75 排水
+    /// 会杀死传输中 channel——60s 回切周期下跨周期传输必断，公网实测 M2-37 缺陷）。
+    /// 未装配=不复用（单测缺省行为，与 M2-18 语义一致）。</summary>
+    public delegate TunnelSession? LiveRelaySessionLookup(Guid peerDeviceId);
+
     private readonly PunchRequestSender _sendPunchRequest;
     private readonly EndpointReporter _reportEndpoints;
     private readonly StunProbeDelegate _probe;
@@ -109,13 +117,14 @@ public sealed class Puncher : IPuncher, IDisposable
     private readonly PunchOptions _options;
     private readonly Func<Guid, bool> _relayFallback; // 本地设备级回退配置（缺省恒 false=默认关，PRD 06 §2）
     private readonly RelayAllocator? _relayAllocator; // 0x74 分配缝（缺省不回退，M2-18）
+    private readonly LiveRelaySessionLookup? _liveRelaySession; // 活中继会话复用缝（缺省不复用，M2-37）
     private int _disposed;
 
     public Puncher(PunchRequestSender sendPunchRequest, EndpointReporter reportEndpoints,
         StunProbeDelegate probe, EcKeyPair staticKey,
         ITunnelChannelHandler? handler = null, PunchOptions? options = null,
         StunTcpProbeDelegate? tcpProbe = null, Func<Guid, bool>? relayFallbackLookup = null,
-        RelayAllocator? relayAllocator = null)
+        RelayAllocator? relayAllocator = null, LiveRelaySessionLookup? liveRelaySessionLookup = null)
     {
         _sendPunchRequest = sendPunchRequest;
         _reportEndpoints = reportEndpoints;
@@ -126,6 +135,7 @@ public sealed class Puncher : IPuncher, IDisposable
         _options = options ?? new PunchOptions();
         _relayFallback = relayFallbackLookup ?? (_ => false); // 未装配=默认关闭（与 peers.json 无条目同口径）
         _relayAllocator = relayAllocator;
+        _liveRelaySession = liveRelaySessionLookup;
     }
 
     // ── 访问方 A（02 §5.1①④⑤ / §5.2①③④）──────────────────────────
@@ -309,14 +319,20 @@ public sealed class Puncher : IPuncher, IDisposable
                 : $"punch_error: {e.Message}",
             relayAllowed);
 
-    /// <summary>Ack 后失败统一出口：回退资格真且 0x74 分配缝已装 → 中继回退（M2-18）；否则纯失败。</summary>
+    /// <summary>Ack 后失败统一出口：回退资格真且 0x74 分配缝已装 → 中继回退（M2-18）；否则纯失败。
+    /// M2-37 回退复用：设备对已有活中继会话（回切周期重打失败场景）→ 直接复用该会话返回成功结果，
+    /// 不再 0x74 新分配——新会话整体替换旧会话走 NET-75 排水窗会杀死传输中 channel，60s 回切周期下
+    /// 跨周期传输必断；对端被动跟随 0x74（02 §6.1②），本侧不分配则对端同样不重建。
+    /// 复用会话此后真亡（keepalive 判死摘表，TunnelHost.OnSessionDisconnected）→ 查找落空自然回到
+    /// 全新分配路径。</summary>
     private async Task<PunchOutcome> FailOrFallbackAsync(PunchRequestAck ack, Guid targetDeviceId,
         Exception e, CancellationToken ct, bool relayAllowed)
     {
         var fail = FailAfterAck(ack.SessionId, targetDeviceId, e, ct, relayAllowed);
-        return relayAllowed && _relayAllocator is not null
-            ? await FallbackToRelayAsync(ack, fail, ct).ConfigureAwait(false)
-            : fail;
+        if (!relayAllowed || _relayAllocator is null) return fail;
+        if (_liveRelaySession?.Invoke(targetDeviceId) is { IsClosed: false } existing)
+            return new PunchOutcome(true, ack.SessionId, ack.Peer.DeviceId, existing, null, null, null);
+        return await FallbackToRelayAsync(ack, fail, ct).ConfigureAwait(false);
     }
 
     /// <summary>中继回退（02 §4.5 承载绑定/§6.1①，M2-18）：0x74 分配（打洞会话须在服务端台账 120s 内，

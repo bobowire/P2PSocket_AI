@@ -19,7 +19,8 @@ namespace P2P.IntegrationTests;
 /// <summary>
 /// 集成场景自动化 A-1~A-6 + M2-18 中继回退 + M2-19 中继回切直连（09 §2.3；M1-35 交付 A-1~A-4、
 /// M2-31 交付 A-5 TCP 打洞命中率矩阵、M2-18 交付承载绑定中继路径、M2-19 交付回切排水切换、
-/// M2-32 交付 A-6 中继回退场景：SymmetricRandom 必败/回退开关分岔/UdpBlocked TCP 承载变体）。
+/// M2-32 交付 A-6 中继回退场景：SymmetricRandom 必败/回退开关分岔/UdpBlocked TCP 承载变体，
+/// M2-37 交付回切重打失败的中继会话复用——整体替换回归断言：长传输跨周期不断）。
 /// 三进程 in-proc：服务端 + 双客户端（各自独立 baseDir；A-6 断言①②为三方）；网卡以 StubNicManager
 /// 替身、虚拟 IP 用 127.0.0.x 回环别名（A-4 隔离语义在 127.0.0.0/8 内等价成立）；A-3/A-4 打洞链路经
 /// NatSimulator（STUN 派生 :3478，TD-07），A-5 双端 SymmetricSequential 经 TcpNatSimulator（TD-17/21），
@@ -862,6 +863,103 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         // ⑤ 新连接走新直连路径完整往返
         await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(40 * 1024));
         await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(3 * 1024));
+    }
+
+    /// <summary>M2-37 回退复用（05 §4，公网实测缺陷收口）：SymmetricRandom 永败世界（重打每个周期必
+    /// miss）+ 回退开 → relay 态；回切周期缩短 3s 驱动周期性重打。断言：序号载荷流跨 ≥3 个回切周期
+    /// **连接不断**（修复前每周期 0x74 整体替换 → 排水窗杀 channel → 流断连；即公网"网页资源跨周期
+    /// 加载失败"），已收序号严格递增，映射保持 relay，echo 往返仍通。</summary>
+    [Fact]
+    public async Task M2_37_回切重打周期性失败_活中继会话复用_长传输跨周期不断()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone), tcpStub: false);
+        await StartTcpSimulatorAsync(mode: TcpNatMode.SymmetricRandom); // 随机端口：重打永败（≠M2-19 扰动一次性）
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("r37-a", IPAddress.Parse("127.0.0.4"), group, punchConcurrency: 2);
+        var b = await SeedClientAsync("r37-b", IPAddress.Parse("127.0.0.5"), group, punchConcurrency: 2);
+        var httpA = await StartRuntimeAsync(a, relayRetryInterval: TimeSpan.FromSeconds(3));
+        var httpB = await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+        await WaitPhaseAsync(httpB, "running");
+
+        var put = await PutAsync(httpA, $"/api/peers/{b.DeviceId}", new { relayFallback = true });
+        Assert.Equal(0, put.GetProperty("code").GetInt32());
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+
+        // ① 首打必败 + 回退开 → 中继承载（relay 态）
+        await WaitMappingStateAsync(httpA, "relay", seconds: 40);
+
+        // ② 序号载荷流（同 M2-19 ② 口径）：中继承载上 100ms 一笔递增序号，echo 回程持续收集
+        using var seqClient = new TcpClient();
+        await seqClient.ConnectAsync(IPAddress.Parse("127.0.0.4"), localPort);
+        var seqStream = seqClient.GetStream();
+        using var writeCts = new CancellationTokenSource(TimeSpan.FromSeconds(120)); // 全程防挂起（周期计数非定长）
+        var writeTask = Task.Run(async () =>
+        {
+            var seq = 0;
+            try
+            {
+                while (true)
+                {
+                    await seqStream.WriteAsync(Encoding.ASCII.GetBytes($"{seq}\n"), writeCts.Token);
+                    seq++;
+                    await Task.Delay(100, writeCts.Token);
+                }
+            }
+            catch { /* 收尾断连止 */ }
+        });
+        var readTask = Task.Run(async () =>
+        {
+            List<int> seqs = [];
+            var pending = new StringBuilder();
+            var buf = new byte[4096];
+            try
+            {
+                while (true)
+                {
+                    var n = await seqStream.ReadAsync(buf);
+                    if (n == 0) break; // 承载被替换排水 → 断连（修复前每周期必现）
+                    pending.Append(Encoding.ASCII.GetString(buf, 0, n));
+                    while (true)
+                    {
+                        var line = pending.ToString();
+                        var nl = line.IndexOf('\n');
+                        if (nl < 0) break;
+                        if (int.TryParse(line.AsSpan(0, nl), out var s)) seqs.Add(s);
+                        pending.Remove(0, nl + 1);
+                    }
+                }
+            }
+            catch { /* 连接重置 */ }
+            return seqs;
+        });
+
+        // ③ 等 ≥3 次打洞完成落库（首退 + ≥2 次回切周期重打；复用与整体替换两世界 0x72 均写 relay 行，
+        //    库行为即周期计数——固定睡眠会与 10s 打洞超时耦合漏判，负对照已证）：流须跨周期保持
+        await PollDbAsync(db => db.PunchStats.AsNoTracking()
+                .Count(p => p.InitiatorId == a.DeviceId && p.Result == "relay") >= 3
+            ? "done" : null, "回切周期重打完成 ≥3 次", seconds: 75);
+        Assert.False(readTask.IsCompleted, "序号流跨回切周期断连（整体替换回归，M2-37）");
+
+        // ④ 收尾断连取回序号：严格递增（无缺无重无乱序）；映射保持 relay 态未受周期重打扰动
+        writeCts.Cancel();
+        seqClient.Close();
+        var received = await readTask.WaitAsync(TimeSpan.FromSeconds(10));
+        await writeTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(received.Count >= 80, $"12s@100ms 应收 ≥80 笔，实收 {received.Count}（若大幅偏少先查回显）");
+        for (var i = 0; i < received.Count; i++)
+            Assert.Equal(i, received[i]);
+        await WaitMappingStateAsync(httpA, "relay", seconds: 5);
+        _output.WriteLine($"M2-37|relay-reuse-on-retry|received={received.Count}|state=relay");
+
+        // ⑤ 中继承载仍可用：echo 往返
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(40 * 1024));
     }
 
     // ── M2-32 场景 A-6（09 §2.2/§2.3、OQ-4/7）─────────────────────────

@@ -297,7 +297,11 @@ public sealed class ClientRuntime : IAsyncDisposable
             relayFallbackLookup: _peers.GetRelayFallback,
             // 0x74 中继分配缝（M2-18，02 §6.1①）：打洞 Ack 后失败且回退资格真 → 分配 → JOIN → 中继握手
             relayAllocator: (punchSessionId, token) =>
-                RelayClient.AllocateAsync(_control, punchSessionId, token)));
+                RelayClient.AllocateAsync(_control, punchSessionId, token),
+            // 活中继会话复用缝（M2-37，05 §4）：回切周期重打失败再回退时复用 TunnelHost 表内会话，
+            // 不再新分配整体替换（排水窗杀传输中 channel——公网实测 60s 周期下网页长传输必断）
+            liveRelaySessionLookup: peerId =>
+                _host.Get(peerId) is { ViaRelay: true, IsClosed: false } reused ? reused : null));
         Log?.Invoke($"打洞器已接线（STUN={stunEp?.ToString() ?? "解析失败"}，派生自控制地址 :3478，TD-07）");
     }
 
@@ -470,7 +474,9 @@ public sealed class ClientRuntime : IAsyncDisposable
     /// <summary>relay 态设备对周期重试直连：访问方（会话发起侧，IsInitiator）每周期发 0x73 请求协调
     /// （服务端台账/活中继解析 → 双端 0x73 通知；被邀请侧非发起方不触发，防双端同时重打）→
     /// 随后入队全新 0x70 打洞（端点须新鲜，两段式不变）。成功 → 直连会话替换中继（TunnelHost
-    /// 排水窗，NET-75）→ 映射 relay→direct；失败且回退资格真 → 再走中继回退（会话对整体替换）。</summary>
+    /// 排水窗，NET-75）→ 映射 relay→direct；失败且回退资格真 → 设备对活中继会话在位则直接复用
+    /// 保持现状（M2-37：不再 0x74 整体替换——排水窗杀传输中 channel，60s 周期下长传输必断），
+    /// 会话已亡才全新分配重建。</summary>
     private async Task RelayRetryLoopAsync(CancellationToken ct)
     {
         try
