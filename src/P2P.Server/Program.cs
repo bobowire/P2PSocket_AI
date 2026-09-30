@@ -7,6 +7,7 @@ using P2P.Core.Crypto;
 using P2P.Server;
 using P2P.Server.Data;
 using P2P.Server.Services;
+using P2P.Server.Web;
 using Serilog;
 using Serilog.Events;
 
@@ -149,6 +150,11 @@ builder.Services.AddSingleton(sp =>
     });
 });
 builder.Services.AddHostedService<ServerHostService>();
+// M3-01 服务端 Web 后台（04 §3、D11 仅本机监听）：注册于 ServerHostService 之后 ⇒
+// 注册序启动 Web 后起、逆序停止 Web 先停（在途管理请求排水先于控制通道/STUN/中继）；
+// 管理端点组 M3-02 起渐次挂载（认证骨架+静态托管本任务交付）
+builder.Services.AddSingleton<AdminSessionStore>();
+builder.Services.AddHostedService<ServerWebHostService>();
 
 await builder.Build().RunAsync();
 return 0;
