@@ -1,12 +1,14 @@
 <script setup lang="ts">
 // M1-32 设备发现（06 §2、FR-C-803）：可见设备表（在线/分组/远程码复制/开放网段）+
 // "建映射"快捷按钮带入远程码跳转；按分组筛选。
-// 设备级中继回退开关（/api/peers，D3 v0.4）→ M2；分组管理（/groups）→ M2。
+// M2-28：设备级中继回退开关（/api/peers，D3 v0.4——目标设备层级，不经控制协议）；
+// 列表刷新由 WS device_list 事件驱动（10s 轮询已移除，TD-16）。
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
-import { CodeText } from "@p2p/ui-shared";
+import { ElMessage } from "element-plus";
+import { ApiError, CodeText } from "@p2p/ui-shared";
 import PassiveBanner from "../components/PassiveBanner.vue";
-import { useDeviceStore } from "../stores/devices";
+import { useDeviceStore, type DeviceItem } from "../stores/devices";
 import { useSystemStore } from "../stores/system";
 
 const devices = useDeviceStore();
@@ -29,6 +31,17 @@ const isPassive = computed(() => system.device?.capability === "passive");
 
 function createMapping(remoteCode: string) {
   void router.push({ path: "/mappings", query: { remoteCode } });
+}
+
+/** 切换中继回退（PUT /api/peers；打洞失败时是否允许经服务端中继兜底）。 */
+async function toggleRelay(row: DeviceItem, value: string | number | boolean) {
+  const on = value === true;
+  try {
+    await devices.setPeer(row.deviceId, on);
+    ElMessage.success(`已${on ? "开启" : "关闭"}「${row.deviceName}」中继回退（对端打洞失败时${on ? "经中继转发" : "不再兜底"}）`);
+  } catch (e) {
+    ElMessage.error(e instanceof ApiError ? e.message : "请求失败");
+  }
 }
 
 onMounted(() => void devices.refresh());
@@ -117,6 +130,23 @@ onMounted(() => void devices.refresh());
             :key="s"
             class="seg"
           >{{ s }}</code>
+        </template>
+      </el-table-column>
+      <el-table-column width="100">
+        <template #header>
+          <el-tooltip
+            content="打洞失败时是否允许经服务端中继转发（目标设备级配置，D3）"
+            placement="top"
+          >
+            中继回退
+          </el-tooltip>
+        </template>
+        <template #default="{ row }">
+          <el-switch
+            :model-value="devices.peers[row.deviceId] ?? false"
+            data-testid="devices-relay-fallback"
+            @change="(v: string | number | boolean) => toggleRelay(row, v)"
+          />
         </template>
       </el-table-column>
       <el-table-column

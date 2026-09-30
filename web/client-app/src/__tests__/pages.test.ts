@@ -11,6 +11,7 @@ import Devices from "../pages/Devices.vue";
 import Groups from "../pages/Groups.vue";
 import Login from "../pages/Login.vue";
 import Mappings from "../pages/Mappings.vue";
+import Segments from "../pages/Segments.vue";
 import Settings from "../pages/Settings.vue";
 import Wizard from "../pages/Wizard.vue";
 import { routes } from "../router";
@@ -277,7 +278,7 @@ describe("Mappings 走查", () => {
     expect(wrapper.find('[data-testid="mapping-rate"]').exists()).toBe(false);
 
     const tags = wrapper.findAll('[data-testid="mapping-state"]');
-    expect(tags.map((t) => t.attributes("data-state"))).toEqual(["direct", "failed", "disabled"]);
+    expect(tags.map((t) => t.attributes("data-state"))).toEqual(["direct", "failed", "relay"]);
     expect(wrapper.findAll('[data-testid="mapping-retry"]').length).toBe(1); // 仅 failed
   });
 
@@ -357,20 +358,298 @@ describe("passive 模式走查（M1-33）", () => {
     expect(wrapper.find('[data-testid="mappings-new"]').attributes("disabled")).toBeUndefined();
   });
 
-  it("groups 占位：M2 写操作恒置灰；横幅随能力显隐", async () => {
-    const { wrapper, pinia } = await mountPage(Groups, undefined, "/groups");
+  it("groups passive：写操作全置灰 + 横幅；GET 2002 → 列表空态", async () => {
+    const state = createDefaultState();
+    state.capability = "passive";
+    const { wrapper } = await mountPage(Groups, state, "/groups");
 
     expect(wrapper.find('[data-testid="groups-join"]').attributes("disabled")).toBeDefined();
     expect(wrapper.find('[data-testid="groups-create"]').attributes("disabled")).toBeDefined();
-    expect(wrapper.text()).toContain("M2");
-
-    const system = useSystemStore(pinia);
-    system.device = { ...(system.device ?? { deviceId: "", remoteCode: "", virtualIp: "", username: null, capability: "normal" }), capability: "passive" };
-    await flushPromises();
     expect(wrapper.find('[data-testid="passive-banner"]').exists()).toBe(true);
-    system.device = { ...system.device!, capability: "normal" };
+    // /api/groups 属主动类：passive 2002 → 列表拉取失败保留空态（05 §8）
+    expect(wrapper.find('[data-testid="groups-table"]').text()).toContain("暂未加入任何分组");
+    // 只读刷新不受限
+    expect(wrapper.find('[data-testid="groups-refresh"]').attributes("disabled")).toBeUndefined();
+  });
+});
+
+// ── 分组全量（M2-28，替换 M1-33 占位）─────────────────────────────
+
+describe("Groups 全量走查（M2-28）", () => {
+  function normalState() {
+    const state = createDefaultState();
+    state.capability = "normal"; // 分组族主动类
+    return state;
+  }
+
+  /** 按文本定位确认弹窗并点确定（前序弹窗关闭动画未摘除时避免点错按钮）。 */
+  async function confirmBox(marker: string) {
+    await vi.waitFor(() => {
+      expect(
+        [...document.querySelectorAll(".el-message-box")].find((b) => b.textContent?.includes(marker)),
+      ).toBeDefined();
+    });
+    const hit = [...document.querySelectorAll(".el-message-box")]
+      .find((b) => b.textContent?.includes(marker))!;
+    (hit.querySelector(".el-message-box__btns .el-button--primary") as HTMLElement).click();
+  }
+
+  it("已加入列表（策略/成员数/角色）+ 审批队列聚合；批准 → 成员数+1 且队列清空", async () => {
+    const { wrapper } = await mountPage(Groups, normalState(), "/groups");
+
+    const table = wrapper.find('[data-testid="groups-table"]');
+    expect(table.text()).toContain("默认分组");
+    expect(table.text()).toContain("项目协作组");
+    expect(table.text()).toContain("自由加入");
+    expect(table.text()).toContain("需审批");
+    expect(table.text()).toContain("所有者");
+    expect(table.text()).toContain("成员");
+    // 仅所有者行有操作组按钮；成员行为退组
+    expect(wrapper.findAll('[data-testid="groups-dissolve"]').length).toBe(1);
+    expect(wrapper.findAll('[data-testid="groups-leave"]').length).toBe(1);
+
+    // 审批队列（所有者侧聚合）：申请设备 + 归属分组名
+    const requests = wrapper.find('[data-testid="groups-requests"]');
+    expect(requests.text()).toContain("家里 NAS");
+    expect(requests.text()).toContain("项目协作组");
+
+    // 批准 → memberCount 2→3、申请出队（卡片隐藏）
+    await wrapper.find('[data-testid="groups-approve"]').trigger("click");
     await flushPromises();
-    expect(wrapper.find('[data-testid="passive-banner"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="groups-requests-card"]').exists()).toBe(false);
+    const rows = wrapper.findAll('[data-testid="groups-table"] .el-table__row');
+    expect(rows[1].text()).toContain("项目协作组");
+    expect(rows[1].text()).toContain("3");
+  });
+
+  it("凭码入组：approval 组 3002 → 待审批提示 + 申请入队；free 组即时入组", async () => {
+    const state = normalState();
+    state.groups[0].inviteCode = "XY9876"; // 默认分组（free）
+    state.groups[1].inviteCode = "AB2345"; // 项目协作组（approval）
+    const { wrapper } = await mountPage(Groups, state, "/groups");
+
+    await wrapper.find('[data-testid="groups-join"]').trigger("click");
+    await flushPromises();
+    const dialog = document.querySelector('[data-testid="groups-join-dialog"]')!;
+    const input = dialog.querySelector("input[data-testid=groups-join-code]") as HTMLInputElement;
+
+    // approval 组：3002 原码透传 → 前端按"待审批"提示（非错误）
+    input.value = "AB2345";
+    input.dispatchEvent(new Event("input"));
+    await flushPromises();
+    (dialog.querySelector('[data-testid="groups-join-save"]') as HTMLElement).click();
+    await flushPromises();
+    expect(
+      [...document.querySelectorAll(".el-message")].some((m) => m.textContent?.includes("等待所有者")),
+    ).toBe(true);
+    // mock 侧申请入队（演示态与真实 0x51 建单同构）
+    expect(wrapper.findAll('[data-testid="groups-requests"] .el-table__row').length).toBe(2);
+
+    // free 组：即时入组（memberCount 3→4）
+    await wrapper.find('[data-testid="groups-join"]').trigger("click");
+    await flushPromises();
+    const dialog2 = document.querySelector('[data-testid="groups-join-dialog"]')!;
+    const input2 = dialog2.querySelector("input[data-testid=groups-join-code]") as HTMLInputElement;
+    input2.value = "XY9876";
+    input2.dispatchEvent(new Event("input"));
+    await flushPromises();
+    (dialog2.querySelector('[data-testid="groups-join-save"]') as HTMLElement).click();
+    await flushPromises();
+    const rows = wrapper.findAll('[data-testid="groups-table"] .el-table__row');
+    expect(rows[0].text()).toContain("4");
+  });
+
+  it("新建分组（准入策略单选）入列表", async () => {
+    const { wrapper } = await mountPage(Groups, normalState(), "/groups");
+
+    await wrapper.find('[data-testid="groups-create"]').trigger("click");
+    await flushPromises();
+    const dialog = document.querySelector('[data-testid="groups-create-dialog"]')!;
+    const name = dialog.querySelector("input[data-testid=groups-name]") as HTMLInputElement;
+    name.value = "走查新组";
+    name.dispatchEvent(new Event("input"));
+    await flushPromises();
+    (dialog.querySelector('[data-testid="groups-create-save"]') as HTMLElement).click();
+    await flushPromises();
+
+    const rows = wrapper.findAll('[data-testid="groups-table"] .el-table__row');
+    expect(rows.length).toBe(3);
+    expect(rows[2].text()).toContain("走查新组");
+    expect(rows[2].text()).toContain("所有者"); // 创建者即所有者
+  });
+
+  it("所有者操作：邀请码生成/撤销、编辑改名；成员行退组、所有者解散", async () => {
+    const { wrapper } = await mountPage(Groups, normalState(), "/groups");
+
+    // 邀请码：打开即生成（覆盖式），撤销后空态
+    await wrapper.find('[data-testid="groups-invite"]').trigger("click");
+    await flushPromises();
+    const dialog = document.querySelector('[data-testid="groups-invite-dialog"]')!;
+    expect(dialog.querySelector('[data-testid="groups-invite-code"]')?.textContent ?? "").toMatch(/[0-9A-Z]{6}/);
+    (dialog.querySelector('[data-testid="groups-invite-revoke"]') as HTMLElement).click();
+    await flushPromises();
+    expect(document.querySelector('[data-testid="groups-invite-code"]')).toBeNull();
+
+    // 编辑改名（0x55）
+    await wrapper.find('[data-testid="groups-edit"]').trigger("click");
+    await flushPromises();
+    const edit = document.querySelector('[data-testid="groups-edit-dialog"]')!;
+    const name = edit.querySelector("input[data-testid=groups-edit-name]") as HTMLInputElement;
+    name.value = "项目组-改";
+    name.dispatchEvent(new Event("input"));
+    await flushPromises();
+    (edit.querySelector('[data-testid="groups-edit-save"]') as HTMLElement).click();
+    await flushPromises();
+    expect(wrapper.find('[data-testid="groups-table"]').text()).toContain("项目组-改");
+
+    // 成员行退组（0x52）→ 行消失
+    await wrapper.find('[data-testid="groups-leave"]').trigger("click");
+    await confirmBox("退组确认");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="groups-table"]').text()).not.toContain("默认分组");
+
+    // 所有者解散（0x56）→ 行消失
+    await wrapper.find('[data-testid="groups-dissolve"]').trigger("click");
+    await confirmBox("解散确认");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="groups-table"]').text()).not.toContain("项目组-改");
+  });
+
+  it("成员管理（所有者）：同组可见设备列出（排除本机）+ 移出确认生效", async () => {
+    const state = normalState();
+    state.groups[0].isOwner = true; // 默认分组 → 所有者视角（成员：本机+办公室主机）
+    const { wrapper } = await mountPage(Groups, state, "/groups");
+
+    await wrapper.find('[data-testid="groups-members"]').trigger("click");
+    await flushPromises();
+    const dialog = document.querySelector('[data-testid="groups-members-dialog"]')!;
+    const table = dialog.querySelector('[data-testid="groups-members-table"]')!;
+    expect(table.textContent).toContain("办公室主机"); // 同组成员（可见设备维度）
+    expect(table.textContent).not.toContain("本机"); // 所有者自身不可移出
+
+    (dialog.querySelector('[data-testid="groups-kick"]') as HTMLElement).click();
+    await flushPromises();
+    (document.querySelector(".el-message-box__btns .el-button--primary") as HTMLElement).click();
+    await flushPromises();
+    expect(
+      document.querySelector('[data-testid="groups-members-table"]')?.textContent,
+    ).not.toContain("办公室主机");
+    // 主表成员数 3→2（0x57 联动）
+    expect(wrapper.findAll('[data-testid="groups-table"] .el-table__row')[0].text()).toContain("2");
+  });
+});
+
+// ── 网段（M2-28）──────────────────────────────────────────────────
+
+describe("Segments 走查（M2-28）", () => {
+  it("列表/新增（裸 IP 规范化 /32）/非法校验/移除确认 + 即时生效提示", async () => {
+    const { wrapper } = await mountPage(Segments, undefined, "/segments");
+
+    expect(wrapper.text()).toContain("变更即时生效");
+    expect(wrapper.find('[data-testid="segments-table"]').text()).toContain("192.168.1.0/24");
+
+    // 非法输入 → 规则拦截（与服务端 NormalizeCidr 同口径）
+    await wrapper.find('input[data-testid="segments-cidr"]').setValue("not-a-cidr");
+    await wrapper.find('[data-testid="segments-add"]').trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper.find(".el-form-item.is-error").text()).toContain("地址部分"));
+    expect(wrapper.findAll('[data-testid="segments-table"] .el-table__row').length).toBe(1);
+
+    // 裸 IP → 服务端规范化补 /32
+    await wrapper.find('input[data-testid="segments-cidr"]').setValue("10.0.0.5");
+    await wrapper.find('[data-testid="segments-add"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="segments-table"]').text()).toContain("10.0.0.5/32");
+
+    // 移除（confirm）→ 行数回落
+    await wrapper.findAll('[data-testid="segments-delete"]')[0].trigger("click");
+    await flushPromises();
+    (document.querySelector(".el-message-box__btns .el-button--primary") as HTMLElement).click();
+    await flushPromises();
+    expect(wrapper.findAll('[data-testid="segments-table"] .el-table__row').length).toBe(1);
+  });
+});
+
+// ── 设备中继回退 + 仪表盘远程码重置 + 映射 UDP/目标地址（M2-28）─────
+
+describe("Devices 中继回退开关（M2-28，D3 v0.4）", () => {
+  it("开关现值随列表拉取；切换 → PUT 生效", async () => {
+    const state = createDefaultState();
+    state.capability = "normal";
+    state.peers = { "22222222-2222-4222-8222-222222222222": true };
+    const { wrapper } = await mountPage(Devices, state, "/devices");
+
+    const switches = wrapper.findAllComponents({ name: "ElSwitch" });
+    expect(switches.length).toBe(3);
+    await vi.waitFor(() => expect(switches[1].props("modelValue")).toBe(true)); // 现值异步拉取
+
+    await switches[0].vm.$emit("change", true); // 开启本机回退
+    await flushPromises();
+    expect(switches[0].props("modelValue")).toBe(true);
+  });
+});
+
+describe("Dashboard 远程码重置（M2-28，0x14）", () => {
+  it("确认弹窗 → 新码展示 + 信息卡更新（本机管理类 passive 亦可达）", async () => {
+    const { wrapper } = await mountPage(Dashboard); // 默认 passive 演示态
+    await wrapper.find('[data-testid="dash-reset-code"]').trigger("click");
+    await flushPromises();
+    (document.querySelector(".el-message-box__btns .el-button--primary") as HTMLElement).click();
+
+    // 成功 alert 异步打开（mock 生成 6 位新码）；旧 confirm 关闭动画期间可能仍在 DOM——按文本定位
+    await vi.waitFor(() => {
+      expect(
+        [...document.querySelectorAll(".el-message-box")].find((b) =>
+          b.textContent?.match(/新远程码：[0-9a-z]{6}/)),
+      ).toBeDefined();
+    });
+    const hit = [...document.querySelectorAll(".el-message-box")]
+      .find((b) => b.textContent?.match(/新远程码：[0-9a-z]{6}/))!;
+    (hit.querySelector(".el-message-box__btns .el-button--primary") as HTMLElement).click();
+    await flushPromises();
+
+    // 信息卡远程码已换新（≠初始 a1b2c3）
+    expect(wrapper.find('[data-testid="dash-info"]').text()).not.toContain("a1b2c3");
+  });
+});
+
+describe("Mappings UDP 与目标地址（M2-28）", () => {
+  it("UDP 单选可选；目标地址 IP 模式 + 开放网段提示；保存带 targetAddr/proto", async () => {
+    const state = createDefaultState();
+    state.capability = "normal";
+    const { wrapper } = await mountPage(Mappings, state, "/mappings?remoteCode=d4e5f6");
+
+    await wrapper.find('[data-testid="mappings-new"]').trigger("click");
+    await flushPromises();
+    const drawer = document.querySelector('[data-testid="mapping-drawer"]')!;
+
+    // UDP 不再禁用（M2-20 引擎已落地）；抽屉 radioGroup 经组件树定位（teleport 不影响）
+    const radios = wrapper.findAllComponents({ name: "ElRadioGroup" });
+    expect(radios.length).toBeGreaterThanOrEqual(2); // 协议 + 目标模式
+    await radios[0].vm.$emit("update:modelValue", "udp");
+    await radios[1].vm.$emit("update:modelValue", "ip");
+    await flushPromises();
+
+    const addr = drawer.querySelector("input[data-testid=mapping-target-addr]") as HTMLInputElement;
+    expect(addr).not.toBeNull();
+    addr.value = "192.168.1.50";
+    addr.dispatchEvent(new Event("input"));
+    await flushPromises();
+
+    // 白名单网段提示：d4e5f6=办公室主机 开放 192.168.1.0/24
+    await vi.waitFor(() =>
+      expect(drawer.querySelector('[data-testid="mapping-seg-hint"]')?.textContent).toContain("192.168.1.0/24"));
+
+    const nameInput = drawer.querySelector("input[data-testid=mapping-name]") as HTMLInputElement;
+    nameInput.value = "走查 UDP 映射";
+    nameInput.dispatchEvent(new Event("input"));
+    await flushPromises();
+    (drawer.querySelector('[data-testid="mapping-save"]') as HTMLElement).click();
+    await flushPromises();
+
+    const table = wrapper.find('[data-testid="mappings-table"]').text();
+    expect(table).toContain("UDP :8080"); // proto=udp（本地监听列）
+    expect(table).toContain("192.168.1.50:80"); // targetAddr=IP（目标列）
   });
 });
 

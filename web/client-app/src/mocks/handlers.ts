@@ -141,14 +141,14 @@ export function createDefaultState(): MockState {
       },
       {
         mappingId: "66666666-6666-4666-8666-666666666666",
-        name: "备用",
-        localPort: 19090,
-        proto: "tcp",
+        name: "办公室 DNS",
+        localPort: 15353,
+        proto: "udp",
         targetRemoteCode: "d4e5f6",
         targetAddr: "self",
-        targetPort: 9090,
-        enabled: false,
-        state: "disabled",
+        targetPort: 53,
+        enabled: true,
+        state: "relay",
         detail: null,
       },
     ],
@@ -308,13 +308,13 @@ export function createHandlers(state: MockState = createDefaultState()) {
     http.post("*/api/mappings", async ({ request }) => {
       const body = (await request.json()) as {
         name?: string; localPort?: number; proto?: string;
-        targetRemoteCode?: string; targetPort?: number;
+        targetRemoteCode?: string; targetAddr?: string; targetPort?: number;
       };
       if (!body.name?.trim() || !body.localPort || !body.targetRemoteCode || !body.targetPort)
         return fail(1001, "bad_fields");
       if (!state.devices.some((d) => d.remoteCode === body.targetRemoteCode))
         return fail(4003, "remote_code_invalid");
-      if (state.mappings.some((m) => m.proto === body.proto && m.localPort === body.localPort))
+      if (state.mappings.some((m) => m.proto === (body.proto ?? "tcp") && m.localPort === body.localPort))
         return fail(1003, "port_conflict");
       const m: MockMapping = {
         mappingId: crypto.randomUUID(),
@@ -322,7 +322,7 @@ export function createHandlers(state: MockState = createDefaultState()) {
         localPort: body.localPort,
         proto: body.proto ?? "tcp",
         targetRemoteCode: body.targetRemoteCode,
-        targetAddr: "self",
+        targetAddr: body.targetAddr ?? "self",
         targetPort: body.targetPort,
         enabled: false,
         state: "disabled",
@@ -335,13 +335,16 @@ export function createHandlers(state: MockState = createDefaultState()) {
       const m = state.mappings.find((x) => x.mappingId === params.id);
       if (!m) return fail(1002, "not_found");
       const body = (await request.json()) as {
-        name?: string; localPort?: number; targetRemoteCode?: string; targetPort?: number;
+        name?: string; localPort?: number; proto?: string;
+        targetRemoteCode?: string; targetAddr?: string; targetPort?: number;
       };
       if (m.enabled && body.localPort !== m.localPort) return fail(1003, "port_change_requires_disabled");
       Object.assign(m, {
         name: body.name ?? m.name,
         localPort: body.localPort ?? m.localPort,
+        proto: body.proto ?? m.proto,
         targetRemoteCode: body.targetRemoteCode ?? m.targetRemoteCode,
+        targetAddr: body.targetAddr ?? m.targetAddr,
         targetPort: body.targetPort ?? m.targetPort,
       });
       return ok(m);
@@ -468,9 +471,9 @@ export function createHandlers(state: MockState = createDefaultState()) {
       return ok({ groupId: g.groupId });
     }),
     http.post("*/api/groups/:id/leave", ({ params }) => {
-      const g = state.groups.find((x) => x.groupId === params.id);
-      if (!g || g.memberCount <= 0) return fail(1001, "not_member");
-      g.memberCount--;
+      const i = state.groups.findIndex((x) => x.groupId === params.id);
+      if (i < 0 || state.groups[i].memberCount <= 0) return fail(1001, "not_member");
+      state.groups.splice(i, 1); // 退组后不再出现在 0x42 已加入列表（04 §2.4 语义）
       return ok(null);
     }),
     http.put("*/api/groups/:id", async ({ request, params }) => {
@@ -534,9 +537,12 @@ export function createHandlers(state: MockState = createDefaultState()) {
     http.get("*/api/lan-segments", () => ok(state.lanSegments)),
     http.post("*/api/lan-segments", async ({ request }) => {
       const { cidr } = (await request.json()) as { cidr?: string };
-      if (!cidr || !/^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(cidr.trim()))
+      // 规范化镜像服务端 NormalizeCidr 三步：显式前缀原样、裸 IPv4 补 /32、非法 1001
+      const m = cidr?.trim().match(/^(\d{1,3}(?:\.\d{1,3}){3})(?:\/(\d{1,2}))?$/);
+      if (!m || m[1].split(".").some((o) => Number(o) > 255) || Number(m[2]) > 32)
         return fail(1001, "bad_cidr");
-      const seg: MockLanSegment = { segmentId: crypto.randomUUID(), cidr: cidr.trim(), enabled: true };
+      const normalized = m[2] !== undefined ? `${m[1]}/${m[2]}` : `${m[1]}/32`;
+      const seg: MockLanSegment = { segmentId: crypto.randomUUID(), cidr: normalized, enabled: true };
       state.lanSegments.push(seg);
       return ok(seg);
     }),

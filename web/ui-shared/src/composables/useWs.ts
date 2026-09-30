@@ -16,6 +16,8 @@ export interface WsOptions {
   onStats?: (e: { id: string; rateUp: number; rateDown: number; path: "direct" | "relay" }) => void;
   /** 状态类 → 资源 refetch（100ms debounce；TD-16）。 */
   refetch?: (resource: RefetchResource) => void;
+  /** 状态类事件旁路（M2-28：mapping_state invalid → 全局失效提示；不影响 refetch 去抖）。 */
+  onState?: (e: { ev: string } & Record<string, unknown>) => void;
   /** 全量 resync（onOpen/visibilitychange；丢失事件兜底）。 */
   onResync?: () => void;
   /** 测试注入替身 WebSocket（默认原生）。 */
@@ -102,8 +104,10 @@ export function useWs(options: WsOptions) {
       return; // 非 JSON 帧丢弃（提示通道，真相在 REST）
     }
     const resource = STATE_EVENT_RESOURCES[evt.ev ?? ""];
-    if (resource !== undefined) scheduleRefetch(resource);
-    else if (evt.ev === "mapping_stats") {
+    if (resource !== undefined) {
+      scheduleRefetch(resource);
+      options.onState?.(evt as { ev: string } & Record<string, unknown>);
+    } else if (evt.ev === "mapping_stats") {
       const m = evt as { id: string; rateUp: number; rateDown: number; path: "direct" | "relay" };
       options.onStats?.({ id: m.id, rateUp: m.rateUp, rateDown: m.rateDown, path: m.path });
     }

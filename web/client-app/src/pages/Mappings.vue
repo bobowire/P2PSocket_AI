@@ -2,6 +2,8 @@
 // M1-32 端口映射（06 §2、FR-C-804）：列表（状态 Tag、实时速率列、路径列）+
 // 新建/编辑抽屉（端口 1~65535、远程码 6 位校验——04 §2.5 与服务端同口径）+ 启停/重试/删除。
 // 实时速率来自 WS mapping_stats 直写 store（TD-16）；重试仅 failed 态提供（04 §2.5 /retry）。
+// M2-28：UDP 协议单选启用（M2-20 引擎落地）；目标地址 self/IP 切换 + 开放网段提示
+// （段外 4002 服务端 L3 白名单前置提示）；relay/invalid 状态 Tag（StatusTag 已含）。
 import { computed, onMounted, reactive, ref } from "vue";
 import { useRoute } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -9,27 +11,37 @@ import type { FormInstance } from "element-plus";
 import { StatusTag, ApiError } from "@p2p/ui-shared";
 import PassiveBanner from "../components/PassiveBanner.vue";
 import { useMappingStore, type MappingFormInput } from "../stores/mappings";
+import { useDeviceStore } from "../stores/devices";
 import { useSystemStore } from "../stores/system";
-import { mappingFormRules as rules } from "./mappingFormRules";
+import { makeMappingRules } from "./mappingFormRules";
 
 const mappings = useMappingStore();
 const system = useSystemStore();
+const devices = useDeviceStore();
 const route = useRoute();
 
 const drawer = ref(false);
 const busy = ref(false);
 const formRef = ref<FormInstance>();
-const form = reactive<MappingFormInput>({
+const form = reactive<MappingFormInput & { targetMode: "self" | "ip" }>({
   id: null,
   name: "",
   localPort: 8080,
   proto: "tcp",
   targetRemoteCode: "",
+  targetAddr: "",
+  targetMode: "self",
   targetPort: 80,
 });
 
 const isPassive = computed(() => system.device?.capability === "passive");
 const editing = computed(() => form.id !== null);
+/** targetAddr 必填性随模式联动（self 恒放行——服务端语义，04 §2.5）。 */
+const rules = makeMappingRules(() => form.targetMode === "ip");
+
+/** 目标设备现值（远程码匹配）——开放网段提示数据源（/api/devices，04 §2.4）。 */
+const targetDevice = computed(() =>
+  devices.items.find((d) => d.remoteCode === form.targetRemoteCode.trim()));
 
 function humanRate(n: number): string {
   if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MiB/s`;
@@ -48,6 +60,8 @@ function openCreate() {
     localPort: 8080,
     proto: "tcp",
     targetRemoteCode: typeof route.query.remoteCode === "string" ? route.query.remoteCode : "",
+    targetAddr: "",
+    targetMode: "self",
     targetPort: 80,
   });
   drawer.value = true;
@@ -62,6 +76,8 @@ function openEdit(id: string) {
     localPort: m.localPort,
     proto: m.proto,
     targetRemoteCode: m.targetRemoteCode,
+    targetAddr: m.targetAddr === "self" ? "" : m.targetAddr,
+    targetMode: m.targetAddr === "self" ? "self" : "ip",
     targetPort: m.targetPort,
   });
   drawer.value = true;
@@ -70,9 +86,13 @@ function openEdit(id: string) {
 async function save() {
   if (!(await formRef.value?.validate().catch(() => false))) return;
   busy.value = true;
+  const payload: MappingFormInput = {
+    ...form,
+    targetAddr: form.targetMode === "ip" ? form.targetAddr.trim() : "self",
+  };
   try {
-    if (editing.value) await mappings.update(form);
-    else await mappings.create(form);
+    if (editing.value) await mappings.update(payload);
+    else await mappings.create(payload);
     drawer.value = false;
     ElMessage.success(editing.value ? "已保存" : "已创建（默认停用，启用后开始打洞）");
   } catch (e) {
@@ -114,7 +134,10 @@ async function remove(id: string, name: string) {
   }
 }
 
-onMounted(() => void mappings.refresh());
+onMounted(() => {
+  void mappings.refresh();
+  void devices.refresh(); // 目标设备开放网段提示（失败静默）
+});
 </script>
 
 <template>
@@ -303,16 +326,15 @@ onMounted(() => void mappings.refresh());
           />
         </el-form-item>
         <el-form-item label="协议">
-          <el-radio-group v-model="form.proto">
+          <el-radio-group
+            v-model="form.proto"
+            data-testid="mapping-proto"
+          >
             <el-radio value="tcp">
               TCP
             </el-radio>
-            <el-radio
-              value="udp"
-              disabled
-              title="UDP 映射属 M2（TD-15）"
-            >
-              UDP（M2）
+            <el-radio value="udp">
+              UDP
             </el-radio>
           </el-radio-group>
         </el-form-item>
@@ -327,11 +349,37 @@ onMounted(() => void mappings.refresh());
           />
         </el-form-item>
         <el-form-item label="目标地址">
+          <el-radio-group
+            v-model="form.targetMode"
+            data-testid="mapping-target-mode"
+          >
+            <el-radio value="self">
+              self（目标机本机）
+            </el-radio>
+            <el-radio value="ip">
+              IP 地址
+            </el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item
+          v-if="form.targetMode === 'ip'"
+          label=" "
+          prop="targetAddr"
+        >
           <el-input
-            model-value="self（目标机本机）"
-            disabled
-            title="M1 仅支持 self（目标机本机）；任意目标地址属 M2（4002 校验开放网段）"
+            v-model="form.targetAddr"
+            placeholder="目标机可达的内网地址（如 192.168.1.50）"
+            data-testid="mapping-target-addr"
           />
+          <p
+            v-if="targetDevice"
+            class="muted seg-hint"
+            data-testid="mapping-seg-hint"
+          >
+            对端「{{ targetDevice.deviceName }}」开放网段：{{
+              targetDevice.lanSegments.length ? targetDevice.lanSegments.join("、") : "无（仅 self 放行）"
+            }}——段外地址将被拒绝（4002）
+          </p>
         </el-form-item>
         <el-form-item
           label="目标端口"
@@ -370,6 +418,7 @@ onMounted(() => void mappings.refresh());
 .toolbar h2 { margin: 0; font-size: 16px; }
 .rate { font-size: 13px; white-space: nowrap; }
 .muted { color: var(--el-text-color-secondary); font-size: 12px; }
+.seg-hint { margin: 6px 0 0; width: 100%; }
 .detail-mark {
   display: inline-block;
   margin-left: 4px;

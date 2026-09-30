@@ -100,6 +100,20 @@ describe("useWs TD-16 事件分级", () => {
     expect(t.refetched).toEqual(["auth", "devices"]);
   });
 
+  it("onState 状态类旁路（M2-28：mapping_state invalid 全局提示）：事件透传且不影响 refetch", () => {
+    const states: object[] = [];
+    const t = setup({ onState: (e) => states.push(e) });
+    t.current().serverOpen();
+    t.refetched.length = 0;
+    t.current().serverEvent({ ev: "mapping_state", id: "m1", state: "invalid", reason: "lan_segment_removed" });
+    expect(states).toEqual([{ ev: "mapping_state", id: "m1", state: "invalid", reason: "lan_segment_removed" }]);
+    vi.advanceTimersByTime(REFETCH_DEBOUNCE_MS + 10);
+    expect(t.refetched).toEqual(["mappings"]); // refetch 照常
+    // 数值类不旁路
+    t.current().serverEvent({ ev: "mapping_stats", id: "m1", rateUp: 1, rateDown: 1, path: "direct" });
+    expect(states).toHaveLength(1);
+  });
+
   it("非 JSON 帧丢弃（提示通道容错）", () => {
     const t = setup();
     t.current().serverOpen();

@@ -18,6 +18,8 @@ export interface MappingFormInput {
   localPort: number;
   proto: string;
   targetRemoteCode: string;
+  /** "self" 或目标 IP（M2-28：白名单校验在服务端 L3，前端仅格式前置）；缺省 self。 */
+  targetAddr: string;
   targetPort: number;
 }
 
@@ -67,6 +69,7 @@ export const useMappingStore = defineStore("mappings", () => {
       localPort: input.localPort,
       proto: input.proto,
       targetRemoteCode: input.targetRemoteCode,
+      targetAddr: input.targetAddr,
       targetPort: input.targetPort,
     });
     await refresh();
@@ -78,6 +81,7 @@ export const useMappingStore = defineStore("mappings", () => {
       localPort: input.localPort,
       proto: input.proto,
       targetRemoteCode: input.targetRemoteCode,
+      targetAddr: input.targetAddr,
       targetPort: input.targetPort,
     });
     await refresh();

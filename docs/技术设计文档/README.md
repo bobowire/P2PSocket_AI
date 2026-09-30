@@ -1,6 +1,6 @@
 # P2P 内网穿透产品 · 技术设计文档
 
-> 版本：v1.33　创建日期：2026-08-19　状态：待评审
+> 版本：v1.34　创建日期：2026-08-19　状态：待评审
 > 依据：[产品需求文档 PRD v0.6](../prd/README.md)（决策 D1~D21，D3 经 v0.4 修订；开放问题 OQ-1~OQ-19 已全部决议）
 > 定位：开发阶段的**施工图纸**——所有实现以本文档为准；与 PRD 冲突时以 PRD 为准并提出修订。
 
@@ -106,3 +106,4 @@
 | 2026-09-29 | v1.31 | M2-25 落地同步：05 §1.2 卸载注记（INicManager.RemoveLeftoverAsync 遗留适配器移除[Open→WintunDeleteAdapter forceCloseSessions]、ClientUninstaller `--uninstall` CLI 编排[可选 0x12 解绑确认=发送后观察连接离开 Established、配置 --keep-config 默认/--purge]、Wintun.dll 与映射监听释放的职责边界[安装器/A-11、服务停止]）+ §1.3 Linux 卸载（ip link delete；RTM_DELLINK A-11 补强） |
 | 2026-09-30 | v1.32 | M2-26 落地同步：05 §5 补客户端升级引导实现注记（拒答窗口消费 HandleVersionRejectedAsync[无签名 0x03→缓存 LastUpgradeInfo+UpgradeRequired 事件→仍抛保持退避重连]、浏览器引导沿 M1-24 机制[仅 Interactive+每进程一次去重]、UpgradeApi GET /api/upgrade/info 现取/缓存回落[版本不符恰是未建立态]、WsEventNames upgrade_required 事件+UpgradeInfoView 入 export-ts 清单[生成物再生成随 M2-27]） |
 | 2026-09-30 | v1.33 | M2-27 落地同步：02 §2.4 消息表加 **0x42 GroupList** 定案行（本地 /api/groups 聚合的协议侧缺口——0x40 仅设备维度无 groupId/owner；无载荷→items[]{groupId,groupName,policy,isOwner,memberCount}，与 0x40 同口径免登录、仅 approved 成员行，02 §7 加法演进）+ §2.5 主动类清单补 0x42（`0x40/0x42/0x50~0x57`）；05 §5 六条实现注记（0x42 四处登记[ExpectedMsgType/ExpectedTypeKnown+DecodeTyped/IsActiveClass 双侧]、0x23 服务端 handler 补全[原白名单缺位=静默丢弃→10s 超时 5003 的根因链]、groups 12 端点聚合=1×0x42+n×0x53 List、lan-segments 镜像即数据源[0x63 无 list 消息，LanSegmentsStore.Entries() 读口+CIDR 规范化镜像服务端三步]、logs Serilog 文本解析[行前缀正则/续行归前条/newest-first/5 万条封顶]、export-ts 43 端点再生成+generated.test.ts 全量对齐+MSW 全端点同步） |
+| 2026-09-30 | v1.34 | M2-28 落地同步：06 §2/§4 前端注记（passive 边界精确化——/segments /settings 与仪表盘远程码重置属本机管理类 passive 亦可达[0x63]；useWs 新增 onState 旁路——状态类事件在 refetch 之外透传原始事件对象仅作提示不改 store，mapping_state invalid→全局失效提示[0x75 链]；设备列表 10s 轮询移除改 device_list 事件驱动+onOpen/visibilitychange resync 兜底）；无文档形状变更（§2 页面表 M2-27 已列全，页面实现照表落地） |
