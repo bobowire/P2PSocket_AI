@@ -24,7 +24,8 @@ public sealed class ServerWebHostService(
     TimeProvider time,
     AdminSessionStore sessions,
     IDbContextFactory<AppDbContext> dbFactory,
-    AuditLogger audit) : IHostedService
+    AuditLogger audit,
+    AdminService admin) : IHostedService
 {
     private WebApplication? _app;
 
@@ -33,7 +34,7 @@ public sealed class ServerWebHostService(
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        _app = Build(options, time, sessions, dbFactory, audit, WebRootOverride);
+        _app = Build(options, time, sessions, dbFactory, audit, admin, WebRootOverride);
         await _app.StartAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -45,12 +46,12 @@ public sealed class ServerWebHostService(
     /// <summary>装配（internal 供集成测试直调复刻生产拓扑）。</summary>
     internal static WebApplication Build(ServerOptions options, TimeProvider time,
         AdminSessionStore sessions, IDbContextFactory<AppDbContext> dbFactory, AuditLogger audit,
-        string? webRootOverride = null)
+        AdminService admin, string? webRootOverride = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseUrls($"http://{options.Listen.WebBind}:{options.Listen.Web}");
         builder.Logging.ClearProviders(); // Serilog 在主 host；Web 容器不重复配（访问日志无需求）
-        // 主容器单例实例注入（生命周期跟随主 host；M3-03 起管理端点组按需扩）
+        // 主容器单例实例注入（生命周期跟随主 host；管理端点组按需扩）
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(time);
         builder.Services.AddSingleton(sessions);
@@ -58,6 +59,8 @@ public sealed class ServerWebHostService(
 
         // M3-02 管理员会话与账号（认证中间件白名单 /api/auth/login 的端点本体在此挂载）
         new AdminAuthApi(dbFactory, audit).Map(app, sessions);
+        // M3-03 用户管理（进程内直调 AdminService：踢线/降级/0x75 即时生效）
+        new AdminUsersApi(dbFactory, admin, audit).Map(app);
 
         // 认证骨架（04 §3.1/§3.2、07 §8）：/api/* 须携带有效会话 Cookie，否则 401 {code:2001}；
         // /api/auth/login 白名单（登录端点 M3-02 挂载）。静态页（SPA 外壳）不经认证——前端路由接管。
