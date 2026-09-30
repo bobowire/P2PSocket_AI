@@ -34,7 +34,8 @@ public sealed class AdminAuthTests : IAsyncLifetime
         };
         var registry = new DeviceRegistry(); // 本任务无在线设备（纯账号链）
         _web = new ServerWebHostService(options, _time, new AdminSessionStore(_time), factory,
-            new AuditLogger(factory, _time), new AdminService(factory, registry, new AuditLogger(factory)), registry)
+            new AuditLogger(factory, _time), new AdminService(factory, registry, new AuditLogger(factory)), registry,
+            new GroupService(factory, registry, new AuditLogger(factory)))
         {
             WebRootOverride = Path.Combine(Path.GetTempPath(), $"p2p-no-webroot-{Guid.NewGuid():N}"),
         };

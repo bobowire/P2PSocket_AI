@@ -52,7 +52,8 @@ public sealed class ServerWebHostTests : IAsyncLifetime
         var factory = new StubFactory(() => new AppDbContext(
             new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options));
         var web = new ServerWebHostService(options, TimeProvider.System, sessions, factory,
-            new AuditLogger(factory), new AdminService(factory, _registry, new AuditLogger(factory)), _registry)
+            new AuditLogger(factory), new AdminService(factory, _registry, new AuditLogger(factory)), _registry,
+            new GroupService(factory, _registry, new AuditLogger(factory)))
         {
             WebRootOverride = webRoot ?? Path.Combine(Path.GetTempPath(), $"p2p-no-webroot-{Guid.NewGuid():N}"),
         };

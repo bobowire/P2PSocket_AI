@@ -26,7 +26,8 @@ public sealed class ServerWebHostService(
     IDbContextFactory<AppDbContext> dbFactory,
     AuditLogger audit,
     AdminService admin,
-    DeviceRegistry registry) : IHostedService
+    DeviceRegistry registry,
+    GroupService groups) : IHostedService
 {
     private WebApplication? _app;
 
@@ -35,7 +36,7 @@ public sealed class ServerWebHostService(
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        _app = Build(options, time, sessions, dbFactory, audit, admin, registry, WebRootOverride);
+        _app = Build(options, time, sessions, dbFactory, audit, admin, registry, groups, WebRootOverride);
         await _app.StartAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -47,7 +48,7 @@ public sealed class ServerWebHostService(
     /// <summary>装配（internal 供集成测试直调复刻生产拓扑）。</summary>
     internal static WebApplication Build(ServerOptions options, TimeProvider time,
         AdminSessionStore sessions, IDbContextFactory<AppDbContext> dbFactory, AuditLogger audit,
-        AdminService admin, DeviceRegistry registry, string? webRootOverride = null)
+        AdminService admin, DeviceRegistry registry, GroupService groups, string? webRootOverride = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseUrls($"http://{options.Listen.WebBind}:{options.Listen.Web}");
@@ -64,6 +65,8 @@ public sealed class ServerWebHostService(
         new AdminUsersApi(dbFactory, admin, audit).Map(app);
         // M3-04 设备管理（列表在线态取 registry；动作全转调 AdminService）
         new AdminDevicesApi(dbFactory, registry, admin).Map(app);
+        // M3-05 分组与审批（审批走 GroupService 共享核=与 0x53 同一执行链）
+        new AdminGroupsApi(dbFactory, groups, audit).Map(app);
 
         // 认证骨架（04 §3.1/§3.2、07 §8）：/api/* 须携带有效会话 Cookie，否则 401 {code:2001}；
         // /api/auth/login 白名单（登录端点 M3-02 挂载）。静态页（SPA 外壳）不经认证——前端路由接管。

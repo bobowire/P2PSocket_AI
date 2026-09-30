@@ -41,10 +41,11 @@ public sealed class AdminUsersApiTests : IAsyncLifetime
         _relay = new RelayService(factory, _registry, _signaling.ResolveRelayPeers);
         var invalidation = new InvalidationPusher(factory, _registry);
         var pusher = new DeviceListPusher(factory, _registry);
+        var groupService = new GroupService(factory, _registry, audit, pusher, invalidation);
         var router = new ControlMessageRouter(
             new RegistrationService(factory, _registry, audit, invalidation: invalidation, listPusher: pusher),
             new UserService(factory, audit, invalidation: invalidation),
-            new GroupService(factory, _registry, audit, pusher, invalidation),
+            groupService,
             _signaling,
             new MappingService(factory, audit),
             _relay,
@@ -57,7 +58,7 @@ public sealed class AdminUsersApiTests : IAsyncLifetime
 
         var options = new ServerOptions { Listen = { Web = Random.Shared.Next(21000, 24000) } };
         _web = new ServerWebHostService(options, TimeProvider.System, new AdminSessionStore(TimeProvider.System),
-            factory, audit, _admin, _registry)
+            factory, audit, _admin, _registry, groupService)
         {
             WebRootOverride = Path.Combine(Path.GetTempPath(), $"p2p-no-webroot-{Guid.NewGuid():N}"),
         };

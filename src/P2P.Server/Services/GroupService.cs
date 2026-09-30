@@ -229,7 +229,7 @@ public sealed class GroupService(
             return;
         }
         await using var db = await dbFactory.CreateDbContextAsync();
-        var request = await db.JoinRequests.SingleOrDefaultAsync(r =>
+        var request = await db.JoinRequests.AsNoTracking().SingleOrDefaultAsync(r =>
             r.Id == requestId && r.Status == "pending");
         if (request is null) // 不存在或已处理：诚实 Ok=false（防客户端无限等待）
         {
@@ -249,10 +249,32 @@ public sealed class GroupService(
             return;
         }
 
-        var approved = msg.Action == JoinRequestAction.Approve;
-        request.Status = approved ? "approved" : "rejected";
+        var decision = await ApplyJoinDecisionAsync(requestId, msg.Action == JoinRequestAction.Approve,
+            session.OwnerUserId, session.DeviceId);
+        // 帧序契约：Ack 先于 0x41 推送（客户端读 Ack 的 skipping 助手会消费掉先到的推送帧）
+        await session.SendAsync(new JoinRequestsAck(session.NextSeq(), session.ServerTimestamp(),
+            MsgType.JoinRequests, decision is not null));
+        if (decision is not null && msg.Action == JoinRequestAction.Approve)
+            await NotifyJoinApprovalAsync(decision);
+    }
+
+    /// <summary>审批决议结果（GroupId/DeviceId 供 0x41 推送侧使用）。</summary>
+    private sealed record JoinDecision(Guid GroupId, Guid DeviceId);
+
+    /// <summary>审批决议共享核（0x53 会话路径与 M3-05 Web 管理路径同语义；FR-S-305/822）：
+    /// pending 定位 → 置态 → 批准入组（已成员不重复插行）→ 审计（actor=操作者，Web 侧 admin）。
+    /// 返回 null=单不存在或已处理（诚实应答不抛错）。0x41 推送留在核外：0x53 路径须 Ack 先于推送。</summary>
+    private async Task<JoinDecision?> ApplyJoinDecisionAsync(Guid requestId, bool approve,
+        Guid? actorUserId = null, Guid? actorDeviceId = null)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync();
+        var request = await db.JoinRequests.SingleOrDefaultAsync(r =>
+            r.Id == requestId && r.Status == "pending");
+        if (request is null)
+            return null;
+        request.Status = approve ? "approved" : "rejected";
         request.HandledAt = _time.GetLocalNow().UtcDateTime;
-        if (approved && !await db.GroupMembers.AnyAsync(m =>
+        if (approve && !await db.GroupMembers.AnyAsync(m =>
                 m.GroupId == request.GroupId && m.DeviceId == request.DeviceId))
             db.GroupMembers.Add(new GroupMember
             {
@@ -260,13 +282,28 @@ public sealed class GroupService(
                 Approved = true, JoinedAt = _time.GetLocalNow().UtcDateTime,
             });
         await db.SaveChangesAsync();
-        await session.SendAsync(new JoinRequestsAck(session.NextSeq(), session.ServerTimestamp(),
-            MsgType.JoinRequests, true));
-        await audit.WriteAsync(approved ? "group_join_approve" : "group_join_reject",
-            session.DeviceId, userId: session.OwnerUserId,
+        await audit.WriteAsync(approve ? "group_join_approve" : "group_join_reject",
+            actorDeviceId, userId: actorUserId,
             detail: new { request.GroupId, request.DeviceId, RequestId = request.Id });
-        if (approved && pusher is not null)
-            await pusher.NotifyGroupMembersAsync(request.GroupId, request.DeviceId); // 0x41（M2-10）
+        return new JoinDecision(request.GroupId, request.DeviceId);
+    }
+
+    /// <summary>批准决议的 0x41 组成员+申请人相关方推送（M2-10）。</summary>
+    private async Task NotifyJoinApprovalAsync(JoinDecision decision)
+    {
+        if (pusher is not null)
+            await pusher.NotifyGroupMembersAsync(decision.GroupId, decision.DeviceId);
+    }
+
+    /// <summary>Web 管理路径审批入口（M3-05）：决议共享核 + 批准即补 0x41 推送（无 Ack 帧）。
+    /// 返回 false=单不存在或已处理。</summary>
+    public async Task<bool> DecideJoinRequestAsync(Guid requestId, bool approve,
+        Guid? actorUserId = null, Guid? actorDeviceId = null)
+    {
+        var decision = await ApplyJoinDecisionAsync(requestId, approve, actorUserId, actorDeviceId);
+        if (decision is not null && approve)
+            await NotifyJoinApprovalAsync(decision);
+        return decision is not null;
     }
 
     // ── 0x54 邀请码生成/撤销（仅所有者；每分组至多一码=覆盖式；OQ-17）──
