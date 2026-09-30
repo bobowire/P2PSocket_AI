@@ -80,6 +80,10 @@ public sealed class ServerWebHostService(
         new AdminDashboardApi(dbFactory, registry, relay, stun).Map(app);
         // M3-07 中继管理（会话快照+开关/限速；PUT 进程内直调 UpdateRate 即时生效）
         new AdminRelayApi(dbFactory, relay, limiter, audit).Map(app);
+        // M3-08 映射数据（TD-22 投影共享核）/系统配置（白名单校验+限速键联动）/审计日志（分页过滤）
+        new AdminMappingsApi(dbFactory).Map(app);
+        new AdminSystemApi(dbFactory, limiter, audit).Map(app);
+        new AdminAuditLogsApi(dbFactory).Map(app);
 
         // 认证骨架（04 §3.1/§3.2、07 §8）：/api/* 须携带有效会话 Cookie，否则 401 {code:2001}；
         // /api/auth/login 白名单（登录端点 M3-02 挂载）。静态页（SPA 外壳）不经认证——前端路由接管。

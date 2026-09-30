@@ -125,10 +125,10 @@ Cookie：`HttpOnly, SameSite=Strict`（无 Secure——HTTP，D11）；会话服
 | POST | `/api/devices/{id}/disable` · `/unbind` · `/reset-remote-code` | 禁用/解绑/重置码（解绑=释放归属与身份，配合 FR-S-103 重注册） | |
 | GET | `/api/groups` · PUT `/api/groups/default` | 分组总览、默认分组策略 | FR-S-822 |
 | GET | `/api/group-requests?status=pending` · POST `/api/group-requests/{id}/approve` · `/reject` | 审批队列（服务端 Web 侧，FR-S-305 与客户端 0x53 同语义） | FR-S-305/822 |
-| GET | `/api/mappings` | 全部映射配置与状态（只读）。**状态=TD-22 投影口径（v1.40）**：0x62 mapping_status 审计流水每映射最新一条（direct/relay/failed）为"最后已知状态"——客户端状态机是真相源（M2-08），服务端管理面仅流水投影；无流水行（长期离线）=unknown。累计流量 join mapping_stats | FR-S-823 |
+| GET | `/api/mappings` | 全部映射配置与状态（只读）。**状态=TD-22 投影口径（v1.40）**：0x62 mapping_status 审计流水每映射最新一条（direct/relay/failed）为"最后已知状态"——客户端状态机是真相源（M2-08），服务端管理面仅流水投影；无流水行（长期离线）=unknown。累计流量 join mapping_stats。M3-08 落地编制补充：归属设备名/远程码/对端设备名子查询 join；`?deviceId=`（归属设备）与 `?status=`（投影态）过滤；disabled 映射仍投影最后已知流水（enabled 独立字段供前端置灰——分布的 enabled 限定是仪表盘聚合口径，列表为逐映射明细口径）；投影核与仪表盘共用 AdminDashboardApi.LatestStatusByMappingAsync | FR-S-823 |
 | GET | `/api/relay/sessions` · PUT `/api/relay/config` | 中继会话列表；全局开关/限速。**限速语义=TD-23（v1.40）**：relay_rate_limit=全局字节速率令牌桶作用于中继转发发送路径（UDP+TCP 双承载，0=不限）；令牌耗尽时**新** 0x74 分配拒绝（5002，保护存量会话仅降速）；SignalingCoordinator relayAllowed 合成接入余量判定（M2-07"限速余量恒真"收口）。M3-07 落地编制补充 GET `/api/relay/config`（读现值，管理页表单回显用）；sid/端点承载表达详见 05 §6.2 | FR-S-824 |
-| GET | `/api/system/config` · PUT | server_config 键值（含端口覆盖键与日志级别，改动重启生效；未覆盖时取配置文件值，FR-S-825） | FR-S-825 |
-| GET | `/api/audit-logs?event=&page=` | 审计日志 | NFR-54 |
+| GET | `/api/system/config` · PUT | server_config 键值读写（**白名单键集=ConfigDefaults 全集**：业务开关在库，listen.* 进程级在 appsettings 不属此端——08 §5.1 分工；值校验 log_level 枚举/数值范围/virtual_subnet CIDR/public_addr IP 或域名，未覆盖键取种子值，FR-S-825）。M3-08 落地编制补充：GET 逐键标注 restartRequired（启动期一次性读取的键 true：public_addr/stun_*/log_level，其余运行期现读即时生效）；PUT 全量校验先行（任一键非法整单拒绝 400 {1001} 不留半更新）+审计 system_config_change+log_level 存规范形态；relay_rate_limit 进程内直调 RelayRateLimiter.UpdateRate 即时生效（与 PUT /api/relay/config 同执行链——两条写路径共享限速热路径不漂移） | FR-S-825 |
+| GET | `/api/audit-logs?event=&page=` | 审计日志（NFR-54）。M3-08 落地编制补充：newest-first（自增 Id 降序）+事件精确过滤+分页（pageSize 默认 20、clamp 1~100）；detail 为原始 JSON 文本透传（前端格式化展示，SEC-51 写入侧已保证不含凭据材料） | NFR-54 |
 
 ## 4. 实时与统计的数据流
 

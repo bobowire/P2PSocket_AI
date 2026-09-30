@@ -104,37 +104,13 @@ public sealed class AdminDashboardApi(
 
     /// <summary>TD-22 口径投影：mapping_status 审计流水（detail JSON 含 MappingId/State）按映射取
     /// 最新一条的 State。行按 Id 升序扫描、字典覆盖取末次（Id 自增=写入序）。0x62 仅在状态迁移时
-    /// 写行（M2-22），量级=状态变更数且受 90 天保留约束；M3-08 /api/mappings 同口径复用，
-    /// 若量大再考虑 json_extract 下推（此处先全扫内存投影——管理面低频轮询可承受）。</summary>
+    /// 写行（M2-22），量级=状态变更数且受 90 天保留约束；M3-08 /api/mappings 同口径复用
+    /// （LatestStatusByMappingAsync 共享核），若量大再考虑 json_extract 下推（此处先全扫内存投影
+    /// ——管理面低频轮询可承受）。</summary>
     private static async Task<Dictionary<string, int>> LatestMappingStatusAsync(AppDbContext db,
         HashSet<Guid> enabledIds, CancellationToken ct)
     {
-        var latest = new Dictionary<Guid, string>();
-        if (enabledIds.Count > 0)
-        {
-            var rows = await db.AuditLogs.AsNoTracking()
-                .Where(a => a.Event == "mapping_status")
-                .OrderBy(a => a.Id)
-                .Select(a => a.Detail)
-                .ToListAsync(ct);
-            foreach (var detail in rows)
-            {
-                if (detail is null) continue;
-                try
-                {
-                    using var doc = JsonDocument.Parse(detail);
-                    var mappingId = doc.RootElement.TryGetProperty("MappingId", out var mid)
-                        && Guid.TryParse(mid.GetString(), out var id) ? id : Guid.Empty;
-                    if (mappingId != Guid.Empty && enabledIds.Contains(mappingId)
-                        && doc.RootElement.TryGetProperty("State", out var st))
-                        latest[mappingId] = st.GetString() ?? "";
-                }
-                catch (JsonException)
-                {
-                    // 理论不可达（本服务序列化写入）：坏行跳过不致整个仪表盘 500
-                }
-            }
-        }
+        var latest = await LatestStatusByMappingAsync(db, enabledIds, ct);
 
         var byStatus = new Dictionary<string, int>
         {
@@ -143,6 +119,38 @@ public sealed class AdminDashboardApi(
         foreach (var id in enabledIds)
             byStatus[latest.TryGetValue(id, out var s) && byStatus.ContainsKey(s) ? s : "unknown"]++;
         return byStatus;
+    }
+
+    /// <summary>TD-22 投影共享核（M3-06 仪表盘分布与 M3-08 /api/mappings 列表同口径）：
+    /// 返回 每映射→最后已知 State；无流水/坏行映射缺席（调用方以 unknown 兜底）。</summary>
+    internal static async Task<Dictionary<Guid, string>> LatestStatusByMappingAsync(AppDbContext db,
+        HashSet<Guid> mappingIds, CancellationToken ct)
+    {
+        var latest = new Dictionary<Guid, string>();
+        if (mappingIds.Count == 0) return latest;
+        var rows = await db.AuditLogs.AsNoTracking()
+            .Where(a => a.Event == "mapping_status")
+            .OrderBy(a => a.Id)
+            .Select(a => a.Detail)
+            .ToListAsync(ct);
+        foreach (var detail in rows)
+        {
+            if (detail is null) continue;
+            try
+            {
+                using var doc = JsonDocument.Parse(detail);
+                var mappingId = doc.RootElement.TryGetProperty("MappingId", out var mid)
+                    && Guid.TryParse(mid.GetString(), out var id) ? id : Guid.Empty;
+                if (mappingId != Guid.Empty && mappingIds.Contains(mappingId)
+                    && doc.RootElement.TryGetProperty("State", out var st))
+                    latest[mappingId] = st.GetString() ?? "";
+            }
+            catch (JsonException)
+            {
+                // 理论不可达（本服务序列化写入）：坏行跳过不致整个端点 500
+            }
+        }
+        return latest;
     }
 
     /// <summary>近 24h 按小时桶（整点对齐、最旧→最新共 24 桶）：每桶 total/success（direct+relay）计数。
