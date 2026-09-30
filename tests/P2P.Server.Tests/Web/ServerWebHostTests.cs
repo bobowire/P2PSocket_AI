@@ -49,7 +49,10 @@ public sealed class ServerWebHostTests : IAsyncLifetime
         options.Listen.Web = port ?? Random.Shared.Next(21000, 24000); // 测试带：与 Client.Tests 映射族 24000-28000 不相交
         options.Listen.WebBind = bind;
         var sessions = new AdminSessionStore(TimeProvider.System);
-        var web = new ServerWebHostService(options, TimeProvider.System, sessions)
+        var factory = new StubFactory(() => new AppDbContext(
+            new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_db.DataSource).Options));
+        var web = new ServerWebHostService(options, TimeProvider.System, sessions, factory,
+            new AuditLogger(factory))
         {
             WebRootOverride = webRoot ?? Path.Combine(Path.GetTempPath(), $"p2p-no-webroot-{Guid.NewGuid():N}"),
         };

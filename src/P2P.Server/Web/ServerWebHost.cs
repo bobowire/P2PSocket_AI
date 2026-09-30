@@ -8,18 +8,23 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using P2P.Server.Data;
+using P2P.Server.Services;
 
 namespace P2P.Server.Web;
 
-/// <summary>Web 宿主装配与生命周期（IHostedService 载体）。M3-02 起管理端点组渐次挂载。</summary>
+/// <summary>Web 宿主装配与生命周期（IHostedService 载体）。管理端点组随任务渐次挂载（M3-02 认证起）。</summary>
 public sealed class ServerWebHostService(
     ServerOptions options,
     TimeProvider time,
-    AdminSessionStore sessions) : IHostedService
+    AdminSessionStore sessions,
+    IDbContextFactory<AppDbContext> dbFactory,
+    AuditLogger audit) : IHostedService
 {
     private WebApplication? _app;
 
@@ -28,7 +33,7 @@ public sealed class ServerWebHostService(
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        _app = Build(options, time, sessions, WebRootOverride);
+        _app = Build(options, time, sessions, dbFactory, audit, WebRootOverride);
         await _app.StartAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -39,16 +44,20 @@ public sealed class ServerWebHostService(
 
     /// <summary>装配（internal 供集成测试直调复刻生产拓扑）。</summary>
     internal static WebApplication Build(ServerOptions options, TimeProvider time,
-        AdminSessionStore sessions, string? webRootOverride = null)
+        AdminSessionStore sessions, IDbContextFactory<AppDbContext> dbFactory, AuditLogger audit,
+        string? webRootOverride = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseUrls($"http://{options.Listen.WebBind}:{options.Listen.Web}");
         builder.Logging.ClearProviders(); // Serilog 在主 host；Web 容器不重复配（访问日志无需求）
-        // 主容器单例实例注入（生命周期跟随主 host；M3-02 起按端点组需要扩参）
+        // 主容器单例实例注入（生命周期跟随主 host；M3-03 起管理端点组按需扩）
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(time);
         builder.Services.AddSingleton(sessions);
         var app = builder.Build();
+
+        // M3-02 管理员会话与账号（认证中间件白名单 /api/auth/login 的端点本体在此挂载）
+        new AdminAuthApi(dbFactory, audit).Map(app, sessions);
 
         // 认证骨架（04 §3.1/§3.2、07 §8）：/api/* 须携带有效会话 Cookie，否则 401 {code:2001}；
         // /api/auth/login 白名单（登录端点 M3-02 挂载）。静态页（SPA 外壳）不经认证——前端路由接管。
