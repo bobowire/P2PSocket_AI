@@ -13,7 +13,8 @@ namespace P2P.Server.Services;
 /// - passive 允许（本机管理类，02 §2.5 不在主动类清单）；
 /// - 移除联动：算引用该段的存量 enabled 映射（TargetDeviceId=本机 && TargetAddr≠self && CIDR 覆盖，
 ///   SQLite 无法 SQL 内做 CIDR 数学 → 内存过滤，同 Authorizer.L3 口径）→ 删行 → 审计 → Ack →
-///   在线 owner 推 0x75(lan_segment_removed, affectedMappingIds)（客户端置 invalid 停转发）。
+///   按映射 owner 分组逐户推 0x75(lan_segment_removed, affectedMappingIds)（M2-33 修正：受影响
+///   映射的持有方才能置 invalid 停转发，0x14/0x52/0x56 同口径——段属设备本人不持有这些映射）。
 /// 更新（扩大覆盖）不触发 0x75：覆盖面只增不减，存量映射天然仍被覆盖。
 /// </summary>
 public sealed class LanSegmentService(
@@ -35,26 +36,29 @@ public sealed class LanSegmentService(
                 return;
             }
 
-            var affectedIds = await FindAffectedMappingsAsync(db, session.DeviceId, existing.Cidr);
+            var affected = await FindAffectedMappingsAsync(db, session.DeviceId, existing.Cidr);
             db.LanSegments.Remove(existing);
             await db.SaveChangesAsync();
 
             await audit.WriteAsync("lan_segment_remove", session.DeviceId,
-                detail: new { segmentId = removeId, cidr = existing.Cidr, affectedMappings = affectedIds.Length });
+                detail: new { segmentId = removeId, cidr = existing.Cidr, affectedMappings = affected.Length });
             await session.SendAsync(new LanSegmentsUpsertAck(session.NextSeq(), session.ServerTimestamp(),
                 MsgType.LanSegmentsUpsert, removeId));
 
-            // 0x75 失效推送（FR-C-702）：Ack 先于推送（M2-10 纪律）；owner 即上报者本人，离线不可能
-            // （正在处理其消息）——TryGet 兜底跳过；单收件人失败静默（提示帧语义，客户端可 0x63 重查）
-            if (affectedIds.Length > 0 && registry.TryGet(session.DeviceId) is { } owner)
-            {
-                try
+            // 0x75 失效推送（FR-C-702）：Ack 先于推送（M2-10 纪律）；按映射 owner 分组逐户推
+            // （0x14/0x52/0x56 同口径——受影响映射持有方置 invalid；段属设备上报者本人不持有）；
+            // 离线跳过、单收件人失败静默（提示帧语义，客户端可 0x63 重查），推送失败不回滚删除
+            foreach (var byOwner in affected.GroupBy(m => m.OwnerDeviceId))
+                if (registry.TryGet(byOwner.Key) is { } owner)
                 {
-                    await owner.PushAsync(new Invalidation(session.NextSeq(), session.ServerTimestamp(),
-                        MsgType.Invalidation, InvalidationReason.LanSegmentRemoved, affectedIds, null));
+                    try
+                    {
+                        await owner.PushAsync(new Invalidation(owner.NextSeq(), owner.ServerTimestamp(),
+                            MsgType.Invalidation, InvalidationReason.LanSegmentRemoved,
+                            byOwner.Select(m => m.MappingId).ToArray(), null));
+                    }
+                    catch { /* 推送失败不回滚删除：白名单已收口，下次登录全量同步对齐 */ }
                 }
-                catch { /* 推送失败不回滚删除：白名单已收口，下次登录全量同步对齐 */ }
-            }
             return;
         }
 
@@ -111,19 +115,21 @@ public sealed class LanSegmentService(
             MsgType.LanSegmentsUpsert, msg.SegmentId.Value));
     }
 
-    /// <summary>引用段的存量映射（02 §2.4 0x75 联动口径）：目标=本机、enabled、非 self 且被段 CIDR 覆盖。
+    /// <summary>引用段的存量映射（02 §2.4 0x75 联动口径）：目标=本机、enabled、非 self 且被段 CIDR 覆盖；
+    /// 携 OwnerDeviceId 供 0x75 按映射持有方分组路由（M2-33）。
     /// disabled 映射不入集：重启用 0x60 会再过 L3 校验，届时无段自然拒绝（Fail 诚实回错）。</summary>
-    private static async Task<Guid[]> FindAffectedMappingsAsync(AppDbContext db, Guid ownerDeviceId, string removedCidr)
+    private static async Task<(Guid MappingId, Guid OwnerDeviceId)[]> FindAffectedMappingsAsync(
+        AppDbContext db, Guid segmentOwnerDeviceId, string removedCidr)
     {
         if (!IPNetwork.TryParse(removedCidr, out var removedNet))
             return []; // 非规范段（手改库）：无可判定覆盖面，仅删行
         var candidates = await db.Mappings.AsNoTracking()
-            .Where(m => m.TargetDeviceId == ownerDeviceId && m.TargetAddr != "self" && m.Enabled)
-            .Select(m => new { m.Id, m.TargetAddr })
+            .Where(m => m.TargetDeviceId == segmentOwnerDeviceId && m.TargetAddr != "self" && m.Enabled)
+            .Select(m => new { m.Id, m.OwnerDeviceId, m.TargetAddr })
             .ToListAsync();
         return candidates
             .Where(m => IPAddress.TryParse(m.TargetAddr, out var addr) && removedNet.Contains(addr))
-            .Select(m => m.Id)
+            .Select(m => (m.Id, m.OwnerDeviceId))
             .ToArray();
     }
 

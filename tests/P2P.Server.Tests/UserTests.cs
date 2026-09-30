@@ -12,6 +12,7 @@ namespace P2P.Server.Tests;
 /// <summary>
 /// 用户与能力模式测试（02 §2.4/§2.5；完成判定：登录→能力切换、passive 发 0x40/0x70 → 2002 + 审计行）。
 /// M2-27：0x23 改密（错误旧密码 Ok=false / 成功覆写旧密码失效 / 未登录 2001）。
+/// M2-33：A-7 场景补齐分组族 0x42/0x51/0x54/0x57 原始帧直发全拒（09 §2.3，哑节点绕过 UI 置灰）。
 /// </summary>
 public sealed class UserTests : IAsyncLifetime
 {
@@ -39,7 +40,8 @@ public sealed class UserTests : IAsyncLifetime
             new MappingService(factory, audit),
             _relay,
             new StatsService(factory, audit),
-            audit);
+            audit,
+            new LanSegmentService(factory, _registry, audit)); // M2-33 A-7：passive 对照 0x63 须可达
         _server = new ControlServer(factory, _registry, router.DispatchAsync);
         return _server.StartAsync(new IPEndPoint(IPAddress.Loopback, 0));
     }
@@ -136,6 +138,50 @@ public sealed class UserTests : IAsyncLifetime
         await client.SendAsync(new Heartbeat(client.NextSeq(), client.Now(), MsgType.Heartbeat));
         var hb = await client.ReceiveAsync<HeartbeatAck>();
         Assert.NotNull(hb);
+    }
+
+    // ── A-7 场景（09 §2.3，M2-33）：哑节点绕过客户端 UI 置灰直发原始协议帧 ──
+    // 覆盖 0x40/0x70（上一用例已证，此处场景内自含重申）+ 分组族 0x42/0x51/0x54/0x57
+    // （02 §2.5 主动类清单 0x50~0x57 全在闸内；上例仅探 0x40/0x70 两点）
+
+    [Fact]
+    public async Task Logout_ThenGroupFamilyActiveFrames_AllRejectedWith2002AndAudited()
+    {
+        var client = await ConnectRegisteredAsync();
+        await client.SendAsync(new UserLogout(client.NextSeq(), client.Now(), MsgType.UserLogout));
+        var logoutAck = await client.ReceiveAsync<UserLogoutAck>();
+        Assert.True(logoutAck!.Ok);
+
+        // 逐帧直发主动类（构造原始请求绕过客户端 UI 置灰——哑节点攻击面口径，SEC-51）
+        await DenyAsync(client, new DeviceListRequest(client.NextSeq(), client.Now(), MsgType.DeviceList, 0, 100));
+        await DenyAsync(client, new GroupListRequest(client.NextSeq(), client.Now(), MsgType.GroupList));
+        await DenyAsync(client, new GroupJoin(client.NextSeq(), client.Now(), MsgType.GroupJoin, "abcd23"));
+        await DenyAsync(client, new GroupInviteGen(client.NextSeq(), client.Now(), MsgType.GroupInviteGen,
+            Guid.NewGuid(), Revoke: false));
+        await DenyAsync(client, new GroupRemoveMember(client.NextSeq(), client.Now(), MsgType.GroupRemoveMember,
+            Guid.NewGuid(), Guid.NewGuid()));
+        await DenyAsync(client, new PunchRequest(client.NextSeq(), client.Now(), MsgType.PunchRequest,
+            Guid.NewGuid(), null, "tcp", null, null));
+
+        await using var db = CreateDb();
+        // 错误帧先于审计落库（路由器序）：轮询等待第六行 commit（每帧一行 passive_deny，携 msgType）
+        Assert.Equal(6, await db.WaitAuditCountAsync(a => a.Event == "passive_deny", 6));
+
+        // 对照：被动同步类 0x63 白名单仍受理（passive 允许，02 §2.5 不在主动类清单）
+        await client.SendAsync(new LanSegmentsUpsert(client.NextSeq(), client.Now(),
+            MsgType.LanSegmentsUpsert, null, "192.168.7.0/24", true));
+        var segAck = await client.ReceiveSkippingPushesAsync<LanSegmentsUpsertAck>();
+        Assert.NotNull(segAck);
+    }
+
+    /// <summary>A-7 断言原语：发帧 → 0x7E { code=2002 }（服务端主动类闸先于业务校验）。
+    /// 泛型保具体类型推断（编解码按消息类型登记，接口类型不可编码）。</summary>
+    private static async Task DenyAsync<T>(TestPcpClient client, T msg) where T : class, IPcpMessage
+    {
+        await client.SendAsync(msg);
+        var err = await client.ReceiveSkippingPushesAsync<ErrorMessage>();
+        Assert.NotNull(err);
+        Assert.Equal(ErrorCode.ForbiddenPassive, err!.Code);
     }
 
     // ── 0x13 改名（本机管理类，passive 允许）──────────────────────────

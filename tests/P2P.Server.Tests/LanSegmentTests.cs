@@ -293,11 +293,12 @@ public sealed class LanSegmentTests : IAsyncLifetime
         var m1 = await CreateMappingAsync(a, remoteCode, "192.168.1.100", 20020); // ∈ seg1
         var m2 = await CreateMappingAsync(a, remoteCode, "10.0.0.5", 20021);      // ∈ seg2
 
-        // b 移除 seg1 → Ack 先到，0x75 随后（携 [m1]；m2 由 seg2 覆盖不受影响）
+        // b 移除 seg1 → b 收 Ack；0x75 随后达映射 owner a（携 [m1]；m2 由 seg2 覆盖不受影响）——
+        // M2-33 修正：按映射持有方路由（0x14/0x52/0x56 同口径），段属设备 b 不持有这些映射
         await b.SendAsync(new LanSegmentsUpsert(b.NextSeq(), b.Now(),
             MsgType.LanSegmentsUpsert, seg1, "", false));
         _ = await b.ReceiveAsync<LanSegmentsUpsertAck>();
-        var push = await b.ReceiveAsync<Invalidation>();
+        var push = await a.ReceiveAsync<Invalidation>();
         Assert.Equal(InvalidationReason.LanSegmentRemoved, push!.Reason);
         Assert.Equal(new[] { m1 }, push.AffectedMappingIds); // 单元素数组（M2-10 教训：集合表达式推断不可靠）
         Assert.Null(push.NewCapability);
