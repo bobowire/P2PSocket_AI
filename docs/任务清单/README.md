@@ -12,6 +12,14 @@
 | M3（待建） | 管理面与可观测 | A-10~A-12 | — |
 | M4（待建） | 交付打磨 | 交付清单齐全 | — |
 
+## 待办池（用户确认的未排期候选课题）
+
+> 已确认但**暂不排期**的课题。触发条件：下方清单（M1/M2 遗留实机项 + M3 + M4）全部实现后，由用户决定是否立项；立项时按使用规则第 6 条编入对应里程碑清单。
+
+| 课题 | 内容与背景 | 关联 | 记录日期 |
+|---|---|---|---|
+| P1 打洞协议可选偏好 + PTP 帧层 ARQ | ① 打洞协议偏好：当前打洞方式由映射 proto 决定（02 §4.5——TCP 映射固定 TCP 打洞、UDP 映射 UDP 打洞），UDP 打洞 NAT 穿透成功率普遍更高，可加"映射/设备对级打洞协议偏好"提高直连率；② 帧层 ARQ（QUIC 式确认重传）：M2-38 遗留——UDP 承载（中继已 TCP 优先规避，**直连 UDP 打洞成功路径仍在用**）对 TCP 流量无端到端重传，丢 DATA 帧字节流缺段/丢 WINDOW 回报信用耗尽挂起/丢 OPEN 帧断连。两者绑定：①让 TCP 流量跑 UDP 承载，必须②兜底才安全；②单独做即根治 M2-38 遗留 | M2-38 遗留注记（M2 清单）、02 §4.5/§6.2、05 §4 | 2026-09-30（用户："先留个待办，等目前已确认的需求全部实现后再考虑"） |
+
 ## 使用规则
 
 1. **状态图例**：☐ 未开始　🔨 进行中（注执行人/会话）　✅ 完成（注日期）　⏸ 阻塞（注明阻塞原因与关联 OQ/TD）；
@@ -64,4 +72,5 @@
 | 2026-09-30 | **M2-34 测试收口 ✅**（32/35=自动化全量收口；余 01/02/35 实机环境依赖）——五程序集全绿 **606**（Core 180+Client 167+Server 169+Integration 84+Nic 6 过 6 跳，M2-33 后基线复核）；web 双包：client-app vitest 38/38+eslint 净、ui-shared vitest 32/32+eslint 净（M2-29 后无 web 变更，基线复核）；**Core 行覆盖 80.44%≥70% 达标**——CI 同口径实测（`dotnet test P2P.Core.Tests -c Release --collect:"XPlat Code Coverage"` → cobertura 根 line-rate 解析，M1-36 建立的 ci.yml 门槛路径复刻）；**跳过清单核对零无依据跳过**：6 跳全在 P2P.Nic.Tests（LinuxTunNicManagerTests 平台边界——reason 注明"仅 Linux 实机（05 §1 平台边界；CI/Windows 跳过，实机验收归 M1-37）"；Wintun/InteropLayout Windows 本机实跑），Client SecretProtector SkippableFact（DPAPI 仅 Windows 07 §4）本机不跳，其余四程序集零跳过；**heavy-runtime 集合成员评估：无变更**——成员三类 ClientRuntimeIntegrationTests/InvalidationFlowIntegrationTests/ScenarioIntegrationTests（M2-33 A-8/A-9 落于既有成员 InvalidationFlow，串行保护天然覆盖）；CI quick EXIT=0；无代码变更（纯收口核对，仅清单与 README 文档提交） |
 | 2026-09-30 | **M2-36 中继端点 NAT 通告修复 ✅**（33/36，公网部署实测触发的缺陷）——现象：公网服务器（腾讯云 NAT 部署）双端打洞失败后中继回退 45s 超时 relay_failed（"operation was canceled"），服务端中继端口 7010/7020 tcpdump 两轮零到达——JOIN 根本没到服务器；根因：RelayService.BuildGrant 端点 host 取控制连接本地侧地址=VM 内网 10.6.0.16（公网 139.155.70.54 为云平台 NAT 映射，VM 不感知），客户端朝不可路由内网端点 JOIN 超时；修复=server_config 新增 `public_addr` 键（03 §2.8，默认空=本地侧派生不变，局域网/直绑公网 IP 兼容；非空时 BuildGrant 以通告地址替换 host、端口仍取 relay 实际监听口），Program 装配随 stun_auth 同款启动期读库（ServerConfigStore，晚于 DB 初始化键必然存在），DbInitializer 缺键补齐（升级免迁移）；测试：RelayServiceTests 夹具挂 PublicHost=203.0.113.99→Grant 端点断言改判通告地址（默认派生路径由集成 harness 默认 options 端到端覆盖），Server 169 全绿、全仓 606 绿、CI quick EXIT=0；文档：02 §6.1/05 §6/03 §2.8/README v1.37；公网服务器已部署修复并配置 public_addr=139.155.70.54 |
 | 2026-09-30 | **M2-37 回切重打失败的中继会话复用 ✅**（34/37，公网实测触发的缺陷）——现象：用户报 `http://100.64.0.2:3000/` 部分资源加载失败；日志实证 60s 周期模式（回切通知→10s 后被动侧重建中继）；根因：M2-19 回切循环每 60s 对 relay 态会话重打洞，双 NAT 必败 → FallbackToRelayAsync 每次全新 0x74+JOIN+新会话 → TunnelHost.Attach 整体替换（NET-75 排水 2s）杀传输中 channel——跨周期长传输必断（复用检查此前仅在映射 enable 路径）；修复=Puncher 新增复用缝 `liveRelaySessionLookup`（宿主接 TunnelHost.Get：ViaRelay 且未关闭）：FailOrFallbackAsync 命中即返回复用结果（Session=既有引用、Attach 引用相等无替换、明细 tunnel_reused），不再 0x74——复用先于分配，发起侧不分配则被动侧（跟随 0x74）不重建、无脑裂；活会话真亡自然回全新分配；测试：Client +2 单测（复用不分配/已亡回分配），Integration +1 M2-37（SymmetricRandom 永败+3s 周期，punch_stats≥3 周期门控序号流跨周期不断；负对照临时摘缝按预期失败证测试有效），全仓 609 绿、CI quick EXIT=0；文档：02 §6.2/05 §4/README v1.38；客户端属双侧修复——本机服务已升级+portable 包重发 |
+| 2026-09-30 | 新增**待办池**小节：P1 打洞协议可选偏好（TCP 映射走 UDP 打洞提高穿透率）+ PTP 帧层 ARQ（M2-38 遗留根治，两者绑定）——用户决议"已确认需求全部实现后再考虑"（源于 M2-38 收口后概念答疑：proto 决定打洞方式为现行有意设计） |
 | 2026-09-30 | **M2-38 中继承载 TCP 优先 ✅**（35/38，公网实测触发的缺陷）——现象：M2-37 后用户复测仍失败，本机复现铁证：单流 CSS 582KB/0.8s 正常，8 并发拉取 8 资产 6 个大文件 body 停滞 45s 超时（响应头已到、size 不足 Content-Length）+1 连接 0.5s 即断；根因：JOIN 承载"先 UDP 后 TCP"（M2-18 口径），UDP 无重传——并发 burst 丢 DATA 帧（TCP 字节流缺段→应用永久等不满）/丢 WINDOW 信用回报（每 channel 64KiB 信用耗尽发送侧永久挂起）/丢 OPEN 帧（连接即断），单流轻载丢包率低掩盖；修复=JoinWithCarrierFallbackAsync 反转 **TCP 优先、UDP 兜底（7020 被封）**，主动/被动侧同一入口、两端同版即两端 TCP，服务端按端独立转发承载可异构不变；测试：Integration +2（承载选择双端点健康落 TCP 断言；8×300KB 并发全完整到达冒烟——首版 10s 预算 CI 满载不够放宽 30s，卡死=无限期捕获力不弱化）+A-6 UdpBlocked 变体时序注释更新断言不变，全仓 611 绿、CI quick EXIT=0；文档：02 §6.2/05 §4/README v1.39；遗留记录：直连 UDP 承载（打洞成功路径）同族无重传风险，PTP 层 ARQ 属后续课题 |
