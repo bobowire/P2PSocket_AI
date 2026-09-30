@@ -103,6 +103,7 @@ public static class PcpCodec
         nameof(UserChangePassword) or nameof(UserChangePasswordAck) => MsgType.UserChangePassword,
         nameof(DeviceListRequest) or nameof(DeviceListResponse) => MsgType.DeviceList,
         nameof(DeviceListUpdate) => MsgType.DeviceListUpdate,
+        nameof(GroupListRequest) or nameof(GroupListResponse) => MsgType.GroupList, // 0x42（M2-27）
         nameof(GroupCreate) or nameof(GroupCreateAck) => MsgType.GroupCreate,
         nameof(GroupJoin) or nameof(GroupJoinAck) => MsgType.GroupJoin,
         nameof(GroupLeave) or nameof(GroupLeaveAck) => MsgType.GroupLeave,

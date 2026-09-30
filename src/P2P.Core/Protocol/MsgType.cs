@@ -25,6 +25,7 @@ public static class MsgType
     public const byte Heartbeat = 0x30;        // Heartbeat / HeartbeatAck
     public const byte DeviceList = 0x40;       // DeviceListRequest / Response
     public const byte DeviceListUpdate = 0x41; // 列表变更推送（提示帧）
+    public const byte GroupList = 0x42;        // GroupListRequest / Response（已加入分组，M2-27 定案）
 
     // 分组族
     public const byte GroupCreate = 0x50;

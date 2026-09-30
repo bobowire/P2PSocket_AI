@@ -1,6 +1,8 @@
 // M1-32 MSW mock（06 §5）：04 §2 全端点镜像——带内存状态的工厂形态，
 // 供浏览器 dev（VITE_USE_MSW=1，默认演示态）与 Vitest 走查（自定义初始态）共用。
 // envelope { code, msg, data }（04 §1：业务错误 HTTP 200）；错误码口径 04 §5。
+// M2-27 同步：分组全套（0x42 聚合形态+审批闭环）、lan-segments、logs（过滤/分页/导出）、
+// change-password；一并补齐 M2-15/23/26 漂移端点（reset-remote-code/peers/upgrade）。
 import { http, HttpResponse } from "msw";
 
 export interface MockMapping {
@@ -14,6 +16,29 @@ export interface MockMapping {
   enabled: boolean;
   state: string;
   detail: string | null;
+}
+
+export interface MockGroup {
+  groupId: string;
+  groupName: string;
+  policy: "free" | "approval";
+  isOwner: boolean;
+  memberCount: number;
+  inviteCode: string | null;
+}
+
+export interface MockJoinRequest {
+  requestId: string;
+  groupId: string;
+  deviceId: string;
+  deviceName: string;
+  createdAtMs: number;
+}
+
+export interface MockLanSegment {
+  segmentId: string;
+  cidr: string;
+  enabled: boolean;
 }
 
 export interface MockState {
@@ -35,6 +60,12 @@ export interface MockState {
     lanSegments: string[];
   }[];
   mappings: MockMapping[];
+  groups: MockGroup[]; // M2-27：已加入分组（04 §2.4 /api/groups）
+  joinRequests: MockJoinRequest[]; // 待审批申请（所有者侧聚合）
+  lanSegments: MockLanSegment[]; // M2-27：开放内网段白名单（04 §2.5）
+  peers: Record<string, boolean>; // M2-23：deviceId → relayFallback
+  logs: { ts: string; level: string; message: string }[]; // M2-27：演示日志（04 §2.6）
+  upgrade: { latestVersion: string; minProtocol: number; maxProtocol: number; upgradeUrl: string; notes: string };
   settings: {
     serverAddrs: string[];
     localWebPort: number;
@@ -121,6 +152,36 @@ export function createDefaultState(): MockState {
         detail: null,
       },
     ],
+    groups: [
+      { groupId: "g-11111111-1111-4111-8111-111111111111", groupName: "默认分组", policy: "free", isOwner: false, memberCount: 3, inviteCode: null },
+      { groupId: "g-22222222-2222-4222-8222-222222222222", groupName: "项目协作组", policy: "approval", isOwner: true, memberCount: 2, inviteCode: null },
+    ],
+    joinRequests: [
+      {
+        requestId: "r-33333333-3333-4333-8333-333333333333",
+        groupId: "g-22222222-2222-4222-8222-222222222222",
+        deviceId: "33333333-3333-4333-8333-333333333333",
+        deviceName: "家里 NAS",
+        createdAtMs: Date.UTC(2026, 8, 28, 10, 0, 0),
+      },
+    ],
+    lanSegments: [
+      { segmentId: "s-44444444-4444-4444-8444-444444444444", cidr: "192.168.1.0/24", enabled: true },
+    ],
+    peers: {},
+    logs: [
+      { ts: "2026-09-30 08:00:00.100 +08:00", level: "INF", message: "控制通道已建立（127.0.0.1:7101）" },
+      { ts: "2026-09-30 08:00:01.200 +08:00", level: "INF", message: "端口映射「办公室 web」进入 direct" },
+      { ts: "2026-09-30 08:05:00.300 +08:00", level: "WRN", message: "心跳 Ack 延迟 2.1s（时钟漂移重校准）" },
+      { ts: "2026-09-30 09:12:33.400 +08:00", level: "ERR", message: "映射「NAS ssh」打洞失败：punch_timeout" },
+    ],
+    upgrade: {
+      latestVersion: "0.3.0",
+      minProtocol: 1,
+      maxProtocol: 1,
+      upgradeUrl: "https://example.com/p2p-client-0.3.0.msi",
+      notes: "演示态升级信息（M2-26 /api/upgrade/info）",
+    },
     settings: {
       serverAddrs: ["127.0.0.1:7101"],
       localWebPort: 7100,
@@ -333,6 +394,190 @@ export function createHandlers(state: MockState = createDefaultState()) {
     // ── 2.6 诊断 ─────────────────────────────────────────────
     http.get("*/api/diagnostics", () =>
       ok({ punchQueueDepth: 0, currentPunchPeer: null })),
+
+    // ── M2-15 远程码重置（04 §2.1）───────────────────────────
+    http.post("*/api/device/reset-remote-code", () => {
+      state.remoteCode = Array.from({ length: 6 }, () =>
+        "0123456789abc"[Math.floor(Math.random() * 13)]).join("");
+      const me = state.devices.find((d) => d.deviceId === state.deviceId);
+      if (me) me.remoteCode = state.remoteCode;
+      return ok({ remoteCode: state.remoteCode });
+    }),
+
+    // ── M2-23 目标设备级配置（04 §2.4）───────────────────────
+    http.get("*/api/peers/:deviceId", ({ params }) =>
+      ok({ deviceId: params.deviceId, relayFallback: state.peers[params.deviceId as string] ?? false })),
+    http.put("*/api/peers/:deviceId", async ({ request, params }) => {
+      const body = (await request.json()) as { relayFallback?: boolean };
+      state.peers[params.deviceId as string] = body.relayFallback ?? false;
+      return ok({ deviceId: params.deviceId, relayFallback: body.relayFallback ?? false });
+    }),
+
+    // ── M2-26 升级信息（04 §2.7）─────────────────────────────
+    http.get("*/api/upgrade/info", () => ok(state.upgrade)),
+
+    // ── M2-27 改密（04 §2.3）────────────────────────────────
+    http.post("*/api/auth/change-password", async ({ request }) => {
+      const { oldPassword, newPassword } = (await request.json()) as {
+        oldPassword?: string; newPassword?: string;
+      };
+      if (!state.username || !oldPassword || state.users[state.username] !== oldPassword)
+        return fail(2001, "bad_old_password");
+      if (!newPassword || newPassword.length < 6) return fail(1001, "bad_new_password");
+      state.users[state.username] = newPassword;
+      return ok(null);
+    }),
+
+    // ── M2-27 分组全套（04 §2.4；主动类 passive 2002）────────
+    http.get("*/api/groups", () => {
+      if (state.capability === "passive") return fail(2002, "passive_forbidden");
+      return ok({ items: state.groups, requests: state.joinRequests });
+    }),
+    http.post("*/api/groups", async ({ request }) => {
+      if (state.capability === "passive") return fail(2002, "passive_forbidden");
+      const { name, joinPolicy } = (await request.json()) as { name?: string; joinPolicy?: string };
+      if (!name?.trim() || name.trim().length > 64) return fail(1001, "bad_name");
+      if (joinPolicy !== "free" && joinPolicy !== "approval") return fail(1001, "bad_policy");
+      const g: MockGroup = {
+        groupId: crypto.randomUUID(),
+        groupName: name.trim(),
+        policy: joinPolicy,
+        isOwner: true,
+        memberCount: 1,
+        inviteCode: null,
+      };
+      state.groups.push(g);
+      return ok({ groupId: g.groupId });
+    }),
+    http.post("*/api/groups/join", async ({ request }) => {
+      if (state.capability === "passive") return fail(2002, "passive_forbidden");
+      const { inviteCode } = (await request.json()) as { inviteCode?: string };
+      const g = state.groups.find((x) => x.inviteCode && x.inviteCode === inviteCode);
+      if (!g) return fail(3001, "invite_invalid");
+      if (g.policy === "approval") {
+        state.joinRequests.push({
+          requestId: crypto.randomUUID(),
+          groupId: g.groupId,
+          deviceId: state.deviceId ?? crypto.randomUUID(),
+          deviceName: "本机（web-dev）",
+          createdAtMs: Date.now(),
+        });
+        return fail(3002, "group_need_approval");
+      }
+      g.memberCount++;
+      return ok({ groupId: g.groupId });
+    }),
+    http.post("*/api/groups/:id/leave", ({ params }) => {
+      const g = state.groups.find((x) => x.groupId === params.id);
+      if (!g || g.memberCount <= 0) return fail(1001, "not_member");
+      g.memberCount--;
+      return ok(null);
+    }),
+    http.put("*/api/groups/:id", async ({ request, params }) => {
+      const g = state.groups.find((x) => x.groupId === params.id);
+      if (!g || !g.isOwner) return fail(1001, "not_group_owner");
+      const { name, joinPolicy } = (await request.json()) as { name?: string; joinPolicy?: string };
+      if (joinPolicy !== undefined && joinPolicy !== "free" && joinPolicy !== "approval")
+        return fail(1001, "bad_policy");
+      if (!name?.trim() && !joinPolicy) return fail(1001, "nothing_to_update");
+      if (name?.trim()) g.groupName = name.trim();
+      if (joinPolicy) g.policy = joinPolicy;
+      return ok(null);
+    }),
+    http.delete("*/api/groups/:id", ({ params }) => {
+      const i = state.groups.findIndex((x) => x.groupId === params.id);
+      if (i < 0 || !state.groups[i].isOwner) return fail(1001, "not_group_owner");
+      const [removed] = state.groups.splice(i, 1);
+      state.joinRequests = state.joinRequests.filter((r) => r.groupId !== removed.groupId);
+      return ok(null);
+    }),
+    http.post("*/api/groups/:id/members/:deviceId/kick", ({ params }) => {
+      const g = state.groups.find((x) => x.groupId === params.id);
+      if (!g || !g.isOwner) return fail(1001, "not_group_owner");
+      if (g.memberCount <= 0) return fail(1001, "not_member");
+      g.memberCount--;
+      state.joinRequests = state.joinRequests.filter(
+        (r) => !(r.groupId === params.id && r.deviceId === params.deviceId));
+      return ok(null);
+    }),
+    http.get("*/api/groups/:id/invite", ({ params }) => {
+      const g = state.groups.find((x) => x.groupId === params.id);
+      if (!g || !g.isOwner) return fail(1001, "not_group_owner");
+      g.inviteCode = Array.from({ length: 6 }, () =>
+        "23456789ABCDEFGHJKMNPQRSTUVWXYZ"[Math.floor(Math.random() * 31)]).join("");
+      return ok({ inviteCode: g.inviteCode });
+    }),
+    http.delete("*/api/groups/:id/invite", ({ params }) => {
+      const g = state.groups.find((x) => x.groupId === params.id);
+      if (!g || !g.isOwner) return fail(1001, "not_group_owner");
+      g.inviteCode = null;
+      return ok(null);
+    }),
+    http.get("*/api/groups/:id/requests", ({ params }) =>
+      ok(state.joinRequests.filter((r) => r.groupId === params.id))),
+    http.post("*/api/group-requests/:id/approve", ({ params }) => {
+      const i = state.joinRequests.findIndex((r) => r.requestId === params.id);
+      if (i < 0) return fail(1001, "request_handled");
+      const [r] = state.joinRequests.splice(i, 1);
+      const g = state.groups.find((x) => x.groupId === r.groupId);
+      if (g) g.memberCount++;
+      return ok(null);
+    }),
+    http.post("*/api/group-requests/:id/reject", ({ params }) => {
+      const i = state.joinRequests.findIndex((r) => r.requestId === params.id);
+      if (i < 0) return fail(1001, "request_handled");
+      state.joinRequests.splice(i, 1);
+      return ok(null);
+    }),
+
+    // ── M2-27 lan-segments（04 §2.5；passive 允许）────────────
+    http.get("*/api/lan-segments", () => ok(state.lanSegments)),
+    http.post("*/api/lan-segments", async ({ request }) => {
+      const { cidr } = (await request.json()) as { cidr?: string };
+      if (!cidr || !/^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(cidr.trim()))
+        return fail(1001, "bad_cidr");
+      const seg: MockLanSegment = { segmentId: crypto.randomUUID(), cidr: cidr.trim(), enabled: true };
+      state.lanSegments.push(seg);
+      return ok(seg);
+    }),
+    http.delete("*/api/lan-segments/:id", ({ params }) => {
+      const i = state.lanSegments.findIndex((s) => s.segmentId === params.id);
+      if (i >= 0) state.lanSegments.splice(i, 1);
+      return ok(null);
+    }),
+
+    // ── M2-27 日志（04 §2.6；newest-first + 级别过滤 + 分页）──
+    http.get("*/api/logs", ({ request }) => {
+      const url = new URL(request.url);
+      const level = url.searchParams.get("level");
+      const levelToken = level
+        ? ({ debug: "DBG", info: "INF", information: "INF", warning: "WRN", warn: "WRN", error: "ERR", fatal: "FTL" } as Record<string, string>)[level.toLowerCase()] ?? null
+        : null;
+      if (level && !levelToken) return fail(1001, "bad_level");
+      const all = [...state.logs].reverse().filter((l) => !levelToken || l.level === levelToken);
+      const page = Math.max(1, Number(url.searchParams.get("page") ?? 1));
+      const pageSize = 200;
+      const items = all.slice((page - 1) * pageSize, page * pageSize);
+      return ok({ items, page, pageSize, total: all.length, hasMore: page * pageSize < all.length });
+    }),
+    http.get("*/api/logs/export", ({ request }) => {
+      const url = new URL(request.url);
+      const level = url.searchParams.get("level");
+      const levelToken = level
+        ? ({ debug: "DBG", info: "INF", information: "INF", warning: "WRN", warn: "WRN", error: "ERR", fatal: "FTL" } as Record<string, string>)[level.toLowerCase()] ?? null
+        : null;
+      if (level && !levelToken) return fail(1001, "bad_level");
+      const text = state.logs
+        .filter((l) => !levelToken || l.level === levelToken)
+        .map((l) => `${l.ts} [${l.level}] ${l.message}`)
+        .join("\n");
+      return new HttpResponse(text, {
+        headers: {
+          "content-type": "text/plain; charset=utf-8",
+          "content-disposition": 'attachment; filename="p2p-logs-demo.txt"',
+        },
+      });
+    }),
   ];
 }
 

@@ -1,5 +1,5 @@
 // 本文件由 export-ts 反射生成（06 §5、08 §2③），禁止手改。
-// 源：P2P.Client 展示 DTO + WsEventNames 常量（src/Tools/ExportTs @ 2026-09-10T15:00:49Z）。
+// 源：P2P.Client 展示 DTO + WsEventNames 常量（src/Tools/ExportTs @ 2026-09-29T23:49:17Z）。
 
 /** 响应包裹（04 §0：code=0 成功；!=0 见错误码表 04 §5）。 */
 export interface ApiEnvelope<T> {
@@ -59,6 +59,62 @@ export interface ReconnectSettings {
 }
 
 
+export interface UpgradeInfoView {
+  latestVersion: string;
+  minProtocol: number;
+  maxProtocol: number;
+  upgradeUrl: string;
+  notes: string;
+}
+
+
+export interface GroupView {
+  groupId: string;
+  groupName: string;
+  policy: string;
+  isOwner: boolean;
+  memberCount: number;
+}
+
+
+export interface GroupRequestView {
+  requestId: string;
+  groupId: string;
+  deviceId: string;
+  deviceName: string;
+  createdAtMs: number;
+}
+
+
+export interface GroupsView {
+  items: GroupView[];
+  requests: GroupRequestView[];
+}
+
+
+export interface LanSegmentView {
+  segmentId: string;
+  cidr: string;
+  enabled: boolean;
+}
+
+
+export interface LogEntryView {
+  ts: string;
+  level: string;
+  message: string;
+}
+
+
+export interface LogPageView {
+  items: LogEntryView[];
+  page: number;
+  pageSize: number;
+  total: number;
+  hasMore: boolean;
+}
+
+
 /** 映射状态机（02 §4.5：disabled→punching→direct/failed；relay/invalid 为 M2 预留）。 */
 export type MappingState = "disabled" | "punching" | "direct" | "relay" | "failed" | "invalid";
 
@@ -71,7 +127,9 @@ export type CapabilityMode = "normal" | "passive";
 // ── WS 事件（04 §2.8；事件名反射自 WsEventNames 单一事实源）──────
 // MappingState = "mapping_state"
 // MappingStats = "mapping_stats"
+// DeviceList = "device_list"
 // LoginState = "login_state"
+// UpgradeRequired = "upgrade_required"
 
 /** 高频数值类：直写 store（下秒覆盖，丢失无害，TD-16）。 */
 export interface MappingStatsEvent {
@@ -100,4 +158,10 @@ export interface DeviceListEvent {
   ev: "device_list";
 }
 
-export type WsEvent = MappingStatsEvent | MappingStateEvent | LoginStateEvent | DeviceListEvent;
+/** 升级引导（M2-26，FR-C-904：版本拒答/升级信息到达→refetch /api/upgrade/info）。 */
+export interface UpgradeRequiredEvent {
+  ev: "upgrade_required";
+  latestVersion: string;
+}
+
+export type WsEvent = MappingStatsEvent | MappingStateEvent | LoginStateEvent | DeviceListEvent | UpgradeRequiredEvent;

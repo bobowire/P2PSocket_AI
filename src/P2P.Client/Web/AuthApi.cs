@@ -1,8 +1,9 @@
 // M1-29 账号端点（04 §2.3，转发 0x20~0x22）：
 // - register/login/logout/me；登录成功切能力模式（ControlClient 镜像维护，WS login_state 事件源）；
 // - login Ack.Ok=false → 2001（服务端不降级、客户端亦不切模式，02 §2.5）；
-// - logout → passive（FR-C-603 不重启）。
-// change-password（0x23）→ M2。
+// - logout → passive（FR-C-603 不重启）；
+// - change-password（0x23，M2-27/FR-S-205）：前置校验同 05 §3 口径（新密码 ≥6），
+//   Ack.Ok=false → 2001（旧密码错误，不泄漏具体原因）。
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
 using P2P.Client.Control;
@@ -60,6 +61,27 @@ public static class AuthApi
             mode = control.Capability == CapabilityMode.Normal ? "normal" : "passive",
         }));
 
+        // 修改自己密码（0x23，FR-S-205；04 §2.3 权威路径 /api/auth/change-password）
+        app.MapPost("/api/auth/change-password", async (ChangePasswordRequest body, CancellationToken ct) =>
+        {
+            try
+            {
+                var oldPassword = body.OldPassword ?? "";
+                var newPassword = body.NewPassword ?? "";
+                if (oldPassword.Length == 0)
+                    throw new ApiException(ErrorCode.BadRequest, "旧密码不能为空");
+                if (newPassword.Length < 6)
+                    throw new ApiException(ErrorCode.BadRequest, "新密码至少 6 字符");
+                var ack = await control.SendRequestAsync<UserChangePasswordAck>(new UserChangePassword(
+                    control.NextSeq(), control.TimestampMs(), MsgType.UserChangePassword,
+                    oldPassword, newPassword), ct);
+                if (!ack.Ok)
+                    throw new ApiException(ErrorCode.Unauthorized, "旧密码错误或修改被拒绝");
+                return Api.Ok(null);
+            }
+            catch (Exception e) { return Api.Fail(e); }
+        });
+
         return app;
     }
 
@@ -76,4 +98,6 @@ public static class AuthApi
     }
 
     public sealed record CredentialsRequest(string? Username, string? Password);
+
+    public sealed record ChangePasswordRequest(string? OldPassword, string? NewPassword);
 }

@@ -13,6 +13,7 @@ namespace P2P.Server.Tests;
 /// 分组与设备列表测试（02 §2.4 0x50~0x57/0x40）。
 /// M1-16：分页边界（空/恰满/越界 offset）、0x50/0x55/0x56 权限与生命周期、解散后可见性回收。
 /// M2-09：凭码入组（free/approval 双策略）、审批队列、邀请码生成/撤销/唯一性、退组/移出可见性回收。
+/// M2-27：0x42 已加入分组列表（isOwner/memberCount/policy，本地 /api/groups 数据源）。
 /// </summary>
 public sealed class GroupTests : IAsyncLifetime
 {
@@ -628,5 +629,66 @@ public sealed class GroupTests : IAsyncLifetime
         var after = await ListAsync(a, 0, 100);
         Assert.DoesNotContain(after.Items, i => i.DeviceId == bId);
         Assert.Contains(after.Items, i => i.DeviceId == aId); // 自身仍可见
+    }
+
+    // ── M2-27 0x42 已加入分组列表（本地 /api/groups 数据源）────────────
+
+    private static async Task<GroupListResponse> GroupListAsync(TestPcpClient client)
+    {
+        await client.SendAsync(new GroupListRequest(client.NextSeq(), client.Now(), MsgType.GroupList));
+        return await client.ReceiveAsync<GroupListResponse>() ?? throw new IOException("分组列表无应答");
+    }
+
+    [Fact]
+    public async Task GroupList_MembershipOwnerFlagAndCounts()
+    {
+        // 跨账号拓扑：admin 持有自有组+开放组；eve 凭码加入开放组（成员是设备维度）
+        var (owner, ownerId) = await ConnectLoggedInAsync("owner");
+        var (joiner, joinerId) = await ConnectRegisteredAsync("joiner");
+        await LoginNewUserAsync(joiner, "eve");
+
+        await owner.SendAsync(new GroupCreate(owner.NextSeq(), owner.Now(), MsgType.GroupCreate,
+            "自有组", JoinPolicy.Approval));
+        var owned = await owner.ReceiveAsync<GroupCreateAck>();
+        await owner.SendAsync(new GroupCreate(owner.NextSeq(), owner.Now(), MsgType.GroupCreate,
+            "开放组", JoinPolicy.Free));
+        var open = await owner.ReceiveAsync<GroupCreateAck>();
+        var code = await GenInviteAsync(owner, open!.GroupId);
+        await joiner.SendAsync(new GroupJoin(joiner.NextSeq(), joiner.Now(), MsgType.GroupJoin, code));
+        Assert.Equal(open.GroupId, (await joiner.ReceiveAsync<GroupJoinAck>())!.GroupId);
+
+        // owner 侧：两新组 IsOwner=true、成员数 2（创建即首成员+joiner）、approval 策略回传
+        var ownerList = await GroupListAsync(owner);
+        var ownItem = ownerList.Items.Single(i => i.GroupId == owned!.GroupId);
+        Assert.True(ownItem.IsOwner);
+        Assert.Equal(JoinPolicy.Approval, ownItem.Policy);
+        Assert.Equal(1u, ownItem.MemberCount);
+        var openItem = ownerList.Items.Single(i => i.GroupId == open.GroupId);
+        Assert.True(openItem.IsOwner);
+        Assert.Equal(2u, openItem.MemberCount);
+        Assert.Contains(ownerList.Items, i => i.GroupName == DbInitializer.DefaultGroupName);
+
+        // joiner 侧（独立账号 eve）：开放组 IsOwner=false；未加入的自有组不在列
+        var joinerList = await GroupListAsync(joiner);
+        var joined = joinerList.Items.Single(i => i.GroupId == open.GroupId);
+        Assert.False(joined.IsOwner);
+        Assert.Equal(JoinPolicy.Free, joined.Policy);
+        Assert.Equal(2u, joined.MemberCount);
+        Assert.DoesNotContain(joinerList.Items, i => i.GroupId == owned!.GroupId);
+
+        _ = ownerId;
+        _ = joinerId;
+    }
+
+    [Fact]
+    public async Task GroupList_UnloggedStillListed_AndActiveClassGated()
+    {
+        // 未登录设备仍可列（0x40 同口径：成员资格是设备维度）
+        var (anon, _) = await ConnectRegisteredAsync("anon");
+        var list = await GroupListAsync(anon);
+        Assert.Contains(list.Items, i => i.GroupName == DbInitializer.DefaultGroupName);
+
+        // 主动类闸：0x42 与 0x40 同列（02 §2.5，passive 拒 2002）
+        Assert.True(ControlMessageRouter.IsActiveClass(MsgType.GroupList));
     }
 }

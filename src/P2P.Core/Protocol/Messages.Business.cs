@@ -187,6 +187,32 @@ public sealed record DeviceListUpdate(
     [property: Key(1)] ulong TimestampMs,
     [property: Key(2)] byte MsgType) : IPcpMessage;
 
+// ── 0x42 分组列表（M2-27 定案：本地 /api/groups 的协议侧缺口——0x40 列表项仅回组名无
+//    groupId/owner，分组页离开/编辑/解散/审批等 0x52~0x57 操作均需 groupId；加法演进 02 §7）──
+
+/// <summary>0x42 C→S：请求本设备已加入分组全量（无附加载荷；主动类——passive 拒 2002）。</summary>
+[MessagePackObject]
+public sealed record GroupListRequest(
+    [property: Key(0)] uint Seq,
+    [property: Key(1)] ulong TimestampMs,
+    [property: Key(2)] byte MsgType) : IPcpMessage;
+
+/// <summary>列表项：分组最小展示集（isOwner 驱动所有者操作可见性，FR-C-805）。</summary>
+[MessagePackObject]
+public sealed record GroupListItem(
+    [property: Key(0)] Guid GroupId,
+    [property: Key(1)] string GroupName,
+    [property: Key(2)] JoinPolicy Policy,
+    [property: Key(3)] bool IsOwner,
+    [property: Key(4)] uint MemberCount);
+
+[MessagePackObject]
+public sealed record GroupListResponse(
+    [property: Key(0)] uint Seq,
+    [property: Key(1)] ulong TimestampMs,
+    [property: Key(2)] byte MsgType,
+    [property: Key(3)] GroupListItem[] Items) : IPcpMessage;
+
 // ── 0x50~0x57 分组管理（M2-03 补全 0x51~0x54/0x57 全族）──────────────────
 
 /// <summary>准入策略（D9）：free=即入；approval=审批。</summary>

@@ -489,6 +489,33 @@ public sealed class GroupService(
             MsgType.DeviceList, (uint)total, listItems, hasMore));
     }
 
+    // ── 0x42 已加入分组列表（M2-27 定案，FR-C-805：本地 /api/groups 数据源）────
+
+    /// <summary>本设备已加入分组全量（仅 approved 成员行）：groupId/名称/策略/所有者标志/成员数。
+    /// 与 0x40 同口径——无需登录（成员资格是设备维度），passive 由主动类闸统一拒绝。</summary>
+    public async Task HandleGroupListAsync(ControlSession session, GroupListRequest msg)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync();
+        var rows = await (from m in db.GroupMembers
+                          where m.DeviceId == session.DeviceId && m.Approved
+                          join g in db.Groups on m.GroupId equals g.Id
+                          orderby g.Name, g.Id
+                          select new { g.Id, g.Name, g.JoinPolicy, g.OwnerUserId }).ToListAsync();
+        var groupIds = rows.Select(r => r.Id).ToList();
+        var counts = await db.GroupMembers
+            .Where(m => groupIds.Contains(m.GroupId) && m.Approved)
+            .GroupBy(m => m.GroupId)
+            .Select(g => new { g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.Key, x => x.Count);
+
+        await session.SendAsync(new GroupListResponse(session.NextSeq(), session.ServerTimestamp(),
+            MsgType.GroupList, rows.Select(r => new GroupListItem(
+                r.Id, r.Name,
+                r.JoinPolicy == "approval" ? JoinPolicy.Approval : JoinPolicy.Free,
+                session.OwnerUserId is not null && r.OwnerUserId == session.OwnerUserId,
+                (uint)counts.GetValueOrDefault(r.Id))).ToArray()));
+    }
+
     /// <summary>可见设备查询（与 Authorizer L2 同口径：本账号设备 ∪ 共同分组设备）。</summary>
     internal static IQueryable<Device> VisibleDevices(AppDbContext db, ControlSession session)
     {

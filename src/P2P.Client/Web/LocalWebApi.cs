@@ -24,11 +24,14 @@ public sealed class LocalApiServices : IAsyncDisposable
     public ClientRegistrationService Wizard { get; }
     public MappingSyncService Mappings { get; }
     public PunchScheduler Scheduler { get; }
+    public LanSegmentsStore LanSegments { get; }
+    public string LogsDir { get; }
     public LocalApiContext Context { get; }
     public StatusHub Hub { get; }
 
     public LocalApiServices(ControlClient control, StateStore state, SettingsStore settings,
-        PeersStore peers, ClientRegistrationService wizard, MappingSyncService mappings, PunchScheduler scheduler)
+        PeersStore peers, ClientRegistrationService wizard, MappingSyncService mappings,
+        PunchScheduler scheduler, LanSegmentsStore? lanSegments = null, string? logsDir = null)
     {
         Control = control;
         State = state;
@@ -37,6 +40,8 @@ public sealed class LocalApiServices : IAsyncDisposable
         Wizard = wizard;
         Mappings = mappings;
         Scheduler = scheduler;
+        LanSegments = lanSegments ?? new LanSegmentsStore(ClientPaths.DefaultBaseDir);
+        LogsDir = logsDir ?? Path.Combine(ClientPaths.DefaultBaseDir, "logs");
         Context = new LocalApiContext();
         Hub = new StatusHub(mappings.Traffic); // mapping_stats 1s 采样源（04 §2.8）
 
@@ -77,6 +82,9 @@ public static class LocalWebApi
         app.MapDeviceApi(services.Control, services.State, services.Hub); // M2-15 加 0x14 重置端点
         app.MapPeersApi(services.Control, services.Peers); // M2-23 目标设备级配置（04 §2.4）
         app.MapUpgradeApi(services.Control); // M2-26 升级引导（04 §2.7）
+        app.MapGroupsApi(services.Control, services.Hub); // M2-27 分组全套（04 §2.4，0x42/0x50~0x57）
+        app.MapLanSegmentsApi(services.Control, services.LanSegments, services.Hub); // M2-27 白名单（0x63）
+        app.MapLogsApi(services.LogsDir); // M2-27 日志查询/导出（NFR-51）
         app.MapDiagnosticsApi(services.Scheduler);
         app.Map("/ws/status", services.Hub.HandleAsync); // 04 §2.8 实时通道
         return app;

@@ -5,14 +5,19 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ApiEndpoints, ApiPaths } from "./api-paths";
 
-/** 04 §2 本地 Web 端点全集（2.1/2.2/2.3/2.4/2.5/2.6/2.8）。 */
+/** 04 §2 本地 Web 端点全集（2.1/2.2/2.3/2.4/2.5/2.6/2.7/2.8）。
+ * M2-15 加 /api/device/reset-remote-code；M2-23 加 /api/peers/{deviceId}；
+ * M2-26 加 /api/upgrade/info；M2-27 加 auth/change-password、groups 全套、
+ * lan-segments、logs（本集自 M2-15/23 起补齐漂移收口）。 */
 const DOCUMENTED: ReadonlyArray<{ path: string; methods: readonly string[] }> = [
   { path: "/api/system/state", methods: ["GET"] },
   { path: "/api/device", methods: ["GET", "PUT"] },
+  { path: "/api/device/reset-remote-code", methods: ["POST"] },
   { path: "/api/devices", methods: ["GET"] },
   { path: "/api/auth/register", methods: ["POST"] },
   { path: "/api/auth/login", methods: ["POST"] },
   { path: "/api/auth/logout", methods: ["POST"] },
+  { path: "/api/auth/change-password", methods: ["POST"] },
   { path: "/api/auth/me", methods: ["GET"] },
   { path: "/api/wizard/server-test", methods: ["POST"] },
   { path: "/api/wizard/register", methods: ["POST"] },
@@ -22,6 +27,21 @@ const DOCUMENTED: ReadonlyArray<{ path: string; methods: readonly string[] }> = 
   { path: "/api/mappings/{id}/enable", methods: ["POST"] },
   { path: "/api/mappings/{id}/disable", methods: ["POST"] },
   { path: "/api/mappings/{id}/retry", methods: ["POST"] },
+  { path: "/api/peers/{deviceId}", methods: ["GET", "PUT"] },
+  { path: "/api/groups", methods: ["GET", "POST"] },
+  { path: "/api/groups/join", methods: ["POST"] },
+  { path: "/api/groups/{id}", methods: ["PUT", "DELETE"] },
+  { path: "/api/groups/{id}/leave", methods: ["POST"] },
+  { path: "/api/groups/{id}/invite", methods: ["GET", "DELETE"] },
+  { path: "/api/groups/{id}/requests", methods: ["GET"] },
+  { path: "/api/groups/{id}/members/{deviceId}/kick", methods: ["POST"] },
+  { path: "/api/group-requests/{id}/approve", methods: ["POST"] },
+  { path: "/api/group-requests/{id}/reject", methods: ["POST"] },
+  { path: "/api/lan-segments", methods: ["GET", "POST"] },
+  { path: "/api/lan-segments/{id}", methods: ["DELETE"] },
+  { path: "/api/logs", methods: ["GET"] },
+  { path: "/api/logs/export", methods: ["GET"] },
+  { path: "/api/upgrade/info", methods: ["GET"] },
   { path: "/api/settings", methods: ["GET", "PUT"] },
   { path: "/api/diagnostics", methods: ["GET"] },
   { path: "/ws/status", methods: ["WS"] },
@@ -58,12 +78,21 @@ describe("export-ts 生成物", () => {
       "MappingStatsEvent",
       "MappingStateEvent",
       "LoginStateEvent",
+      "DeviceListEvent",
+      "UpgradeRequiredEvent",
       "export type WsEvent",
       'MappingState = "mapping_state"', // WsEventNames 反射同源注释
       'MappingStats = "mapping_stats"',
+      'DeviceList = "device_list"',
       'LoginState = "login_state"',
+      'UpgradeRequired = "upgrade_required"',
       "interface MappingView",
       "interface ClientSettings",
+      "interface UpgradeInfoView", // M2-26
+      "interface GroupView", // M2-27
+      "interface GroupsView",
+      "interface LanSegmentView",
+      "interface LogPageView",
     ])
       expect(dts).toContain(snippet);
   });

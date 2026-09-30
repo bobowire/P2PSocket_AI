@@ -82,7 +82,8 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
             new MappingService(_factory, audit),
             relay,
             new StatsService(_factory, audit),
-            audit);
+            audit,
+            new LanSegmentService(_factory, _registry, audit)); // M2-27：0x63 挂载（/api/lan-segments 链路）
         var server = new ControlServer(_factory, _registry, router.DispatchAsync);
         await server.StartAsync(new IPEndPoint(IPAddress.Loopback, port));
         _signalings.Add(signaling);
@@ -237,6 +238,7 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
         public WebApplication App = null!;
         public HttpClient Http = null!;
         public string WsUrl = null!;
+        public string LogsDir = null!;
 
         public async ValueTask DisposeAsync()
         {
@@ -283,8 +285,11 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
         stack.Scheduler = new PunchScheduler(stack.Puncher);
         stack.Engine = new MappingEngine(stack.Host, stack.Scheduler, IPAddress.Loopback);
         var sync = new MappingSyncService(stack.Control, stack.Engine, stack.Store);
+        var lanSegments = new LanSegmentsStore(dir); // M2-27 白名单镜像（/api/lan-segments 同实例）
+        lanSegments.Load();
+        stack.LogsDir = Path.Combine(dir, "logs"); // M2-27 日志端点读目录（测试可确定性写文件）
         stack.Api = new LocalApiServices(stack.Control, stack.Store, stack.Settings,
-            peers, stack.Wizard, sync, stack.Scheduler);
+            peers, stack.Wizard, sync, stack.Scheduler, lanSegments, stack.LogsDir);
 
         var webPort = FreePort();
         var builder = WebApplication.CreateBuilder();
@@ -392,6 +397,15 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
 
     private static Task<(int code, JsonElement? data)> GetAsync(
         ClientStack stack, string path) => SendAsync(stack, HttpMethod.Get, path, null);
+
+    /// <summary>同表换址触发重连并等待会话复位 Normal（02 §2.5：passive 会话主动类须重连后再发）。</summary>
+    private static async Task ReconnectToNormalAsync(ClientStack stack)
+    {
+        stack.Control.UpdateServerAddrs(stack.Control.ServerAddrs);
+        for (var i = 0; i < 100 && !(stack.Control.IsReady && stack.Control.Capability == CapabilityMode.Normal); i++)
+            await Task.Delay(100);
+        Assert.True(stack.Control.IsReady && stack.Control.Capability == CapabilityMode.Normal, "重连未复位 Normal");
+    }
 
     // ── ① 向导契约：server-test / register(default) / result / phase 迁移 ──
 
@@ -844,6 +858,222 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
         Assert.Equal(ErrorCode.ForbiddenPassive, denied.code);
         var deniedPut = await PutAsync(stack, $"/api/peers/{deviceId}", new { relayFallback = false });
         Assert.Equal(ErrorCode.ForbiddenPassive, deniedPut.code);
+    }
+
+    // ── ⑨ 分组端点全链（M2-27，04 §2.4：0x42/0x50~0x57 薄转发 + 聚合）──
+
+    [Fact]
+    public async Task 分组端点_全生命周期_聚合与审批()
+    {
+        var a = await SeedDeviceAsync("grp-owner");
+        var b = await SeedDeviceAsync("grp-joiner");
+        await using var stackA = await StartStackAsync(a);
+        await using var stackB = await StartStackAsync(b);
+
+        // B 切独立账号 eve（isOwner=false 视角；passive 会话重连复位后再登录，02 §2.5）
+        await PostAsync(stackB, "/api/auth/logout", null);
+        await ReconnectToNormalAsync(stackB);
+        var eve = $"eve{Guid.NewGuid():N}"[..10];
+        await PostAsync(stackB, "/api/auth/register", new { username = eve, password = "evepass1" });
+        Assert.Equal(ErrorCode.Ok,
+            (await PostAsync(stackB, "/api/auth/login", new { username = eve, password = "evepass1" })).code);
+
+        // 建组（approval 策略）→ groupId
+        var created = await PostAsync(stackA, "/api/groups", new { name = "集成审批组", joinPolicy = "approval" });
+        Assert.Equal(ErrorCode.Ok, created.code);
+        var groupId = created.data!.Value.GetProperty("groupId").GetGuid();
+
+        // 非法入参：空名 / 坏策略 → 1001（本地前置校验）
+        Assert.Equal(ErrorCode.BadRequest,
+            (await PostAsync(stackA, "/api/groups", new { name = "  ", joinPolicy = "free" })).code);
+        Assert.Equal(ErrorCode.BadRequest,
+            (await PostAsync(stackA, "/api/groups", new { name = "x", joinPolicy = "bad" })).code);
+
+        // 邀请码：生成 → 撤销 → 失效码入组 3001 → 再生成
+        var invite = await GetAsync(stackA, $"/api/groups/{groupId}/invite");
+        Assert.Equal(ErrorCode.Ok, invite.code);
+        var code = invite.data!.Value.GetProperty("inviteCode").GetString()!;
+        Assert.Equal(ErrorCode.Ok, (await SendAsync(stackA, HttpMethod.Delete, $"/api/groups/{groupId}/invite", null)).code);
+        var dead = await PostAsync(stackB, "/api/groups/join", new { inviteCode = code });
+        Assert.Equal(ErrorCode.GroupNotFound, dead.code); // 3001：撤销后码失效
+        var invite2 = await GetAsync(stackA, $"/api/groups/{groupId}/invite");
+        var code2 = invite2.data!.Value.GetProperty("inviteCode").GetString()!;
+
+        // approval 入组 → 3002 待审批；所有者聚合视图带申请项
+        var pending = await PostAsync(stackB, "/api/groups/join", new { inviteCode = code2 });
+        Assert.Equal(ErrorCode.GroupNeedApproval, pending.code);
+        var agg = await GetAsync(stackA, "/api/groups");
+        Assert.Equal(ErrorCode.Ok, agg.code);
+        var grp = agg.data!.Value.GetProperty("items").EnumerateArray()
+            .Single(i => i.GetProperty("groupId").GetGuid() == groupId);
+        Assert.True(grp.GetProperty("isOwner").GetBoolean());
+        Assert.Equal("approval", grp.GetProperty("policy").GetString());
+        Assert.Equal(1u, grp.GetProperty("memberCount").GetUInt32());
+        var req = Assert.Single(agg.data.Value.GetProperty("requests").EnumerateArray());
+        var requestId = req.GetProperty("requestId").GetGuid();
+        Assert.Equal(b.DeviceId, req.GetProperty("deviceId").GetGuid());
+        Assert.Equal("grp-joiner", req.GetProperty("deviceName").GetString());
+        Assert.True(req.GetProperty("createdAtMs").GetUInt64() > 0);
+
+        // 审批队列单查同口径；approve → 双侧视图一致（memberCount=2、requests 清空）
+        var queue = await GetAsync(stackA, $"/api/groups/{groupId}/requests");
+        Assert.Equal(requestId, queue.data!.Value.EnumerateArray().Single().GetProperty("requestId").GetGuid());
+        Assert.Equal(ErrorCode.Ok,
+            (await PostAsync(stackA, $"/api/group-requests/{requestId}/approve", null)).code);
+        var agg2 = await GetAsync(stackA, "/api/groups");
+        Assert.Equal(2u, agg2.data!.Value.GetProperty("items").EnumerateArray()
+            .Single(i => i.GetProperty("groupId").GetGuid() == groupId).GetProperty("memberCount").GetUInt32());
+        Assert.Empty(agg2.data.Value.GetProperty("requests").EnumerateArray());
+        var viewB = await GetAsync(stackB, "/api/groups");
+        var joinedB = viewB.data!.Value.GetProperty("items").EnumerateArray()
+            .Single(i => i.GetProperty("groupId").GetGuid() == groupId);
+        Assert.False(joinedB.GetProperty("isOwner").GetBoolean());
+
+        // 编辑策略 free；kick 移出（memberCount 回落）；非成员 leave 1001；解散后列表消失
+        Assert.Equal(ErrorCode.Ok,
+            (await PutAsync(stackA, $"/api/groups/{groupId}", new { joinPolicy = "free" })).code);
+        Assert.Equal(ErrorCode.Ok,
+            (await PostAsync(stackA, $"/api/groups/{groupId}/members/{b.DeviceId}/kick", null)).code);
+        var agg3 = await GetAsync(stackA, "/api/groups");
+        Assert.Equal(1u, agg3.data!.Value.GetProperty("items").EnumerateArray()
+            .Single(i => i.GetProperty("groupId").GetGuid() == groupId).GetProperty("memberCount").GetUInt32());
+        Assert.Equal(ErrorCode.BadRequest,
+            (await PostAsync(stackB, $"/api/groups/{groupId}/leave", null)).code);
+        Assert.Equal(ErrorCode.Ok,
+            (await SendAsync(stackA, HttpMethod.Delete, $"/api/groups/{groupId}", null)).code);
+        var agg4 = await GetAsync(stackA, "/api/groups");
+        Assert.DoesNotContain(agg4.data!.Value.GetProperty("items").EnumerateArray(),
+            i => i.GetProperty("groupId").GetGuid() == groupId);
+
+        // passive（登出）→ 2002（04 §2.4 节主动类闸）
+        await PostAsync(stackA, "/api/auth/logout", null);
+        Assert.Equal(ErrorCode.ForbiddenPassive, (await GetAsync(stackA, "/api/groups")).code);
+    }
+
+    // ── ⑩ lan-segments CRUD（M2-27，04 §2.5：0x63 转发 + 镜像收口 + passive 允许）──
+
+    [Fact]
+    public async Task 白名单端点_增删镜像与服务端一致()
+    {
+        var a = await SeedDeviceAsync("seg-dev");
+        await using var stack = await StartStackAsync(a);
+
+        // 初始空；非法 cidr 1001；裸 IP 规范化为 /32（与服务端同口径）
+        var empty = await GetAsync(stack, "/api/lan-segments");
+        Assert.Equal(ErrorCode.Ok, empty.code);
+        Assert.Empty(empty.data!.Value.EnumerateArray());
+        Assert.Equal(ErrorCode.BadRequest,
+            (await PostAsync(stack, "/api/lan-segments", new { cidr = "999.1.2.3/24" })).code);
+        var bare = await PostAsync(stack, "/api/lan-segments", new { cidr = "192.168.50.7" });
+        Assert.Equal(ErrorCode.Ok, bare.code);
+        Assert.Equal("192.168.50.7/32", bare.data!.Value.GetProperty("cidr").GetString());
+        var segmentId = bare.data.Value.GetProperty("segmentId").GetGuid();
+
+        // 服务端权威行存在；镜像与服务端同形
+        await using (var db = _factory.CreateDbContext())
+            Assert.True(await db.LanSegments.AsNoTracking()
+                .AnyAsync(s => s.Id == segmentId && s.DeviceId == a.DeviceId && s.Cidr == "192.168.50.7/32"));
+        var list = await GetAsync(stack, "/api/lan-segments");
+        var item = Assert.Single(list.data!.Value.EnumerateArray());
+        Assert.Equal(segmentId, item.GetProperty("segmentId").GetGuid());
+        Assert.True(item.GetProperty("enabled").GetBoolean());
+
+        // 网段新增；删除幂等（未知 id Ok、真删后库行消失）
+        Assert.Equal(ErrorCode.Ok,
+            (await PostAsync(stack, "/api/lan-segments", new { cidr = "10.10.0.0/16" })).code);
+        Assert.Equal(ErrorCode.Ok,
+            (await SendAsync(stack, HttpMethod.Delete, $"/api/lan-segments/{Guid.NewGuid()}", null)).code);
+        Assert.Equal(ErrorCode.Ok,
+            (await SendAsync(stack, HttpMethod.Delete, $"/api/lan-segments/{segmentId}", null)).code);
+        var after = await GetAsync(stack, "/api/lan-segments");
+        Assert.Equal("10.10.0.0/16", Assert.Single(after.data!.Value.EnumerateArray())
+            .GetProperty("cidr").GetString());
+        await using (var db2 = _factory.CreateDbContext())
+            Assert.False(await db2.LanSegments.AsNoTracking().AnyAsync(s => s.Id == segmentId));
+
+        // passive 允许（0x63 本机管理类，02 §2.5 不在主动类清单）
+        await PostAsync(stack, "/api/auth/logout", null);
+        var passive = await PostAsync(stack, "/api/lan-segments", new { cidr = "172.16.0.0/12" });
+        Assert.Equal(ErrorCode.Ok, passive.code);
+    }
+
+    // ── ⑪ 日志端点（M2-27，04 §2.6/NFR-51：Serilog 文本行解析/过滤/分页/导出）──
+
+    [Fact]
+    public async Task 日志端点_解析过滤分页与导出()
+    {
+        var a = await SeedDeviceAsync("log-dev");
+        await using var stack = await StartStackAsync(a);
+        Directory.CreateDirectory(stack.LogsDir);
+        const string day1 = "2026-09-29 08:00:00.123 +08:00 [INF] 控制通道已建立";
+        const string day2a = "2026-09-30 09:00:00.001 +08:00 [WRN] 心跳超时，准备重连";
+        const string day2b = "2026-09-30 09:00:01.500 +08:00 [ERR] 重连失败";
+        const string day2c = "2026-09-30 09:00:02.000 +08:00 [INF] 已重连";
+        await File.WriteAllTextAsync(Path.Combine(stack.LogsDir, "client-20260929.log"), day1 + "\n");
+        await File.WriteAllTextAsync(Path.Combine(stack.LogsDir, "client-20260930.log"),
+            day2a + "\n" + day2b + "\nSystem.InvalidOperationException: 堆栈行\n   at Demo()\n" + day2c + "\n");
+
+        // 默认 newest-first：30 日的三条在前（倒序），29 日的在末；堆栈续行归 ERR 条
+        var page1 = await GetAsync(stack, "/api/logs");
+        Assert.Equal(ErrorCode.Ok, page1.code);
+        var items = page1.data!.Value.GetProperty("items").EnumerateArray().ToList();
+        Assert.Equal(4, page1.data.Value.GetProperty("total").GetInt32());
+        Assert.Equal(1, page1.data.Value.GetProperty("page").GetInt32());
+        Assert.False(page1.data.Value.GetProperty("hasMore").GetBoolean());
+        Assert.Equal("已重连", items[0].GetProperty("message").GetString());
+        Assert.Equal("ERR", items[1].GetProperty("level").GetString());
+        Assert.Contains("System.InvalidOperationException", items[1].GetProperty("message").GetString());
+        Assert.Equal("控制通道已建立", items[3].GetProperty("message").GetString());
+
+        // 级别过滤 + 分页：level=error 仅 1 条；pageSize 越界页空但 total 不变
+        var errors = await GetAsync(stack, "/api/logs?level=error");
+        Assert.Equal(1, errors.data!.Value.GetProperty("total").GetInt32());
+        Assert.StartsWith("重连失败", errors.data.Value.GetProperty("items")[0].GetProperty("message").GetString());
+        var badLevel = await GetAsync(stack, "/api/logs?level=verbose");
+        Assert.Equal(ErrorCode.BadRequest, badLevel.code);
+        var farPage = await GetAsync(stack, "/api/logs?page=99");
+        Assert.Empty(farPage.data!.Value.GetProperty("items").EnumerateArray());
+        Assert.Equal(4, farPage.data.Value.GetProperty("total").GetInt32());
+
+        // 导出：时间正序 text/plain 附件，含过滤参数
+        using var export = await stack.Http.GetAsync("/api/logs/export?level=wrn");
+        Assert.Equal(200, (int)export.StatusCode);
+        Assert.Equal("text/plain", export.Content.Headers.ContentType!.MediaType);
+        Assert.StartsWith("attachment", export.Content.Headers.ContentDisposition!.DispositionType);
+        var text = await export.Content.ReadAsStringAsync();
+        Assert.Contains(day2a, text);
+        Assert.DoesNotContain("重连失败", text);
+    }
+
+    // ── ⑫ 修改密码（M2-27，04 §2.3 /api/auth/change-password：0x23 全链）──
+
+    [Fact]
+    public async Task 修改密码端点_校验与新密码生效()
+    {
+        var a = await SeedDeviceAsync("pwd-dev");
+        await using var stack = await StartStackAsync(a);
+        var username = $"u{Guid.NewGuid():N}"[..12];
+        await PostAsync(stack, "/api/auth/register", new { username, password = "secret123" });
+        Assert.Equal(ErrorCode.Ok,
+            (await PostAsync(stack, "/api/auth/login", new { username, password = "secret123" })).code);
+
+        // 前置校验：空旧密码/短新密码 1001；错误旧密码 2001（Ack.Ok=false，不泄漏细节）
+        Assert.Equal(ErrorCode.BadRequest, (await PostAsync(stack, "/api/auth/change-password",
+            new { oldPassword = "", newPassword = "newpass456" })).code);
+        Assert.Equal(ErrorCode.BadRequest, (await PostAsync(stack, "/api/auth/change-password",
+            new { oldPassword = "secret123", newPassword = "123" })).code);
+        Assert.Equal(ErrorCode.Unauthorized, (await PostAsync(stack, "/api/auth/change-password",
+            new { oldPassword = "wrong-old", newPassword = "newpass456" })).code);
+
+        // 改密成功：旧密码失效、新密码可登录（passive 会话重连复位 normal 后再验，02 §2.5）
+        Assert.Equal(ErrorCode.Ok, (await PostAsync(stack, "/api/auth/change-password",
+            new { oldPassword = "secret123", newPassword = "newpass456" })).code);
+        Assert.Equal(ErrorCode.Ok, (await PostAsync(stack, "/api/auth/logout", null)).code);
+        await ReconnectToNormalAsync(stack); // 同表换址：断连重连复位 Normal
+        Assert.Equal(ErrorCode.Unauthorized, (await PostAsync(stack, "/api/auth/login",
+            new { username, password = "secret123" })).code);
+        Assert.Equal(ErrorCode.Ok, (await PostAsync(stack, "/api/auth/login",
+            new { username, password = "newpass456" })).code);
     }
 }
 

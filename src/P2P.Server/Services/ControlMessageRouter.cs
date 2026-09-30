@@ -10,7 +10,8 @@ namespace P2P.Server.Services;
 /// M2-08 挂载上报族 0x62/0x64/0x72（审计/流量累计/打洞结果）；
 /// M2-09 挂载分组全量 0x51/0x52/0x53/0x54/0x57（凭码入组/自退/审批/邀请码/移出）；
 /// M2-11 挂载白名单 0x63 LanSegmentsUpsert（passive 允许，本机管理类）；
-/// M2-12 挂载 0x14 RemoteCodeReset（远程码重置；passive 允许，本机管理类）。
+/// M2-12 挂载 0x14 RemoteCodeReset（远程码重置；passive 允许，本机管理类）；
+/// M2-27 挂载 0x42 GroupList（已加入分组列表，本地 /api/groups 数据源）与 0x23 改密（FR-S-205）。
 /// </summary>
 public sealed class ControlMessageRouter
 {
@@ -73,6 +74,9 @@ public sealed class ControlMessageRouter
             case UserLogout logout:
                 await _user.HandleLogoutAsync(session, logout);
                 break;
+            case UserChangePassword changePassword: // 0x23 修改自己密码（M2-27，FR-S-205）
+                await _user.HandleChangePasswordAsync(session, changePassword);
+                break;
             case DeviceUpdate deviceUpdate:
                 await _user.HandleDeviceUpdateAsync(session, deviceUpdate);
                 break;
@@ -102,6 +106,9 @@ public sealed class ControlMessageRouter
                 break;
             case DeviceListRequest deviceList:
                 await _group.HandleDeviceListAsync(session, deviceList);
+                break;
+            case GroupListRequest groupList: // 0x42 已加入分组列表（M2-27，FR-C-805 / 本地 /api/groups）
+                await _group.HandleGroupListAsync(session, groupList);
                 break;
             case PunchRequest punchRequest:
                 await _signaling.HandlePunchRequestAsync(session, punchRequest);
@@ -145,7 +152,7 @@ public sealed class ControlMessageRouter
     /// <summary>02 §2.5 主动类消息清单（服务端拒绝点；0x22 登出为降级操作不在此列）。</summary>
     internal static bool IsActiveClass(byte msgType) => msgType is
         MsgType.UserRegister or MsgType.UserLogin or MsgType.UserChangePassword
-        or MsgType.DeviceList
+        or MsgType.DeviceList or MsgType.GroupList
         or MsgType.GroupCreate or MsgType.GroupJoin or MsgType.GroupLeave
         or MsgType.JoinRequests or MsgType.GroupInviteGen or MsgType.GroupUpdate
         or MsgType.GroupDissolve or MsgType.GroupRemoveMember

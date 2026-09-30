@@ -67,6 +67,9 @@ public sealed class LanSegmentsStore
     public IReadOnlyList<string> EnabledCidrs()
         => _entries.Where(e => e.Enabled).Select(e => e.Cidr).ToList();
 
+    /// <summary>全量条目快照（本地 API /api/lan-segments 读入口，M2-27；含 segmentId 供删除定位）。</summary>
+    public IReadOnlyList<LanSegmentEntry> Entries() => _entries;
+
     /// <summary>全量替换并原子落盘（0x63 同步与本地 API 的统一写入口）。</summary>
     public async Task ReplaceAllAsync(IEnumerable<LanSegmentEntry> entries, CancellationToken ct = default)
     {

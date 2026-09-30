@@ -149,7 +149,8 @@ public sealed class ClientRuntime : IAsyncDisposable
         _reporter.Log += m => Log?.Invoke($"[report] {m}");
         _sync = new MappingSyncService(_control, _engine, _state);
         _wizard = new ClientRegistrationService(_control, _state, _nic);
-        _api = new LocalApiServices(_control, _state, _settings, _peers, _wizard, _sync, _scheduler);
+        _api = new LocalApiServices(_control, _state, _settings, _peers, _wizard, _sync, _scheduler,
+            _lanSegments, Path.Combine(_options.BaseDir, "logs")); // M2-27：白名单镜像 + 日志目录同源
         _control.ServerPush += OnServerPush; // 0x71 PunchInvite → 被邀请方打洞（02 §5.1③）
 
         // ③ 本地 Web（两种分支都启：向导也经它完成注册）

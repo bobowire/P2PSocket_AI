@@ -39,7 +39,10 @@ var scheduler = new PunchScheduler(new NullPuncher());
 await using var engine = new MappingEngine(host, scheduler, IPAddress.Loopback);
 var sync = new MappingSyncService(control, engine, state);
 var wizard = new ClientRegistrationService(control, state, new NullNicManager());
-await using var api = new LocalApiServices(control, state, settings, peers, wizard, sync, scheduler);
+var lanSegments = new LanSegmentsStore(temp); // M2-27 白名单镜像（路由装配需要，占位空集）
+lanSegments.Load();
+await using var api = new LocalApiServices(control, state, settings, peers, wizard, sync, scheduler,
+    lanSegments, Path.Combine(temp, "logs"));
 
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions { ContentRootPath = temp });
 var app = builder.Build();
@@ -108,6 +111,12 @@ internal static partial class TsGen // 生成逻辑集中（顶层语句宿主�
         typeof(ClientSettings),
         typeof(ReconnectSettings),
         typeof(UpgradeInfoView), // M2-26 升级引导（04 §2.7 /api/upgrade/info 载荷）
+        typeof(GroupView),       // M2-27 分组全套（04 §2.4 /api/groups）
+        typeof(GroupRequestView),
+        typeof(GroupsView),
+        typeof(LanSegmentView),  // M2-27 白名单（04 §2.5 /api/lan-segments）
+        typeof(LogEntryView),    // M2-27 日志（04 §2.6 /api/logs）
+        typeof(LogPageView),
     ];
 
     internal static string EmitPathsTs(List<(string Pattern, string Methods)> endpoints,

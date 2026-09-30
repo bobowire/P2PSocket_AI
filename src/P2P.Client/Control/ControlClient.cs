@@ -13,6 +13,7 @@
 //   → 仍抛出保持退避重连（每轮重取，升级信息随服务端配置演进）；已建立会话 0x03 同族应答照常。
 using System.IO.Pipelines;
 using System.Net.Sockets;
+using MessagePack;
 using P2P.Core.Crypto;
 using P2P.Core.Protocol;
 using P2P.Core.Utils;
@@ -471,10 +472,17 @@ public sealed class ControlClient : IAsyncDisposable
         MsgType.DeviceUpdate => PcpCodec.Decode<DeviceUpdateAck>(msgpack),
         MsgType.RemoteCodeReset => PcpCodec.Decode<RemoteCodeResetAck>(msgpack), // 0x14 同族 Ack（M2-15 端点持久化）
         MsgType.UserRegister => PcpCodec.Decode<UserRegisterAck>(msgpack),
+        MsgType.UserChangePassword => PcpCodec.Decode<UserChangePasswordAck>(msgpack), // 0x23 同族（M2-27 /api/auth/password）
         MsgType.DeviceList => PcpCodec.Decode<DeviceListResponse>(msgpack),
         MsgType.DeviceListUpdate => PcpCodec.Decode<DeviceListUpdate>(msgpack), // 0x41 提示帧（M2-15 → WS device_list）
+        MsgType.GroupList => PcpCodec.Decode<GroupListResponse>(msgpack),      // 0x42 已加入分组（M2-27 /api/groups）
         MsgType.LanSegmentsUpsert => PcpCodec.Decode<LanSegmentsUpsertAck>(msgpack), // 0x63 同族（上报接线 M2-27）
         MsgType.GroupCreate => PcpCodec.Decode<GroupCreateAck>(msgpack),
+        MsgType.GroupJoin => PcpCodec.Decode<GroupJoinAck>(msgpack),           // 0x51 凭码入组（M2-27 /api/groups join）
+        MsgType.GroupLeave => PcpCodec.Decode<GroupLeaveAck>(msgpack),         // 0x52 自退（M2-27 /api/groups leave）
+        MsgType.JoinRequests => DecodeJoinRequests(msgpack),                   // 0x53 双形态同族（M2-27）
+        MsgType.GroupInviteGen => PcpCodec.Decode<GroupInviteGenAck>(msgpack), // 0x54 邀请码（M2-27）
+        MsgType.GroupRemoveMember => PcpCodec.Decode<GroupRemoveMemberAck>(msgpack), // 0x57 移出（M2-27）
         MsgType.GroupUpdate => PcpCodec.Decode<GroupUpdateAck>(msgpack),
         MsgType.GroupDissolve => PcpCodec.Decode<GroupDissolveAck>(msgpack),
         MsgType.MappingUpsert => PcpCodec.Decode<MappingUpsertAck>(msgpack),
@@ -487,6 +495,14 @@ public sealed class ControlClient : IAsyncDisposable
         MsgType.RelayAllocate => PcpCodec.Decode<RelayGrant>(msgpack),
         _ => PcpCodec.DecodeLoose(msgpack),
     };
+
+    /// <summary>0x53 双形态同 msgType（02 §2.4）：List 应答 Key(3)=JoinRequestItem[]，
+    /// Approve/Reject 确认 Key(3)=bool——bool 与数组互不可解，try-decode 判别安全。</summary>
+    private static IPcpMessage DecodeJoinRequests(byte[] msgpack)
+    {
+        try { return PcpCodec.Decode<JoinRequestsResponse>(msgpack); }
+        catch (MessagePackSerializationException) { return PcpCodec.Decode<JoinRequestsAck>(msgpack); }
+    }
 
     private void DeliverAckOrPush(IPcpMessage message)
     {
@@ -613,7 +629,7 @@ public sealed class ControlClient : IAsyncDisposable
     /// <summary>02 §2.5 主动类清单（镜像服务端 ControlMessageRouter.IsActiveClass）。</summary>
     internal static bool IsActiveClass(byte msgType) => msgType is
         MsgType.UserRegister or MsgType.UserLogin or MsgType.UserChangePassword
-        or MsgType.DeviceList
+        or MsgType.DeviceList or MsgType.GroupList
         or MsgType.GroupCreate or MsgType.GroupJoin or MsgType.GroupLeave
         or MsgType.JoinRequests or MsgType.GroupInviteGen or MsgType.GroupUpdate
         or MsgType.GroupDissolve or MsgType.GroupRemoveMember

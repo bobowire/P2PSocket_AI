@@ -11,6 +11,7 @@ namespace P2P.Server.Tests;
 
 /// <summary>
 /// 用户与能力模式测试（02 §2.4/§2.5；完成判定：登录→能力切换、passive 发 0x40/0x70 → 2002 + 审计行）。
+/// M2-27：0x23 改密（错误旧密码 Ok=false / 成功覆写旧密码失效 / 未登录 2001）。
 /// </summary>
 public sealed class UserTests : IAsyncLifetime
 {
@@ -198,5 +199,73 @@ public sealed class UserTests : IAsyncLifetime
         var error = await client.ReceiveAsync<ErrorMessage>();
         Assert.NotNull(error);
         Assert.Equal(ErrorCode.RegistrationClosed, error!.Code);
+    }
+
+    // ── 0x23 修改自己密码（M2-27，FR-S-205）───────────────────────────
+
+    [Fact]
+    public async Task ChangePassword_WrongOldOrTooShortNew_OkFalse()
+    {
+        var client = await ConnectRegisteredAsync();
+        await client.SendAsync(new UserRegister(client.NextSeq(), client.Now(), MsgType.UserRegister,
+            "carol", "carol-password"));
+        _ = await client.ReceiveAsync<UserRegisterAck>();
+        await client.SendAsync(new UserLogin(client.NextSeq(), client.Now(), MsgType.UserLogin,
+            "carol", "carol-password"));
+        Assert.True((await client.ReceiveAsync<UserLoginAck>())!.Ok);
+
+        // 旧密码错误 → Ok=false（不泄漏原因）
+        await client.SendAsync(new UserChangePassword(client.NextSeq(), client.Now(), MsgType.UserChangePassword,
+            "wrong-old", "carol-newpass"));
+        var wrong = await client.ReceiveAsync<UserChangePasswordAck>();
+        Assert.False(wrong!.Ok);
+
+        // 新密码过短 → Ok=false（05 §3：≥6 字符）
+        await client.SendAsync(new UserChangePassword(client.NextSeq(), client.Now(), MsgType.UserChangePassword,
+            "carol-password", "123"));
+        var shortNew = await client.ReceiveAsync<UserChangePasswordAck>();
+        Assert.False(shortNew!.Ok);
+
+        // 原密码仍可登录（未变更）
+        await client.SendAsync(new UserLogin(client.NextSeq(), client.Now(), MsgType.UserLogin,
+            "carol", "carol-password"));
+        Assert.True((await client.ReceiveAsync<UserLoginAck>())!.Ok);
+    }
+
+    [Fact]
+    public async Task ChangePassword_Success_OverwritesAndOldFails()
+    {
+        var client = await ConnectRegisteredAsync();
+        await client.SendAsync(new UserRegister(client.NextSeq(), client.Now(), MsgType.UserRegister,
+            "dave", "dave-password"));
+        _ = await client.ReceiveAsync<UserRegisterAck>();
+        await client.SendAsync(new UserLogin(client.NextSeq(), client.Now(), MsgType.UserLogin,
+            "dave", "dave-password"));
+        Assert.True((await client.ReceiveAsync<UserLoginAck>())!.Ok);
+
+        await client.SendAsync(new UserChangePassword(client.NextSeq(), client.Now(), MsgType.UserChangePassword,
+            "dave-password", "dave-newpass-9"));
+        var ack = await client.ReceiveAsync<UserChangePasswordAck>();
+        Assert.True(ack!.Ok);
+        await using (var db = CreateDb())
+            Assert.True(await db.WaitAuditAsync(a => a.Event == "password_change"));
+
+        // 旧密码失效、新密码可登录
+        await client.SendAsync(new UserLogin(client.NextSeq(), client.Now(), MsgType.UserLogin,
+            "dave", "dave-password"));
+        Assert.False((await client.ReceiveAsync<UserLoginAck>())!.Ok);
+        await client.SendAsync(new UserLogin(client.NextSeq(), client.Now(), MsgType.UserLogin,
+            "dave", "dave-newpass-9"));
+        Assert.True((await client.ReceiveAsync<UserLoginAck>())!.Ok);
+    }
+
+    [Fact]
+    public async Task ChangePassword_Unlogged_2001()
+    {
+        var client = await ConnectRegisteredAsync(); // 未登录
+        await client.SendAsync(new UserChangePassword(client.NextSeq(), client.Now(), MsgType.UserChangePassword,
+            "whatever", "newpass-123"));
+        var error = await client.ReceiveAsync<ErrorMessage>();
+        Assert.Equal(ErrorCode.Unauthorized, error!.Code);
     }
 }
