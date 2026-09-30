@@ -75,7 +75,7 @@ public sealed class AdminAuthApi(
                 detail: new { ip }, ct: ctx.RequestAborted);
             // 首登判定（编制小口径）：仍是默认口令即提示改密（不阻断）
             var mustChange = PasswordHasher.Verify(DbInitializer.AdminUsername, admin.PasswordHash);
-            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new { mustChangePassword = mustChange });
+            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new LoginResult(mustChange));
         });
 
         app.MapPost("/api/auth/change-password", async ctx =>

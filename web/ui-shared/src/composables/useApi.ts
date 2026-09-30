@@ -33,6 +33,8 @@ export class ApiError extends Error {
   constructor(
     public readonly code: number,
     message: string,
+    /** 失败请求 URL（axios config.url；业务错/传输错均携——调用方可按端点区分处理，如 401 语义分流）。 */
+    public readonly url?: string,
   ) {
     super(message);
     this.name = "ApiError";
@@ -51,7 +53,7 @@ export function createApiClient(baseURL = ""): AxiosInstance {
     (resp) => {
       const env = resp.data as ApiEnvelope<unknown>;
       if (env && typeof env.code === "number" && env.code !== 0)
-        throw new ApiError(env.code, ERROR_TEXT[env.code] ?? env.msg ?? `错误 ${env.code}`);
+        throw new ApiError(env.code, ERROR_TEXT[env.code] ?? env.msg ?? `错误 ${env.code}`, resp.config?.url);
       return resp;
     },
     (error) => {
@@ -59,7 +61,7 @@ export function createApiClient(baseURL = ""): AxiosInstance {
         const status = error.response?.status ?? 0;
         throw new ApiError(status === 0 ? 0 : -status, status === 0
           ? "无法连接本地服务（进程可能未运行）"
-          : `本地服务响应异常（HTTP ${status}）`);
+          : `本地服务响应异常（HTTP ${status}）`, error.config?.url);
       }
       throw error;
     },

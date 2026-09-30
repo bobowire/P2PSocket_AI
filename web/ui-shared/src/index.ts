@@ -33,3 +33,17 @@ export type {
   DeviceListEvent,
   WsEvent,
 } from "./types/api";
+// M3-09 服务端 Web 生成物（编制定案③：server-app 消费；与客户端分文件防常量名冲突）
+export { ServerApiPaths, ServerApiEndpoints } from "./types/api-server-paths";
+export type {
+  ServerApiEnvelope,
+  LoginResult,
+  DashboardView,
+  MappingsSummaryView,
+  RelaySnapshotView,
+  StunSnapshotView,
+  StunDroppedView,
+  PunchStatsView,
+  HourlyBucketView,
+  MappingStatusProjection,
+} from "./types/api-server";

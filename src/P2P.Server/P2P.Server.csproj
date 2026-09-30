@@ -10,6 +10,8 @@
   <ItemGroup>
     <!-- 测试触达 internal（GroupService 邀请码生成器等），同 Client/Nic 惯例 -->
     <InternalsVisibleTo Include="P2P.Server.Tests" />
+    <!-- M3-09 export-ts：反射 ServerWebHostService.Build 路由表（api-server 生成物单一事实源） -->
+    <InternalsVisibleTo Include="ExportTs" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11">

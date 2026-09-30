@@ -2,6 +2,8 @@
 // 以真实 MapLocalApi 注册代码为单一事实源——组装惰性组件 → WebApplication.Build() →
 // 读取 EndpointDataSource 路由表 + 反射 WsEventNames 常量与展示 DTO →
 // 输出 ui-shared/types/api.d.ts（类型）与 api-paths.ts（路径常量，前端禁止手写字符串路径）。
+// M3-09（编制定案③）：同法扩服务端——ServerWebHostService.Build 真实路由表 + ServerViews 展示 DTO
+// → api-server-paths.ts / api-server.d.ts（server-app 消费；与客户端生成物分文件防常量名冲突）。
 // 用法：dotnet run --project src/Tools/ExportTs -c Release [输出目录=web/ui-shared/src/types]
 using System.Net;
 using System.Reflection;
@@ -9,6 +11,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using P2P.Client.Control;
 using P2P.Client.Mapping;
@@ -19,6 +22,9 @@ using P2P.Client.Tunnel;
 using P2P.Client.Web;
 using P2P.Core.Protocol;
 using P2P.Nic;
+using P2P.Server.Data;
+using P2P.Server.Services;
+using P2P.Server.Web;
 
 var outputDir = TsGen.ResolveOutputDir(args.FirstOrDefault());
 Directory.CreateDirectory(outputDir);
@@ -48,29 +54,57 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions { ContentRo
 var app = builder.Build();
 app.MapLocalApi(api);
 
+// ①b 服务端 Web 同法（M3-09）：占位服务实例装配 ServerWebHostService.Build——
+// 端点组 Map() 仅注册 lambda 不执行 handler，实例构造即可（relay/stun/limiter 缺省=零值快照形态）
+var serverDb = new ExportTsDbFactory();
+var serverAudit = new AuditLogger(serverDb);
+var serverRegistry = new DeviceRegistry();
+var serverInvalidation = new InvalidationPusher(serverDb, serverRegistry);
+var serverPusher = new DeviceListPusher(serverDb, serverRegistry);
+var serverGroups = new GroupService(serverDb, serverRegistry, serverAudit, serverPusher, serverInvalidation);
+var serverAdmin = new AdminService(serverDb, serverRegistry, serverAudit, serverInvalidation, listPusher: serverPusher);
+var serverApp = ServerWebHostService.Build(new P2P.Server.ServerOptions(),
+    TimeProvider.System, new AdminSessionStore(TimeProvider.System),
+    serverDb, serverAudit, serverAdmin, serverRegistry, serverGroups);
+
 // ② 路由表（真实注册代码产出；{id:guid} 约束归一为 {id}；/ws/* 无 HTTP 方法元数据单列）
 //    注：未 Start 的 WebApplication 须从 IEndpointRouteBuilder.DataSources 直取（DI 侧 DataSource 未定稿）
-var routes = ((IEndpointRouteBuilder)app).DataSources
-    .SelectMany(ds => ds.Endpoints).OfType<RouteEndpoint>().ToList();
-var endpoints = routes
-    .Where(ep => (ep.RoutePattern.RawText ?? "").Length > 0
-        && ep.Metadata.GetMetadata<IHttpMethodMetadata>() is not null)
-    .Select(ep => (
-        Pattern: TsGen.RouteParamRegex().Replace(ep.RoutePattern.RawText!, "{$1}").TrimEnd('/'),
-        Methods: string.Join("/", ep.Metadata.GetMetadata<IHttpMethodMetadata>()!.HttpMethods.OrderBy(m => m))))
-    .Distinct()
-    .OrderBy(e => e.Pattern)
-    .ToList();
-var wsRoutes = routes
-    .Where(ep => (ep.RoutePattern.RawText ?? "").StartsWith("/ws/"))
-    .Select(ep => ep.RoutePattern.RawText!)
-    .Distinct().OrderBy(p => p).ToList();
+var (endpoints, wsRoutes) = ExtractRoutes(app);
+var (serverEndpoints, serverWsRoutes) = ExtractRoutes(serverApp);
+
+(List<(string Pattern, string Methods)> Http, List<string> Ws) ExtractRoutes(WebApplication built)
+{
+    var routes = ((IEndpointRouteBuilder)built).DataSources
+        .SelectMany(ds => ds.Endpoints).OfType<RouteEndpoint>().ToList();
+    var http = routes
+        .Where(ep => (ep.RoutePattern.RawText ?? "").Length > 0
+            && ep.Metadata.GetMetadata<IHttpMethodMetadata>() is not null)
+        .Select(ep => (
+            Pattern: TsGen.RouteParamRegex().Replace(ep.RoutePattern.RawText!, "{$1}").TrimEnd('/'),
+            Methods: string.Join("/", ep.Metadata.GetMetadata<IHttpMethodMetadata>()!.HttpMethods.OrderBy(m => m))))
+        .Distinct()
+        .OrderBy(e => e.Pattern)
+        .ToList();
+    var ws = routes
+        .Where(ep => (ep.RoutePattern.RawText ?? "").StartsWith("/ws/"))
+        .Select(ep => ep.RoutePattern.RawText!)
+        .Distinct().OrderBy(p => p).ToList();
+    return (http, ws);
+}
 
 // ③ 生成物落盘（先写后释放：路由提取不依赖运行）
 var generator = $"src/Tools/ExportTs @ {DateTime.UtcNow:yyyy-MM-dd'T'HH:mm:ss'Z'}";
-await File.WriteAllTextAsync(Path.Combine(outputDir, "api-paths.ts"), TsGen.EmitPathsTs(endpoints, wsRoutes, generator));
+await File.WriteAllTextAsync(Path.Combine(outputDir, "api-paths.ts"),
+    TsGen.EmitPathsTs(endpoints, wsRoutes, "LocalWebApi 真实路由表", generator));
 await File.WriteAllTextAsync(Path.Combine(outputDir, "api.d.ts"), TsGen.EmitTypesTs(generator));
-Console.WriteLine($"export-ts：{endpoints.Count} HTTP 端点 + {wsRoutes.Count} WS 路由 → {outputDir}");
+await File.WriteAllTextAsync(Path.Combine(outputDir, "api-server-paths.ts"),
+    TsGen.EmitPathsTs(serverEndpoints, serverWsRoutes, "ServerWebHost 服务端 Web 路由表", generator,
+        constName: "ServerApiPaths", endpointsName: "ServerApiEndpoints", pathTypeName: "ServerApiPath"));
+await File.WriteAllTextAsync(Path.Combine(outputDir, "api-server.d.ts"),
+    TsGen.EmitServerTypesTs(generator));
+Console.WriteLine(
+    $"export-ts：客户端 {endpoints.Count} HTTP 端点 + {wsRoutes.Count} WS 路由；" +
+    $"服务端 {serverEndpoints.Count} HTTP 端点 + {serverWsRoutes.Count} WS 路由 → {outputDir}");
 return 0;
 
 // ── 生成：路径常量（api-paths.ts）────────────────────────────────────
@@ -120,26 +154,62 @@ internal static partial class TsGen // 生成逻辑集中（顶层语句宿主�
     ];
 
     internal static string EmitPathsTs(List<(string Pattern, string Methods)> endpoints,
-        List<string> wsRoutes, string generator)
+        List<string> wsRoutes, string source, string generator,
+        string constName = "ApiPaths", string endpointsName = "ApiEndpoints",
+        string pathTypeName = "ApiPath")
     {
         var sb = new StringBuilder();
         sb.AppendLine("// 本文件由 export-ts 反射生成（06 §5、08 §2③），禁止手改；");
-        sb.AppendLine($"// 源：LocalWebApi 真实路由表（{generator}）。前端禁止手写 API 字符串路径。");
+        sb.AppendLine($"// 源：{source}（{generator}）。前端禁止手写 API 字符串路径。");
         sb.AppendLine();
-        sb.AppendLine("export const ApiPaths = {");
+        sb.AppendLine($"export const {constName} = {{");
         foreach (var g in endpoints.Select(e => e.Pattern).Concat(wsRoutes).Distinct().OrderBy(p => p))
             sb.AppendLine($"  {ConstName(g)}: \"{g}\",");
         sb.AppendLine("} as const;");
         sb.AppendLine();
-        sb.AppendLine("export type ApiPath = (typeof ApiPaths)[keyof typeof ApiPaths];");
+        sb.AppendLine($"export type {pathTypeName} = (typeof {constName})[keyof typeof {constName}];");
         sb.AppendLine();
         sb.AppendLine("/** 端点元数据（method×path；WS 路由 methods 为 [\"WS\"]）。 */");
-        sb.AppendLine("export const ApiEndpoints = [");
+        sb.AppendLine($"export const {endpointsName} = [");
         foreach (var e in endpoints)
             sb.AppendLine($"  {{ path: \"{e.Pattern}\", methods: [\"{e.Methods.Replace("/", "\", \"")}\"] }},");
         foreach (var w in wsRoutes)
             sb.AppendLine($"  {{ path: \"{w}\", methods: [\"WS\"] }},");
         sb.AppendLine("] as const;");
+        return sb.ToString();
+    }
+
+    /// <summary>服务端展示 DTO 清单（M3-09 渐进入列：M3-10/11 页面随任务补）。无机密字段。</summary>
+    internal static readonly Type[] ServerDtoTypes =
+    [
+        typeof(LoginResult),        // M3-02 login 载荷（首登改密提示）
+        typeof(DashboardView),      // M3-06 仪表盘六指标组（FR-S-810）
+        typeof(MappingsSummaryView),
+        typeof(RelaySnapshotView),
+        typeof(StunSnapshotView),
+        typeof(StunDroppedView),
+        typeof(PunchStatsView),
+        typeof(HourlyBucketView),
+    ];
+
+    /// <summary>api-server.d.ts（M3-09 编制定案③：server-app 类型同源）。</summary>
+    internal static string EmitServerTypesTs(string generator)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("// 本文件由 export-ts 反射生成（06 §5、编制定案③），禁止手改。");
+        sb.AppendLine($"// 源：P2P.Server Web 展示 DTO（ServerViews，{generator}）。");
+        sb.AppendLine();
+        sb.AppendLine("/** 服务端响应包裹（04 §3：code=0 成功；!=0 见错误码表 04 §5）。注意字段名 message（客户端为 msg）。 */");
+        sb.AppendLine("export interface ServerApiEnvelope<T> {");
+        sb.AppendLine("  code: number;");
+        sb.AppendLine("  message: string;");
+        sb.AppendLine("  data: T;");
+        sb.AppendLine("}");
+        sb.AppendLine();
+        foreach (var t in ServerDtoTypes)
+            sb.AppendLine(EmitInterface(t));
+        sb.AppendLine("/** TD-22 映射状态投影域（0x62 流水末次；无流水=unknown——客户端状态机是真相源）。 */");
+        sb.AppendLine("export type MappingStatusProjection = \"direct\" | \"relay\" | \"failed\" | \"invalid\" | \"unknown\";");
         return sb.ToString();
     }
 
@@ -229,11 +299,17 @@ internal static partial class TsGen // 生成逻辑集中（顶层语句宿主�
     {
         t = Nullable.GetUnderlyingType(t) ?? t;
         if (t == typeof(Guid) || t == typeof(string)) return "string";
+        if (t == typeof(DateTime) || t == typeof(DateTimeOffset)) return "string"; // ISO-8601（服务端 DTO，M3-09）
         if (t == typeof(bool)) return "boolean";
-        if (DtoTypes.Contains(t)) return t.Name; // 展示 DTO 互引（如 ClientSettings.reconnect）
+        if (DtoTypes.Contains(t) || ServerDtoTypes.Contains(t)) return t.Name; // 展示 DTO 互引
         if (t.IsArray) return $"{TsType(t.GetElementType()!)}[]";
+        if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(List<>))
+            return $"{TsType(t.GetGenericArguments()[0])}[]"; // List<T>（M3-09 hourly 桶序列）
+        if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(Dictionary<,>)
+            && t.GetGenericArguments()[0] == typeof(string))
+            return $"Record<string, {TsType(t.GetGenericArguments()[1])}>"; // Dictionary<string,T>（M3-09 byStatus）
         if (t.IsEnum) return string.Join(" | ", Enum.GetNames(t).Select(n => $"\"{n}\""));
-        return "number"; // int/long/ushort 等整数族
+        return "number"; // int/long/ushort/double 等数值族
     }
 
     private static string Camel(string s) => char.ToLowerInvariant(s[0]) + s[1..];
@@ -250,6 +326,13 @@ internal static partial class TsGen // 生成逻辑集中（顶层语句宿主�
         }
         throw new InvalidOperationException("未找到 web/ui-shared/src/types（在仓库内执行，或显式传输出目录）");
     }
+}
+
+/// <summary>服务端路由装配的占位库工厂（内存 Sqlite；端点注册不触库）。</summary>
+internal sealed class ExportTsDbFactory : IDbContextFactory<AppDbContext>
+{
+    public AppDbContext CreateDbContext() => new(
+        new DbContextOptionsBuilder<AppDbContext>().UseSqlite("DataSource=:memory:").Options);
 }
 
 /// <summary>打洞器空实现（仅装配路由，永不调用）。</summary>

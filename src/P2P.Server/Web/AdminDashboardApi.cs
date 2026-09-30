@@ -56,48 +56,36 @@ public sealed class AdminDashboardApi(
             {
                 code = 0,
                 message = "ok",
-                data = new
-                {
-                    onlineDevices = registry.OnlineDeviceIds.Count,
-                    groups = groupCount,
-                    mappings = new
-                    {
-                        total = mappings.Count,
-                        enabled = mappings.Count(m => m.Enabled),
-                        byStatus, // TD-22 口径：enabled 映射的最后已知状态分布
-                    },
-                    relay = new
-                    {
-                        sessions = relayStats?.Sessions ?? 0,
-                        bytesForwarded = relayStats?.BytesForwarded ?? 0,
-                        reaped = relayStats?.Reaped ?? 0,
-                        startedAt = relayStats?.StartedAtUtc,
-                        uptimeSec = relayStats is null ? 0
-                            : Math.Max(0, (now - relayStats.StartedAtUtc).TotalSeconds),
-                    },
-                    stun = new
-                    {
-                        admitted = stunStats?.Admitted ?? 0, // 闸④ 放行到达累计（平均 QPS 分子）
-                        qps = stunStats is null || stunStats.UptimeSec <= 0 ? 0
+                data = new DashboardView(
+                    OnlineDevices: registry.OnlineDeviceIds.Count,
+                    Groups: groupCount,
+                    Mappings: new MappingsSummaryView(
+                        Total: mappings.Count,
+                        Enabled: mappings.Count(m => m.Enabled),
+                        ByStatus: byStatus), // TD-22 口径：enabled 映射的最后已知状态分布
+                    Relay: new RelaySnapshotView(
+                        Sessions: relayStats?.Sessions ?? 0,
+                        BytesForwarded: relayStats?.BytesForwarded ?? 0,
+                        Reaped: relayStats?.Reaped ?? 0,
+                        StartedAt: relayStats?.StartedAtUtc,
+                        UptimeSec: relayStats is null ? 0
+                            : Math.Max(0, (now - relayStats.StartedAtUtc).TotalSeconds)),
+                    Stun: new StunSnapshotView(
+                        Admitted: stunStats?.Admitted ?? 0, // 闸④ 放行到达累计（平均 QPS 分子）
+                        Qps: stunStats is null || stunStats.UptimeSec <= 0 ? 0
                             : stunStats.Admitted / stunStats.UptimeSec,
-                        dropped = new
-                        {
-                            rate = stunStats?.Rate ?? 0,
-                            auth = stunStats?.Auth ?? 0,
-                            circuit = stunStats?.Circuit ?? 0,
-                        },
-                        uptimeSec = stunStats?.UptimeSec ?? 0,
-                    },
-                    punch = new
-                    {
-                        total24h = total,
-                        direct24h = direct,
-                        relay24h = relayed,
-                        failed24h = total - direct - relayed,
-                        successRate24h = total == 0 ? (double?)null : (direct + relayed) / (double)total,
-                        hourly = buckets, // 24 桶（最旧→最新，整点对齐）：折线数据源
-                    },
-                },
+                        Dropped: new StunDroppedView(
+                            Rate: stunStats?.Rate ?? 0,
+                            Auth: stunStats?.Auth ?? 0,
+                            Circuit: stunStats?.Circuit ?? 0),
+                        UptimeSec: stunStats?.UptimeSec ?? 0),
+                    Punch: new PunchStatsView(
+                        Total24h: total,
+                        Direct24h: direct,
+                        Relay24h: relayed,
+                        Failed24h: total - direct - relayed,
+                        SuccessRate24h: total == 0 ? null : (direct + relayed) / (double)total,
+                        Hourly: buckets)), // 24 桶（最旧→最新，整点对齐）：折线数据源
             }, ctx.RequestAborted);
         });
     }
@@ -155,7 +143,7 @@ public sealed class AdminDashboardApi(
 
     /// <summary>近 24h 按小时桶（整点对齐、最旧→最新共 24 桶）：每桶 total/success（direct+relay）计数。
     /// 折线数据源——空桶也保留（前端零点连线）。</summary>
-    private static List<object> HourlyBuckets(List<(DateTime Ts, string Result)> punches, DateTime now)
+    private static List<HourlyBucketView> HourlyBuckets(List<(DateTime Ts, string Result)> punches, DateTime now)
     {
         var currentHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Utc);
         var index = new Dictionary<DateTime, (int Total, int Success)>();
@@ -168,11 +156,9 @@ public sealed class AdminDashboardApi(
             index[hour] = (total + 1, success + (result is "direct" or "relay" ? 1 : 0));
         }
         return [.. index.OrderBy(kv => kv.Key) // 最旧→最新（时间升序）
-            .Select(kv => (object)new
-            {
-                hourStart = new DateTimeOffset(kv.Key).ToUnixTimeMilliseconds(),
-                total = kv.Value.Total,
-                success = kv.Value.Success,
-            })];
+            .Select(kv => new HourlyBucketView(
+                HourStart: new DateTimeOffset(kv.Key).ToUnixTimeMilliseconds(),
+                Total: kv.Value.Total,
+                Success: kv.Value.Success))];
     }
 }

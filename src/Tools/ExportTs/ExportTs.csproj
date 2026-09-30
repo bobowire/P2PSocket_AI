@@ -10,6 +10,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\P2P.Client\P2P.Client.csproj" />
+    <!-- M3-09 api-server 生成物：服务端 Web 路由表（ServerWebHost）与展示 DTO（ServerViews） -->
+    <ProjectReference Include="..\..\P2P.Server\P2P.Server.csproj" />
   </ItemGroup>
 
 </Project>
