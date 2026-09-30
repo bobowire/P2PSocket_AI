@@ -25,7 +25,8 @@ public sealed class ServerWebHostService(
     AdminSessionStore sessions,
     IDbContextFactory<AppDbContext> dbFactory,
     AuditLogger audit,
-    AdminService admin) : IHostedService
+    AdminService admin,
+    DeviceRegistry registry) : IHostedService
 {
     private WebApplication? _app;
 
@@ -34,7 +35,7 @@ public sealed class ServerWebHostService(
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        _app = Build(options, time, sessions, dbFactory, audit, admin, WebRootOverride);
+        _app = Build(options, time, sessions, dbFactory, audit, admin, registry, WebRootOverride);
         await _app.StartAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -46,7 +47,7 @@ public sealed class ServerWebHostService(
     /// <summary>装配（internal 供集成测试直调复刻生产拓扑）。</summary>
     internal static WebApplication Build(ServerOptions options, TimeProvider time,
         AdminSessionStore sessions, IDbContextFactory<AppDbContext> dbFactory, AuditLogger audit,
-        AdminService admin, string? webRootOverride = null)
+        AdminService admin, DeviceRegistry registry, string? webRootOverride = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseUrls($"http://{options.Listen.WebBind}:{options.Listen.Web}");
@@ -61,6 +62,8 @@ public sealed class ServerWebHostService(
         new AdminAuthApi(dbFactory, audit).Map(app, sessions);
         // M3-03 用户管理（进程内直调 AdminService：踢线/降级/0x75 即时生效）
         new AdminUsersApi(dbFactory, admin, audit).Map(app);
+        // M3-04 设备管理（列表在线态取 registry；动作全转调 AdminService）
+        new AdminDevicesApi(dbFactory, registry, admin).Map(app);
 
         // 认证骨架（04 §3.1/§3.2、07 §8）：/api/* 须携带有效会话 Cookie，否则 401 {code:2001}；
         // /api/auth/login 白名单（登录端点 M3-02 挂载）。静态页（SPA 外壳）不经认证——前端路由接管。

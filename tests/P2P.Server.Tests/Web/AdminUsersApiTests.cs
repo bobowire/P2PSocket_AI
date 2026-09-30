@@ -51,13 +51,13 @@ public sealed class AdminUsersApiTests : IAsyncLifetime
             new StatsService(factory, audit),
             audit,
             new LanSegmentService(factory, _registry, audit));
-        _admin = new AdminService(factory, _registry, audit, invalidation); // Web 载体直调实例
+        _admin = new AdminService(factory, _registry, audit, invalidation, listPusher: pusher); // Web 载体直调实例
         _server = new ControlServer(factory, _registry, router.DispatchAsync);
         await _server.StartAsync(new IPEndPoint(IPAddress.Loopback, 0));
 
         var options = new ServerOptions { Listen = { Web = Random.Shared.Next(21000, 24000) } };
         _web = new ServerWebHostService(options, TimeProvider.System, new AdminSessionStore(TimeProvider.System),
-            factory, audit, _admin)
+            factory, audit, _admin, _registry)
         {
             WebRootOverride = Path.Combine(Path.GetTempPath(), $"p2p-no-webroot-{Guid.NewGuid():N}"),
         };

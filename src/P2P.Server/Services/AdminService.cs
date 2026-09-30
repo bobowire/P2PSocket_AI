@@ -17,7 +17,8 @@ public sealed class AdminService(
     IDbContextFactory<AppDbContext> dbFactory,
     DeviceRegistry registry,
     AuditLogger audit,
-    InvalidationPusher? invalidation = null)
+    InvalidationPusher? invalidation = null,
+    DeviceListPusher? listPusher = null)
 {
     /// <summary>禁用设备（macCode 定位）：置位 → 引用方 0x75 → 踢线 → 审计。已禁用幂等成功。</summary>
     public async Task<bool> DisableDeviceAsync(string macCode)
@@ -124,5 +125,26 @@ public sealed class AdminService(
         await db.SaveChangesAsync();
         await audit.WriteAsync("unbind_admin", deviceId, detail: new { device.MacCode });
         return true;
+    }
+
+    /// <summary>远程码重置（M3-04 Web 载体，FR-S-903 管理出口；deviceId 定位，区别 0x14 自助路径的
+    /// session 定位）：换码（OQ-8 生成器；唯一索引换值即旧码 4003）→ 审计（不含码值，AI-17）→
+    /// 引用方 0x75(remote_code_reset) → 可见相关方 0x41 刷新列表。返回新码；设备不存在返回 null。</summary>
+    public async Task<string?> ResetDeviceRemoteCodeAsync(Guid deviceId)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync();
+        var device = await db.Devices.SingleOrDefaultAsync(d => d.Id == deviceId);
+        if (device is null)
+            return null;
+        var newCode = await new RemoteCodeGenerator(db).GenerateAsync();
+        device.RemoteCode = newCode;
+        await db.SaveChangesAsync();
+        await audit.WriteAsync("remote_code_reset", deviceId);
+        if (invalidation is not null)
+            await invalidation.PushTargetingAsync(deviceId, InvalidationReason.RemoteCodeReset);
+        if (listPusher is not null)
+            await listPusher.NotifyDevicesAsync(
+                await DeviceListPusher.ResolveAccountPeersAsync(db, deviceId));
+        return newCode;
     }
 }
