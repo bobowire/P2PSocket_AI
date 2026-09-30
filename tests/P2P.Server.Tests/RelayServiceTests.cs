@@ -17,6 +17,8 @@ namespace P2P.Server.Tests;
 /// 双向密文帧转发（UDP/TCP/混合承载）、转发字节与发送内层逐字节相等（零解密断言——服务端无钥，
 /// 任何解析/重编码都会破坏密文不变性）、先 JOIN 先发在对端加入前丢弃、未知源丢弃（防劫持）、
 /// 空闲 90s 回收、TCP 断连即收会话并关对端、0x74 三错误路径（5002/1001/4005）、Grant 双侧下发。
+/// M3-07 追加（TD-23）：限速令牌桶欠账 → 新分配 5002 + invite relayAllowed 三态合成 +
+/// 存量会话欠账等待仅降速不中断（假时钟推进回填）+ 开关关闭存量不受杀。
 /// 夹具 RelayService 挂 PublicHost=203.0.113.99（M2-36）：Grant 端点断言覆盖通告地址语义；
 /// 默认本地侧派生路径由集成 harness（默认 options）端到端覆盖。
 /// </summary>
@@ -30,6 +32,7 @@ public sealed class RelayServiceTests : IAsyncLifetime
     private ControlServer _server = null!;
     private SignalingCoordinator _signaling = null!;
     private RelayService _relay = null!;
+    private RelayRateLimiter _limiter = null!; // TD-23（M3-07）：默认速率 0=不限（既有用例不扰）
     private FakeTimeProvider _time = null!;
     private IPEndPoint _relayUdp = null!;
     private IPEndPoint _relayTcp = null!;
@@ -42,9 +45,12 @@ public sealed class RelayServiceTests : IAsyncLifetime
         _time = new FakeTimeProvider(DateTimeOffset.UtcNow);
 
         var audit = new AuditLogger(factory, _time);
-        _signaling = new SignalingCoordinator(factory, _registry, new Authorizer(factory), audit, _time);
+        _limiter = new RelayRateLimiter(0, _time);
+        _signaling = new SignalingCoordinator(factory, _registry, new Authorizer(factory), audit, _time,
+            rateLimiter: _limiter);
         _relay = new RelayService(factory, _registry, _signaling.ResolveRelayPeers,
-            new RelayServiceOptions { PublicHost = "203.0.113.99" }, time: _time); // M2-36：通告地址覆盖派生
+            new RelayServiceOptions { PublicHost = "203.0.113.99" }, time: _time,
+            rateLimiter: _limiter); // M2-36：通告地址覆盖派生
         var router = new ControlMessageRouter(
             new RegistrationService(factory, _registry, audit, _time),
             new UserService(factory, audit, _time),
@@ -457,5 +463,132 @@ public sealed class RelayServiceTests : IAsyncLifetime
         // 回收后数据包静默丢弃
         await aUdp.SendAsync(BuildData(ga.RelaySessionId, PtpCiphertext(32)), _relayUdp);
         await AssertUdpSilentAsync(bUdp);
+    }
+
+    // ── M3-07 限速与开关（TD-23：耗尽拒新 5002 保护存量，存量仅降速不中断）──
+
+    /// <summary>打洞并捕获 invite（relayAllowed 三态断言用），返回 (invite, sessionId)。</summary>
+    private static async Task<(PunchInvite Invite, Guid SessionId)> PunchWithInviteAsync(
+        TestPcpClient a, TestPcpClient b, Guid bId)
+    {
+        await a.SendAsync(new PunchRequest(a.NextSeq(), a.Now(), MsgType.PunchRequest,
+            bId, null, "udp", new EndpointPair(new P2P.Core.Protocol.Endpoint("203.0.113.10", 50000), null), null));
+        var invite = await b.ReceiveAsync<PunchInvite>() ?? throw new IOException("B 未收到 PunchInvite");
+        await b.SendAsync(new PunchEndpoint(b.NextSeq(), b.Now(), MsgType.PunchEndpoint,
+            invite.SessionId, new EndpointPair(new P2P.Core.Protocol.Endpoint("198.51.100.20", 50001), null)));
+        var ack = await a.ReceiveAsync<PunchRequestAck>() ?? throw new IOException("A 未收到延后 Ack");
+        return (invite, ack.SessionId);
+    }
+
+    [Fact]
+    public async Task RelayAllowed_三态合成_开关与限速余量()
+    {
+        var (a, _) = await RegisterAsync("ra-a");
+        var (b, bId) = await RegisterAsync("ra-b");
+
+        // ① 开 + 不限（默认）：真
+        var (invite1, _) = await PunchWithInviteAsync(a, b, bId);
+        Assert.True(invite1.RelayAllowed);
+
+        // ② 开关关：假
+        await using (var db = CreateDb())
+        {
+            db.ServerConfig.Single(c => c.Key == "relay_enabled").Value = "0";
+            await db.SaveChangesAsync();
+        }
+        var (invite2, _) = await PunchWithInviteAsync(a, b, bId);
+        Assert.False(invite2.RelayAllowed);
+
+        // ③ 开 + 桶欠账：假；假时钟推进回填后恢复真（余量随时间自愈）
+        await using (var db = CreateDb())
+        {
+            db.ServerConfig.Single(c => c.Key == "relay_enabled").Value = "1";
+            await db.SaveChangesAsync();
+        }
+        _limiter.UpdateRate(100); // 100 B/s（切换时桶钳为 0）
+        await _limiter.AcquireAsync(1, CancellationToken.None); // 0≥0 通过并扣减 → 欠账 -1B
+        Assert.False(_limiter.HasBudget());
+        var (invite3, _) = await PunchWithInviteAsync(a, b, bId);
+        Assert.False(invite3.RelayAllowed);
+
+        _time.Advance(TimeSpan.FromSeconds(2)); // 200B 回填 ≫ 1B 欠账
+        Assert.True(_limiter.HasBudget());
+        var (invite4, _) = await PunchWithInviteAsync(a, b, bId);
+        Assert.True(invite4.RelayAllowed);
+    }
+
+    [Fact]
+    public async Task 限速欠账_新分配5002_存量仅降速不中断()
+    {
+        _limiter.UpdateRate(100); // 100 B/s
+        var (a, _) = await RegisterAsync("lim-a");
+        var (b, bId) = await RegisterAsync("lim-b");
+        var punchId = await CompletePunchAsync(a, b, bId);
+        var (ga, _) = await AllocateAsync(a, b, punchId); // 桶非负 → 分配放行
+        var sid = ga.RelaySessionId;
+        var aUdp = await JoinUdpAsync(sid);
+        var bUdp = await JoinUdpAsync(sid);
+
+        var first = PtpCiphertext(150);
+        await aUdp.SendAsync(BuildData(sid, first), _relayUdp);
+        Assert.Equal(first, await ReceiveUdpAsync(bUdp)); // 通过即扣减 → 欠账 -150B
+        Assert.Equal(150, _relay.Stats.BytesForwarded);
+        Assert.Equal(150, _relay.ListSessions().Single().BytesForwarded); // 会话级字节（M3-07 快照口径）
+
+        // 欠账期间：新打洞 invite 假 + 新分配 5002（TD-23：保护存量）
+        var (c, _) = await RegisterAsync("lim-c");
+        var (d, dId) = await RegisterAsync("lim-d");
+        var (invite, punch2) = await PunchWithInviteAsync(c, d, dId);
+        Assert.False(invite.RelayAllowed);
+        await c.SendAsync(new RelayAllocate(c.NextSeq(), c.Now(), MsgType.RelayAllocate, punch2));
+        var error = await c.ReceiveAsync<ErrorMessage>();
+        Assert.Equal(ErrorCode.RelayDisabled, error!.Code); // 5002
+        Assert.Equal("relay_rate_limited", error.HttpLikeMsg);
+
+        // 存量：第二帧被欠账延迟（假时钟未推进 → 静默=降速中）→ 推进回填后送达（不中断）
+        var second = PtpCiphertext(100);
+        await aUdp.SendAsync(BuildData(sid, second), _relayUdp);
+        await AssertUdpSilentAsync(bUdp, ms: 150); // 真实时钟窗内令牌不回填（回填走假时钟）
+        _time.Advance(TimeSpan.FromSeconds(2)); // 200B 回填 > 150B 欠账
+        Assert.Equal(second, await ReceiveUdpAsync(bUdp));
+        Assert.Equal(1, _relay.Stats.Sessions); // 存量未受杀
+        Assert.Equal(first.Length + second.Length, _relay.Stats.BytesForwarded);
+    }
+
+    [Fact]
+    public async Task 开关关闭_新分配5002_存量会话不受杀()
+    {
+        var (a, _) = await RegisterAsync("sw-a");
+        var (b, bId) = await RegisterAsync("sw-b");
+        var punchId = await CompletePunchAsync(a, b, bId);
+        var (ga, _) = await AllocateAsync(a, b, punchId);
+        var sid = ga.RelaySessionId;
+        var aUdp = await JoinUdpAsync(sid);
+        var bUdp = await JoinUdpAsync(sid);
+        var warm = PtpCiphertext(32);
+        await aUdp.SendAsync(BuildData(sid, warm), _relayUdp);
+        Assert.Equal(warm, await ReceiveUdpAsync(bUdp));
+
+        await using (var db = CreateDb())
+        {
+            db.ServerConfig.Single(c => c.Key == "relay_enabled").Value = "0";
+            await db.SaveChangesAsync();
+        }
+
+        // 新分配 → 5002（0x74 每次现读开关=写库即生效）
+        var punch2 = await CompletePunchAsync(a, b, bId);
+        await a.SendAsync(new RelayAllocate(a.NextSeq(), a.Now(), MsgType.RelayAllocate, punch2));
+        var error = await a.ReceiveAsync<ErrorMessage>();
+        Assert.Equal(ErrorCode.RelayDisabled, error!.Code);
+        Assert.Equal("relay_disabled", error.HttpLikeMsg);
+
+        // 存量不受杀：仍可双向转发、会话在表
+        var after = PtpCiphertext(48);
+        await aUdp.SendAsync(BuildData(sid, after), _relayUdp);
+        Assert.Equal(after, await ReceiveUdpAsync(bUdp));
+        var back = PtpCiphertext(40);
+        await bUdp.SendAsync(BuildData(sid, back), _relayUdp);
+        Assert.Equal(back, await ReceiveUdpAsync(aUdp));
+        Assert.Equal(1, _relay.Stats.Sessions);
     }
 }

@@ -10,7 +10,8 @@ namespace P2P.Server.Services;
 /// ② 向 A 下发延后 Ack（B 端点）。per-device 至多一个活跃会话：并发申请排队、同对去重。
 /// B 离线 → 4005；0x76 超 10s 未达 → 5001 失败收尾。
 /// relayAllowed 真实合成（M2-07）：= server_config relay_enabled（全局开关）AND 中继限速余量
-/// （余量判断 M3 前恒真）——0x71/0x70 Ack 随会话携带，客户端 Puncher 出队时与本地 peers.json 合成。
+/// （TD-23/M3-07 收口：RelayRateLimiter.HasBudget——令牌欠账期拒新，0x74 分配闸同口径）
+/// ——0x71/0x70 Ack 随会话携带，客户端 Puncher 出队时与本地 peers.json 合成。
 /// 并发路数 N（OQ-19/TD-20，M2-16）：取 0x70 punchConcurrency 经 PunchPolicy.Normalize 校验
 /// （1~5 缺省 3），经 0x71/0x70 Ack 的 PunchCount 统一回填——双方该次打洞执行同一 N（02 §5.2②）。
 /// 会话台账（M2-07）：结束后短期保留 sessionId → 设备对（M2-08 扩为含 proto/N/起始时刻），
@@ -33,6 +34,7 @@ public sealed class SignalingCoordinator : IAsyncDisposable
     private readonly TimeProvider _time;
     private readonly TimeSpan _sessionTimeout; // appsettings punch.timeoutSec（08 §5.1）
     private readonly Func<Guid, (Guid InitiatorId, Guid TargetId)?>? _activeRelayLookup; // 活中继反查（M2-19，RelayService）
+    private readonly RelayRateLimiter? _rateLimiter; // TD-23/M3-07：relayAllowed 余量合成（null=不限恒真）
     private readonly object _gate = new();
     private readonly Dictionary<Guid, PunchSession> _sessions = [];   // sessionId → 活跃会话
     private readonly Dictionary<Guid, RelayLedgerEntry> _relayLedger = []; // 结束会话台账（0x74 对端解析 + 0x72 统计上下文）
@@ -43,7 +45,8 @@ public sealed class SignalingCoordinator : IAsyncDisposable
 
     public SignalingCoordinator(IDbContextFactory<AppDbContext> dbFactory, DeviceRegistry registry,
         Authorizer authorizer, AuditLogger audit, TimeProvider? time = null, TimeSpan? sessionTimeout = null,
-        Func<Guid, (Guid InitiatorId, Guid TargetId)?>? activeRelayLookup = null)
+        Func<Guid, (Guid InitiatorId, Guid TargetId)?>? activeRelayLookup = null,
+        RelayRateLimiter? rateLimiter = null)
     {
         _dbFactory = dbFactory;
         _registry = registry;
@@ -52,6 +55,7 @@ public sealed class SignalingCoordinator : IAsyncDisposable
         _time = time ?? TimeProvider.System;
         _sessionTimeout = sessionTimeout ?? SessionTimeout;
         _activeRelayLookup = activeRelayLookup; // 台账（120s）外的回切解析兜底：中继会话存活即设备对在册
+        _rateLimiter = rateLimiter;
         _reaper = ReaperAsync(_cts.Token);
     }
 
@@ -140,8 +144,10 @@ public sealed class SignalingCoordinator : IAsyncDisposable
             Proto = string.IsNullOrWhiteSpace(msg.Proto) ? "udp" : msg.Proto, // 旧端缺省容忍（02 §7）
             // OQ-19/TD-20（M2-16）：取发起方请求值（越界/缺省 → 3，容忍哲学），Ack/Invite 统一回填
             PunchCount = PunchPolicy.Normalize(msg.PunchConcurrency),
-            // M2-07：全局开关 AND 限速余量（余量判断 M3 前恒真）——与设备级 peers.json 在客户端合成（05 §3.1）
-            RelayAllowed = new ServerConfigStore(db).GetBool("relay_enabled"),
+            // M2-07→M3-07（TD-23 收口）：全局开关 AND 限速余量（欠账期假；0x74 分配闸同口径）
+            // ——与设备级 peers.json 在客户端合成（05 §3.1）
+            RelayAllowed = new ServerConfigStore(db).GetBool("relay_enabled")
+                && (_rateLimiter?.HasBudget() ?? true),
             CreatedAt = _time.GetLocalNow(),
         };
 

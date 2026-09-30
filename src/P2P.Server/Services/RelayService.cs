@@ -24,6 +24,15 @@ public sealed class RelayServiceOptions
 /// <summary>中继运行统计（FR-S-810 仪表盘数据源，M3 展示）：进程内累计 + 自启动时刻。</summary>
 public sealed record RelayStats(int Sessions, long BytesForwarded, long Reaped, DateTime StartedAtUtc);
 
+/// <summary>会话表快照行（M3-07 GET /api/relay/sessions，FR-S-824）：按创建序。</summary>
+public sealed record RelaySessionView(
+    ulong RelaySessionId, Guid PunchSessionId,
+    RelayEndpointView A, RelayEndpointView B, long BytesForwarded,
+    DateTimeOffset CreatedAt, DateTimeOffset LastActivity);
+
+/// <summary>快照单端：已学 UDP 地址（可空）与 TCP 连接在否（API 层派生承载表达）。</summary>
+public sealed record RelayEndpointView(Guid DeviceId, string ControlIp, string? UdpAddr, bool TcpConnected);
+
 /// <summary>
 /// 中继服务（02 §6、05 §6，FR-S-701/702/704，TD-11 零解密）：UDP（单 socket 收发循环）+
 /// TCP（每连接转发对，u16 小端分帧）双承载。**只解析外层 8B 会话头
@@ -65,15 +74,19 @@ public sealed class RelayService : IAsyncDisposable
     private readonly DateTime _startedUtc; // FR-S-810 自启动时长（进程生命周期）
     private int _disposed; // 宿主 StopAsync 与容器释放各调一次（幂等）
 
+    private readonly RelayRateLimiter? _rateLimiter; // TD-23 全局字节率令牌桶（M3-07；null=不限）
+
     public RelayService(IDbContextFactory<AppDbContext> dbFactory, DeviceRegistry registry,
         Func<Guid, (Guid InitiatorId, Guid TargetId)?>? peerResolver = null,
-        RelayServiceOptions? options = null, TimeProvider? time = null)
+        RelayServiceOptions? options = null, TimeProvider? time = null,
+        RelayRateLimiter? rateLimiter = null)
     {
         _dbFactory = dbFactory;
         _registry = registry;
         _peerResolver = peerResolver;
         _options = options ?? new RelayServiceOptions();
         _time = time ?? TimeProvider.System;
+        _rateLimiter = rateLimiter;
         _startedUtc = _time.GetLocalNow().UtcDateTime;
         _reaper = ReaperAsync(_cts.Token);
     }
@@ -88,6 +101,23 @@ public sealed class RelayService : IAsyncDisposable
     public RelayStats Stats
     {
         get { lock (_gate) return new(_table.Count, Interlocked.Read(ref _bytesForwarded), Interlocked.Read(ref _reaped), _startedUtc); }
+    }
+
+    /// <summary>会话表快照（M3-07 GET /api/relay/sessions）：创建序确定性排列；
+    /// 端点承载表达由 API 层派生（tcp 优先——与转发偏好同口径）。</summary>
+    public List<RelaySessionView> ListSessions()
+    {
+        lock (_gate)
+            return _table.Values
+                .OrderBy(e => e.CreatedAt).ThenBy(e => e.RelaySessionId)
+                .Select(e => new RelaySessionView(
+                    e.RelaySessionId, e.PunchSessionId,
+                    new RelayEndpointView(e.A.DeviceId, e.A.ControlIp.ToString(),
+                        e.A.UdpAddr?.ToString(), e.A.Tcp is not null),
+                    new RelayEndpointView(e.B.DeviceId, e.B.ControlIp.ToString(),
+                        e.B.UdpAddr?.ToString(), e.B.Tcp is not null),
+                    Interlocked.Read(ref e.BytesForwarded), e.CreatedAt, e.LastActivity))
+                .ToList();
     }
 
     public Task StartAsync(int udpPort, int tcpPort, CancellationToken ct = default)
@@ -111,6 +141,12 @@ public sealed class RelayService : IAsyncDisposable
         if (!new ServerConfigStore(db).GetBool("relay_enabled"))
         {
             await session.SendErrorAsync(ErrorCode.RelayDisabled, "relay_disabled"); // 5002（03 §2.8）
+            return;
+        }
+        if (_rateLimiter is { } limiter && !limiter.HasBudget())
+        {
+            // TD-23（M3-07）：令牌耗尽（欠账期）拒新分配保护存量——存量会话仅降速不受杀
+            await session.SendErrorAsync(ErrorCode.RelayDisabled, "relay_rate_limited");
             return;
         }
 
@@ -216,17 +252,18 @@ public sealed class RelayService : IAsyncDisposable
         }
 
         if (wire.Length < HeaderLen) return;
+        RelayEntry? dataEntry;
         RelayEnd? other;
         lock (_gate)
         {
-            if (!_table.TryGetValue(BinaryPrimitives.ReadUInt64LittleEndian(wire), out var entry)) return;
-            var self = entry.A.UdpAddr?.Equals(from) == true ? entry.A
-                     : entry.B.UdpAddr?.Equals(from) == true ? entry.B : null;
+            if (!_table.TryGetValue(BinaryPrimitives.ReadUInt64LittleEndian(wire), out dataEntry)) return;
+            var self = dataEntry.A.UdpAddr?.Equals(from) == true ? dataEntry.A
+                     : dataEntry.B.UdpAddr?.Equals(from) == true ? dataEntry.B : null;
             if (self is null) return; // 未知源：保守丢弃（防会话劫持——重绑定由空闲回收+重新分配兜底）
-            entry.LastActivity = _time.GetLocalNow();
-            other = ReferenceEquals(self, entry.A) ? entry.B : entry.A;
+            dataEntry.LastActivity = _time.GetLocalNow();
+            other = ReferenceEquals(self, dataEntry.A) ? dataEntry.B : dataEntry.A;
         }
-        await ForwardAsync(other!, wire.AsMemory(HeaderLen)).ConfigureAwait(false); // 剥离 8B → 密文原样转发
+        await ForwardAsync(dataEntry, other!, wire.AsMemory(HeaderLen)).ConfigureAwait(false); // 剥离 8B → 密文原样转发
     }
 
     private async Task SendUdpAsync(ReadOnlyMemory<byte> datagram, IPEndPoint to)
@@ -294,7 +331,7 @@ public sealed class RelayService : IAsyncDisposable
                     entry.LastActivity = _time.GetLocalNow();
                     other = ReferenceEquals(self, entry.A) ? entry.B : entry.A;
                 }
-                await ForwardAsync(other, frame.AsMemory(HeaderLen)).ConfigureAwait(false);
+                await ForwardAsync(entry!, other, frame.AsMemory(HeaderLen)).ConfigureAwait(false);
             }
         }
         catch (Exception ex) when (ex is InvalidDataException or IOException or SocketException
@@ -325,10 +362,13 @@ public sealed class RelayService : IAsyncDisposable
 
     // ── 转发（两承载共用）─────────────────────────────────────────────
 
-    /// <summary>向端转发（已剥离 8B 的 PTP 密文帧）：TCP 优先（连接在即用），次 UDP 已学地址；
-    /// 均无 = 对端未 JOIN——丢弃（无缓冲设计，JOIN 确认后对端方可收）。</summary>
-    private async Task ForwardAsync(RelayEnd to, ReadOnlyMemory<byte> ptpFrame)
+    /// <summary>向端转发（已剥离 8B 的 PTP 密文帧）：TD-23 令牌桶放行（欠账=按速率等待，存量仅降速）
+    /// → TCP 优先（连接在即用），次 UDP 已学地址；均无 = 对端未 JOIN——丢弃（无缓冲设计，
+    /// JOIN 确认后对端方可收）。字节计数：全局进程内累计 + 会话级（快照口径）。</summary>
+    private async Task ForwardAsync(RelayEntry entry, RelayEnd to, ReadOnlyMemory<byte> ptpFrame)
     {
+        if (_rateLimiter is not null)
+            await _rateLimiter.AcquireAsync(ptpFrame.Length, _cts.Token).ConfigureAwait(false); // 取消=停机收场
         TcpClient? tcp;
         IPEndPoint? udp;
         lock (_gate) { tcp = to.Tcp; udp = to.UdpAddr; }
@@ -338,6 +378,7 @@ public sealed class RelayService : IAsyncDisposable
             {
                 await WriteFrameAsync(to.WriteGate, tcp.GetStream(), ptpFrame, _cts.Token).ConfigureAwait(false);
                 Interlocked.Add(ref _bytesForwarded, ptpFrame.Length);
+                Interlocked.Add(ref entry.BytesForwarded, ptpFrame.Length);
             }
             catch (Exception ex) when (ex is IOException or SocketException
                 or ObjectDisposedException or OperationCanceledException)
@@ -349,6 +390,7 @@ public sealed class RelayService : IAsyncDisposable
         {
             await SendUdpAsync(ptpFrame, udp).ConfigureAwait(false);
             Interlocked.Add(ref _bytesForwarded, ptpFrame.Length);
+            Interlocked.Add(ref entry.BytesForwarded, ptpFrame.Length);
         }
     }
 
@@ -474,6 +516,7 @@ public sealed class RelayService : IAsyncDisposable
         public required RelayEnd B { get; init; } // 服务方
         public required DateTimeOffset CreatedAt { get; init; }
         public DateTimeOffset LastActivity { get; set; }
+        public long BytesForwarded; // 会话级累计（M3-07 快照；Interlocked）
     }
 
     /// <summary>单端：UDP 已学地址与 TCP 连接至多各一（转发 TCP 优先）；WriteGate 串行化该端出站帧。</summary>

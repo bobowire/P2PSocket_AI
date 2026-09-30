@@ -126,7 +126,7 @@ Cookie：`HttpOnly, SameSite=Strict`（无 Secure——HTTP，D11）；会话服
 | GET | `/api/groups` · PUT `/api/groups/default` | 分组总览、默认分组策略 | FR-S-822 |
 | GET | `/api/group-requests?status=pending` · POST `/api/group-requests/{id}/approve` · `/reject` | 审批队列（服务端 Web 侧，FR-S-305 与客户端 0x53 同语义） | FR-S-305/822 |
 | GET | `/api/mappings` | 全部映射配置与状态（只读）。**状态=TD-22 投影口径（v1.40）**：0x62 mapping_status 审计流水每映射最新一条（direct/relay/failed）为"最后已知状态"——客户端状态机是真相源（M2-08），服务端管理面仅流水投影；无流水行（长期离线）=unknown。累计流量 join mapping_stats | FR-S-823 |
-| GET | `/api/relay/sessions` · PUT `/api/relay/config` | 中继会话列表；全局开关/限速。**限速语义=TD-23（v1.40）**：relay_rate_limit=全局字节速率令牌桶作用于中继转发发送路径（UDP+TCP 双承载，0=不限）；令牌耗尽时**新** 0x74 分配拒绝（5002，保护存量会话仅降速）；SignalingCoordinator relayAllowed 合成接入余量判定（M2-07"限速余量恒真"收口） | FR-S-824 |
+| GET | `/api/relay/sessions` · PUT `/api/relay/config` | 中继会话列表；全局开关/限速。**限速语义=TD-23（v1.40）**：relay_rate_limit=全局字节速率令牌桶作用于中继转发发送路径（UDP+TCP 双承载，0=不限）；令牌耗尽时**新** 0x74 分配拒绝（5002，保护存量会话仅降速）；SignalingCoordinator relayAllowed 合成接入余量判定（M2-07"限速余量恒真"收口）。M3-07 落地编制补充 GET `/api/relay/config`（读现值，管理页表单回显用）；sid/端点承载表达详见 05 §6.2 | FR-S-824 |
 | GET | `/api/system/config` · PUT | server_config 键值（含端口覆盖键与日志级别，改动重启生效；未覆盖时取配置文件值，FR-S-825） | FR-S-825 |
 | GET | `/api/audit-logs?event=&page=` | 审计日志 | NFR-54 |
 

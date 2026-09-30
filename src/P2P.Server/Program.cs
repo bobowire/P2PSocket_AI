@@ -93,12 +93,22 @@ builder.Services.AddSingleton<GroupService>();
 builder.Services.AddSingleton<MappingService>();
 // 0x63 内网段白名单（M2-11，FR-C-701/702）：段 CRUD + 移除联动 0x75 失效推送
 builder.Services.AddSingleton<LanSegmentService>();
+// 中继限速令牌桶（TD-23、M3-07）：relay_rate_limit 库键启动读取（0=不限）；
+// SignalingCoordinator（relayAllowed 合成）与 RelayService（转发消耗+0x74 分配闸）共用，
+// PUT /api/relay/config 进程内直调 UpdateRate 即时生效
+builder.Services.AddSingleton(sp =>
+{
+    using var db = sp.GetRequiredService<IDbContextFactory<AppDbContext>>().CreateDbContext();
+    return new RelayRateLimiter(new ServerConfigStore(db).GetInt("relay_rate_limit"),
+        sp.GetRequiredService<TimeProvider>());
+});
 builder.Services.AddSingleton(sp => new SignalingCoordinator(
     sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
     sp.GetRequiredService<DeviceRegistry>(),
     sp.GetRequiredService<Authorizer>(),
     sp.GetRequiredService<AuditLogger>(),
     sessionTimeout: TimeSpan.FromSeconds(options.Punch.TimeoutSec),
+    rateLimiter: sp.GetRequiredService<RelayRateLimiter>(),
     // M2-19 回切 0x73 解析兜底：活中继会话反查（闭包延迟解析——RelayService 构造依赖本类，调用期才解环）
     activeRelayLookup: punchSessionId => sp.GetRequiredService<RelayService>().ResolveActiveRelay(punchSessionId)));
 builder.Services.AddSingleton(sp => new PresenceMonitor(
@@ -122,7 +132,8 @@ builder.Services.AddSingleton(sp =>
         {
             IdleTimeout = TimeSpan.FromSeconds(options.Relay.IdleTimeoutSec),
             PublicHost = cfg.Get("public_addr"),
-        });
+        },
+        rateLimiter: sp.GetRequiredService<RelayRateLimiter>());
 });
 builder.Services.AddSingleton<ControlMessageRouter>();
 // 上报族处理器（M2-08）：0x62 审计 / 0x64 mapping_stats / 0x72 落库在 SignalingCoordinator；
