@@ -1,6 +1,6 @@
 # P2P 内网穿透产品 · 技术设计文档
 
-> 版本：v1.36　创建日期：2026-08-19　状态：待评审
+> 版本：v1.37　创建日期：2026-08-19　状态：待评审
 > 依据：[产品需求文档 PRD v0.6](../prd/README.md)（决策 D1~D21，D3 经 v0.4 修订；开放问题 OQ-1~OQ-19 已全部决议）
 > 定位：开发阶段的**施工图纸**——所有实现以本文档为准；与 PRD 冲突时以 PRD 为准并提出修订。
 
@@ -108,4 +108,5 @@
 | 2026-09-30 | v1.33 | M2-27 落地同步：02 §2.4 消息表加 **0x42 GroupList** 定案行（本地 /api/groups 聚合的协议侧缺口——0x40 仅设备维度无 groupId/owner；无载荷→items[]{groupId,groupName,policy,isOwner,memberCount}，与 0x40 同口径免登录、仅 approved 成员行，02 §7 加法演进）+ §2.5 主动类清单补 0x42（`0x40/0x42/0x50~0x57`）；05 §5 六条实现注记（0x42 四处登记[ExpectedMsgType/ExpectedTypeKnown+DecodeTyped/IsActiveClass 双侧]、0x23 服务端 handler 补全[原白名单缺位=静默丢弃→10s 超时 5003 的根因链]、groups 12 端点聚合=1×0x42+n×0x53 List、lan-segments 镜像即数据源[0x63 无 list 消息，LanSegmentsStore.Entries() 读口+CIDR 规范化镜像服务端三步]、logs Serilog 文本解析[行前缀正则/续行归前条/newest-first/5 万条封顶]、export-ts 43 端点再生成+generated.test.ts 全量对齐+MSW 全端点同步） |
 | 2026-09-30 | v1.34 | M2-28 落地同步：06 §2/§4 前端注记（passive 边界精确化——/segments /settings 与仪表盘远程码重置属本机管理类 passive 亦可达[0x63]；useWs 新增 onState 旁路——状态类事件在 refetch 之外透传原始事件对象仅作提示不改 store，mapping_state invalid→全局失效提示[0x75 链]；设备列表 10s 轮询移除改 device_list 事件驱动+onOpen/visibilitychange resync 兜底）；无文档形状变更（§2 页面表 M2-27 已列全，页面实现照表落地） |
 | 2026-09-30 | v1.35 | M2-29 落地同步：06 §2 M2-29 落地注记（/logs 级别过滤值=服务端 04 §2.6 token、导出=同源新窗口直下[服务端 text/plain 附件免前端落盘]；/upgrade ?reason=version 版本不符警示[M2-26 自动打开入口]；登录页改密 0x23 成功后前端主动登出引导重新登录——协议侧不裁会话[04 §2.3]，登出仅 UX 口径）；无文档形状变更（§2 页面表已列 /logs /upgrade/改密入口行） |
+| 2026-09-30 | v1.37 | M2-36 中继端点 NAT 通告修复：02 §6.1/05 §6/03 §2.8 新增 `public_addr` 键（默认空=控制连接本地侧派生不变；非空时 RelayGrant 端点以通告地址替换——公网 NAT 部署 VM 网卡只见内网 IP，派生下发 10.x 端点客户端 JOIN 不可达超时；实测于腾讯云部署，FR-S-701/704 中继可用性） |
 | 2026-09-30 | v1.36 | M2-33 落地同步：05 §…-283 移除联动 0x75 推送对象措辞收口——"在线 owner 推"精确为**按映射 owner 分组逐户推**（受影响映射持有方才执行置 invalid；0x14/0x52/0x56 同口径；实现此前误推段属设备上报者本人，A-8 场景落地时暴露并修正）；09 §2.3 A-7/A-8/A-9 三行补"已自动化（M2-33）"注记；无其它形状变更 |

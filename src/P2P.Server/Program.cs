@@ -106,12 +106,23 @@ builder.Services.AddSingleton(sp => new PresenceMonitor(
     timeout: TimeSpan.FromSeconds(options.Heartbeat.TimeoutSec),
     // M2-13 兜底：跨进程 CLI 写库的禁用/解绑，~30s 心跳窗口内踢线/降级 + 0x75 补推
     invalidation: sp.GetRequiredService<InvalidationPusher>()));
-// 中继（02 §6，M2-07）：对端解析走 SignalingCoordinator 结束会话台账（打洞完成/超时后 120s 内可分配）
-builder.Services.AddSingleton(sp => new RelayService(
-    sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-    sp.GetRequiredService<DeviceRegistry>(),
-    sp.GetRequiredService<SignalingCoordinator>().ResolveRelayPeers,
-    new RelayServiceOptions { IdleTimeout = TimeSpan.FromSeconds(options.Relay.IdleTimeoutSec) }));
+// 中继（02 §6，M2-07）：对端解析走 SignalingCoordinator 结束会话台账（打洞完成/超时后 120s 内可分配）；
+// public_addr 是库开关（03 §2.8，M2-36）：首次解析晚于数据库初始化（键必然存在）——NAT 云部署
+// （VM 网卡只见内网 IP）填公网地址覆盖 Grant 端点派生，空 = 派生（局域网/直绑公网 IP）
+builder.Services.AddSingleton(sp =>
+{
+    using var db = sp.GetRequiredService<IDbContextFactory<AppDbContext>>().CreateDbContext();
+    var cfg = new ServerConfigStore(db);
+    return new RelayService(
+        sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+        sp.GetRequiredService<DeviceRegistry>(),
+        sp.GetRequiredService<SignalingCoordinator>().ResolveRelayPeers,
+        new RelayServiceOptions
+        {
+            IdleTimeout = TimeSpan.FromSeconds(options.Relay.IdleTimeoutSec),
+            PublicHost = cfg.Get("public_addr"),
+        });
+});
 builder.Services.AddSingleton<ControlMessageRouter>();
 // 上报族处理器（M2-08）：0x62 审计 / 0x64 mapping_stats / 0x72 落库在 SignalingCoordinator；
 // 保留清理 audit_logs+punch_stats 一并（启动+每日，OQ-17/03 §2.7/§2.9）

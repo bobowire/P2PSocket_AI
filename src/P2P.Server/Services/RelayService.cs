@@ -8,11 +8,17 @@ using P2P.Server.Data;
 
 namespace P2P.Server.Services;
 
-/// <summary>RelayService 可调参数（08 §5.1 relay.idleTimeoutSec）。</summary>
+/// <summary>RelayService 可调参数（08 §5.1 relay.idleTimeoutSec、03 §2.8 public_addr）。</summary>
 public sealed class RelayServiceOptions
 {
     /// <summary>会话空闲回收（02 §6.2：任端 90s 无包即回收——客户端 KEEPALIVE 维持）。</summary>
     public TimeSpan IdleTimeout { get; init; } = TimeSpan.FromSeconds(90);
+
+    /// <summary>对外通告地址（03 §2.8 public_addr，默认空）：非空时 RelayGrant 端点以它替换
+    /// 控制连接本地侧地址。NAT 云部署（VM 网卡只见内网 IP，公网地址由云平台映射）必须配置，
+    /// 否则客户端拿到不可路由的内网端点 JOIN 超时（M2-36 公网实测定案）。空 = 本地侧派生
+    /// （客户端经哪块网卡到达即回哪个地址，局域网/直绑公网 IP 场景成立）。</summary>
+    public string? PublicHost { get; init; }
 }
 
 /// <summary>中继运行统计（FR-S-810 仪表盘数据源，M3 展示）。</summary>
@@ -23,8 +29,8 @@ public sealed record RelayStats(int Sessions, long BytesForwarded, long Reaped);
 /// TCP（每连接转发对，u16 小端分帧）双承载。**只解析外层 8B 会话头
 /// [u64 relaySessionId 小端]**，剥离后转发 PTP 密文帧——无任何密钥，帧内容不可解（SEC-11）。
 /// 0x74 RelayAllocate：relay_enabled 校验（关 → 5002）→ 台账解析打洞会话设备对 →
-/// 分配 relaySessionId → 向双方下发 RelayGrant（端点=各自控制连接本地侧地址：
-/// relayPorts[0]/UDP、relayPorts[1]/TCP）。地址学习：RELAY_JOIN 按源端点认领端槽
+/// 分配 relaySessionId → 向双方下发 RelayGrant（端点=public_addr 通告地址（03 §2.8，NAT
+/// 云部署）或各自控制连接本地侧地址：relayPorts[0]/UDP、relayPorts[1]/TCP）。地址学习：RELAY_JOIN 按源端点认领端槽
 /// （已学地址精确匹配刷新 → 空槽按控制源 IP 偏好 → 先到先得；双端同 IP 时先 JOIN 者入 A 槽——
 /// 槽位仅作地址归属，转发"另一端"与标签无关）；数据包源地址不匹配两端即丢弃（保守不学习，防劫持）。
 /// 回收：任端 90s 空闲 / TCP 端断连即收会话（02 §6.2）；字节计数累计。
@@ -152,10 +158,13 @@ public sealed class RelayService : IAsyncDisposable
         }
     }
 
-    /// <summary>RelayGrant 端点派生：本控制连接的本地侧地址（客户端经哪块网卡到达即回哪个地址）。</summary>
+    /// <summary>RelayGrant 端点派生：public_addr 非空优先（NAT 云部署通告公网地址，03 §2.8/M2-36）；
+    /// 否则取本控制连接的本地侧地址（客户端经哪块网卡到达即回哪个地址）。</summary>
     private RelayGrant BuildGrant(ControlSession to, ulong sid)
     {
-        var host = to.LocalEndPoint?.Address.ToString() ?? IPAddress.Loopback.ToString();
+        var host = _options.PublicHost is { Length: > 0 } publicHost
+            ? publicHost
+            : to.LocalEndPoint?.Address.ToString() ?? IPAddress.Loopback.ToString();
         return new RelayGrant(to.NextSeq(), to.ServerTimestamp(), MsgType.RelayAllocate, sid,
             new EndpointPair(
                 new P2P.Core.Protocol.Endpoint(host, (ushort)(UdpEndpoint?.Port ?? 0)),

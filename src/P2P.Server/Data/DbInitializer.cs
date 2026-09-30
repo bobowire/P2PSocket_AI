@@ -19,6 +19,7 @@ public static class DbInitializer
         ("registration_open", "1"),
         ("relay_enabled", "1"),
         ("relay_rate_limit", "0"),
+        ("public_addr", ""), // 中继端点通告地址（M2-36）：空=控制连接本地侧派生；NAT 云部署填公网 IP/域名
         ("stun_auth", "1"),
         ("virtual_subnet", "100.64.0.0/24"),
         ("audit_retention_days", "90"),

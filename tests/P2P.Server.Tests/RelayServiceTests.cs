@@ -17,6 +17,8 @@ namespace P2P.Server.Tests;
 /// 双向密文帧转发（UDP/TCP/混合承载）、转发字节与发送内层逐字节相等（零解密断言——服务端无钥，
 /// 任何解析/重编码都会破坏密文不变性）、先 JOIN 先发在对端加入前丢弃、未知源丢弃（防劫持）、
 /// 空闲 90s 回收、TCP 断连即收会话并关对端、0x74 三错误路径（5002/1001/4005）、Grant 双侧下发。
+/// 夹具 RelayService 挂 PublicHost=203.0.113.99（M2-36）：Grant 端点断言覆盖通告地址语义；
+/// 默认本地侧派生路径由集成 harness（默认 options）端到端覆盖。
 /// </summary>
 public sealed class RelayServiceTests : IAsyncLifetime
 {
@@ -41,7 +43,8 @@ public sealed class RelayServiceTests : IAsyncLifetime
 
         var audit = new AuditLogger(factory, _time);
         _signaling = new SignalingCoordinator(factory, _registry, new Authorizer(factory), audit, _time);
-        _relay = new RelayService(factory, _registry, _signaling.ResolveRelayPeers, time: _time);
+        _relay = new RelayService(factory, _registry, _signaling.ResolveRelayPeers,
+            new RelayServiceOptions { PublicHost = "203.0.113.99" }, time: _time); // M2-36：通告地址覆盖派生
         var router = new ControlMessageRouter(
             new RegistrationService(factory, _registry, audit, _time),
             new UserService(factory, audit, _time),
@@ -228,8 +231,11 @@ public sealed class RelayServiceTests : IAsyncLifetime
 
         Assert.Equal(ga.RelaySessionId, gb.RelaySessionId); // 同一 relaySessionId
         Assert.NotEqual(0UL, ga.RelaySessionId);
-        // 端点 = 各自控制连接本地侧地址 + relay 双端口（M2-07 端点派生）
-        Assert.Equal("127.0.0.1", ga.RelayEndpoints.Udp!.Host);
+        // 端点 = public_addr 通告地址（夹具 PublicHost=203.0.113.99 覆盖本地侧派生，M2-36）
+        // + relay 双端口；默认派生路径（控制连接本地侧地址）由集成 harness 全量接线覆盖
+        // （RelayClientIntegrationTests 等四套默认 options，回环派生可达性端到端验证）
+        Assert.Equal("203.0.113.99", ga.RelayEndpoints.Udp!.Host);
+        Assert.Equal("203.0.113.99", ga.RelayEndpoints.Tcp!.Host);
         Assert.Equal(_relayUdp.Port, ga.RelayEndpoints.Udp.Port);
         Assert.Equal(_relayTcp.Port, ga.RelayEndpoints.Tcp!.Port);
         Assert.Equal(ga.RelayEndpoints.Udp!.Port, gb.RelayEndpoints.Udp!.Port);
