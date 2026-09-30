@@ -9,9 +9,9 @@ echo "==> [1/4] dotnet build"
 dotnet build AI-P2P.sln -c Release
 
 # export-ts：反射导出 API 类型 → ui-shared/types/api.d.ts（06 §5，M1-31 落地生成器）
-if [ -d tools/ExportTs ]; then
+if [ -d src/Tools/ExportTs ]; then
   echo "==> [2/4] export-ts"
-  dotnet run --project tools/ExportTs -c Release
+  dotnet run --project src/Tools/ExportTs -c Release
 else
   echo "==> [2/4] export-ts：生成器未建（M1-31），跳过"
 fi
