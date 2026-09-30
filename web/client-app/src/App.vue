@@ -19,8 +19,10 @@ const MENU = [
   { path: "/groups", label: "分组" },
   { path: "/segments", label: "网段" },
   { path: "/mappings", label: "端口映射" },
+  { path: "/logs", label: "日志" },
   { path: "/login", label: "账号" },
   { path: "/settings", label: "设置" },
+  { path: "/upgrade", label: "升级" },
 ];
 
 const system = useSystemStore();

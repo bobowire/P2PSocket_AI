@@ -10,9 +10,11 @@ import Dashboard from "../pages/Dashboard.vue";
 import Devices from "../pages/Devices.vue";
 import Groups from "../pages/Groups.vue";
 import Login from "../pages/Login.vue";
+import Logs from "../pages/Logs.vue";
 import Mappings from "../pages/Mappings.vue";
 import Segments from "../pages/Segments.vue";
 import Settings from "../pages/Settings.vue";
+import Upgrade from "../pages/Upgrade.vue";
 import Wizard from "../pages/Wizard.vue";
 import { routes } from "../router";
 import { createDefaultState, createHandlers, type MockState } from "../mocks/handlers";
@@ -650,6 +652,104 @@ describe("Mappings UDP 与目标地址（M2-28）", () => {
     const table = wrapper.find('[data-testid="mappings-table"]').text();
     expect(table).toContain("UDP :8080"); // proto=udp（本地监听列）
     expect(table).toContain("192.168.1.50:80"); // targetAddr=IP（目标列）
+  });
+});
+
+// ── 日志 / 升级 / 改密（M2-29）─────────────────────────────────────
+
+describe("Logs 走查（M2-29，FR-C-807）", () => {
+  it("newest-first 列表 + 级别过滤 + 分页 total + 导出带 level（同源新窗口直下）", async () => {
+    const { wrapper } = await mountPage(Logs, undefined, "/logs");
+
+    // mock 服务端倒序：最新（09:12 ERR 打洞失败）在最前
+    const rows = wrapper.findAll('[data-testid="logs-table"] .el-table__row');
+    expect(rows.length).toBe(4);
+    expect(rows[0].text()).toContain("NAS ssh");
+    expect(rows[0].text()).toContain("ERR");
+    expect(wrapper.find('[data-testid="logs-table"]').text()).toContain("punch_timeout");
+    expect(wrapper.findComponent({ name: "ElPagination" }).props("total")).toBe(4);
+
+    // 级别过滤（el-select 经组件树 emit；值=04 §2.6 token）
+    await wrapper.findComponent({ name: "ElSelect" }).vm.$emit("update:modelValue", "error");
+    await flushPromises();
+    expect(wrapper.findAll('[data-testid="logs-table"] .el-table__row').length).toBe(1);
+    expect(wrapper.find('[data-testid="logs-table"]').text()).not.toContain("心跳");
+
+    // 导出：携带当前级别的同源下载（服务端 text/plain 附件）
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    await wrapper.find('[data-testid="logs-export"]').trigger("click");
+    expect(openSpy).toHaveBeenCalledWith(expect.stringContaining("/api/logs/export?level=error"), "_blank");
+    openSpy.mockRestore();
+  });
+});
+
+describe("Upgrade 走查（M2-29，FR-C-904）", () => {
+  it("版本不符路径（?reason=version）警示 + UpdateInfo 全量渲染", async () => {
+    const state = createDefaultState();
+    state.upgrade = {
+      latestVersion: "0.4.2",
+      minProtocol: 1,
+      maxProtocol: 2,
+      upgradeUrl: "https://example.com/p2p-client-0.4.2.msi",
+      notes: "修复打洞回切竞态；协议 v2 双向兼容。",
+    };
+    const { wrapper } = await mountPage(Upgrade, state, "/upgrade?reason=version");
+
+    expect(wrapper.find('[data-testid="upgrade-reason-alert"]').text()).toContain("协议版本不兼容");
+    expect(wrapper.find('[data-testid="upgrade-version"]').text()).toContain("0.4.2");
+    expect(wrapper.find('[data-testid="upgrade-protocol"]').text()).toContain("1 ~ 2");
+    expect(wrapper.find('[data-testid="upgrade-url"]').attributes("href"))
+      .toBe("https://example.com/p2p-client-0.4.2.msi");
+    expect(wrapper.find('[data-testid="upgrade-notes"]').text()).toContain("打洞回切");
+  });
+
+  it("常规直达（无 reason）：无警示条，信息卡照常", async () => {
+    const { wrapper } = await mountPage(Upgrade, undefined, "/upgrade");
+    expect(wrapper.find('[data-testid="upgrade-reason-alert"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="upgrade-version"]').text()).toContain("0.3.0");
+  });
+});
+
+describe("Login 修改密码（M2-29，0x23）", () => {
+  it("改密成功 → 登出回表单 → 旧密码 2001 拒绝、新密码登录成功", async () => {
+    const state = createDefaultState();
+    state.username = "demo";
+    state.capability = "normal";
+    const { wrapper } = await mountPage(Login, state, "/login");
+
+    expect(wrapper.find('[data-testid="login-profile"]').exists()).toBe(true);
+    await wrapper.find('[data-testid="login-change-password"]').trigger("click");
+    await flushPromises();
+    const dialog = document.querySelector('[data-testid="login-change-dialog"]')!;
+    const [oldPw, newPw, confirmPw] = [...dialog.querySelectorAll("input[type=password]")];
+    oldPw.value = "secret123";
+    oldPw.dispatchEvent(new Event("input"));
+    newPw.value = "newpass9";
+    newPw.dispatchEvent(new Event("input"));
+    confirmPw.value = "newpass9";
+    confirmPw.dispatchEvent(new Event("input"));
+    await flushPromises();
+    (dialog.querySelector('[data-testid="login-change-save"]') as HTMLElement).click();
+    await flushPromises();
+
+    // 0x23 成功 → 主动登出引导重新登录（表单回归）
+    expect(wrapper.find('[data-testid="login-form"]').exists()).toBe(true);
+
+    // 旧密码被拒（mock 已覆写 users.demo）
+    const userInput = wrapper.findAll('[data-testid="login-form"] input')
+      .filter((i) => (i.attributes("type") ?? "text") === "text")[0];
+    await userInput.setValue("demo");
+    await wrapper.find('input[data-testid="login-password"]').setValue("secret123");
+    await wrapper.find('[data-testid="login-submit"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="login-error"]').text()).toContain("未登录或凭据失效");
+
+    // 新密码登录成功 → 回已登录态
+    await wrapper.find('input[data-testid="login-password"]').setValue("newpass9");
+    await wrapper.find('[data-testid="login-submit"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="login-profile"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="login-username"]').text()).toContain("demo");
   });
 });
 

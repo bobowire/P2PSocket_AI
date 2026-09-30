@@ -113,14 +113,17 @@ public sealed class AdminServiceTests : IAsyncLifetime
             .Select(d => d.RemoteCode).SingleAsync();
     }
 
-    /// <summary>排干在途 0x41（连接期上线/成员变更/下线推送）；兼作沉降点（夹具竞态纪律）。</summary>
-    private async Task DrainPushesAsync(TestPcpClient client)
+    /// <summary>排干在途 0x41（连接期上线/成员变更/下线推送）；兼作沉降点（夹具竞态纪律）。
+    /// allowInvalidation：容忍 PresenceMonitor 管理扫描与进程内即时路径的 0x75 补推竞态
+    /// （M2-13 兜底设计固有——扫描快照含刚被踢线设备时会补推 device_disabled；客户端消费幂等）。</summary>
+    private async Task DrainPushesAsync(TestPcpClient client, bool allowInvalidation = false)
     {
         for (var i = 0; i < 50; i++)
         {
             var frame = await client.ReceiveDescribeAsync(400);
             if (frame is null) return; // 静默期：排干完成
             if (frame.StartsWith("0x41 ")) continue;
+            if (allowInvalidation && frame.StartsWith("0x75 ")) continue;
             Assert.Fail($"排干撞非 0x41 帧：{frame}；余帧: {string.Join(" | ", await client.DumpFramesAsync(1500))}");
         }
         Assert.Fail("0x41 排干超上限（异常推送风暴？）");
@@ -145,7 +148,7 @@ public sealed class AdminServiceTests : IAsyncLifetime
         Assert.Equal(InvalidationReason.DeviceDisabled, inv!.Reason);
         Assert.Equal(new[] { mid }, inv.AffectedMappingIds);
         Assert.Null(inv.NewCapability);
-        await DrainPushesAsync(a); // b 下线 0x41 收尾
+        await DrainPushesAsync(a, allowInvalidation: true); // b 下线 0x41 收尾；容忍兜底扫描补推的重复 0x75
 
         // 读侧拒绝①：Hello(带 deviceId) 直接断连（不落 NeedRegister——禁用不可借道重注册绕回）
         var c1 = await TestPcpClient.ConnectAsync(_server.LocalEndPoint!);

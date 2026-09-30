@@ -1,10 +1,12 @@
 <script setup lang="ts">
 // M1-32 账号页（06 §2、FR-C-802）：登录/注册表单；已登录态展示账号与登出。
-// 修改密码（0x23）→ M2 非目标；passive 会话登录 → 本地拒发 2002（02 §2.5，提示语引导重连）。
+// M2-29 修改密码（0x23）：已登录态弹窗改密，成功后主动登出引导重新登录（清单 M2-29 UX 口径；
+// 协议侧 0x23 成功不裁会话——04 §2.3）；passive 会话登录 → 本地拒发 2002（02 §2.5）。
 import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import type { FormInstance, FormRules } from "element-plus";
-import { ApiError } from "@p2p/ui-shared";
+import { ApiError, ApiPaths } from "@p2p/ui-shared";
+import { api } from "../api";
 import { useAuthStore } from "../stores/auth";
 import { useSystemStore } from "../stores/system";
 
@@ -54,6 +56,51 @@ async function logout() {
   void system.refresh(); // capability → passive
 }
 
+// ── 修改密码（0x23，M2-29）───────────────────────────────────────
+const changeVisible = ref(false);
+const changeRef = ref<FormInstance>();
+const changeForm = reactive({ oldPassword: "", newPassword: "", confirm: "" });
+const changeBusy = ref(false);
+const changeRules: FormRules = {
+  oldPassword: [{ required: true, message: "请输入当前密码", trigger: "blur" }],
+  newPassword: [
+    { required: true, message: "请输入新密码", trigger: "blur" },
+    { min: 6, message: "新密码至少 6 位", trigger: "blur" },
+  ],
+  confirm: [
+    {
+      validator: (_r, v: string, cb: (e?: Error) => void) =>
+        v === changeForm.newPassword ? cb() : cb(new Error("两次输入的新密码不一致")),
+      trigger: "blur",
+    },
+  ],
+};
+
+function openChange() {
+  Object.assign(changeForm, { oldPassword: "", newPassword: "", confirm: "" });
+  changeVisible.value = true;
+}
+
+async function submitChange() {
+  if (!(await changeRef.value?.validate().catch(() => false))) return;
+  changeBusy.value = true;
+  try {
+    await api.post(ApiPaths.AuthChangePassword, {
+      oldPassword: changeForm.oldPassword,
+      newPassword: changeForm.newPassword,
+    });
+    changeVisible.value = false;
+    ElMessage.success("密码已修改，请用新密码重新登录");
+    await auth.logout(); // 引导重新登录（清单 M2-29）；0x23 协议侧不裁会话
+    void system.refresh();
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 2001) ElMessage.error("当前密码不正确");
+    else ElMessage.error(e instanceof ApiError ? e.message : "请求失败");
+  } finally {
+    changeBusy.value = false;
+  }
+}
+
 onMounted(() => void auth.refresh());
 </script>
 
@@ -89,10 +136,10 @@ onMounted(() => void auth.refresh());
           登出
         </el-button>
         <el-button
-          disabled
-          title="0x23 修改密码属 M2"
+          data-testid="login-change-password"
+          @click="openChange"
         >
-          修改密码（M2）
+          修改密码
         </el-button>
       </div>
     </el-card>
@@ -166,6 +213,65 @@ onMounted(() => void auth.refresh());
         {{ errorText }}
       </p>
     </el-card>
+
+    <!-- 修改密码（0x23）：成功后主动登出，引导用新密码重新登录 -->
+    <el-dialog
+      v-model="changeVisible"
+      title="修改密码"
+      width="400px"
+      data-testid="login-change-dialog"
+    >
+      <el-form
+        ref="changeRef"
+        :model="changeForm"
+        :rules="changeRules"
+        label-width="88px"
+      >
+        <el-form-item
+          label="当前密码"
+          prop="oldPassword"
+        >
+          <el-input
+            v-model="changeForm.oldPassword"
+            type="password"
+            show-password
+            data-testid="login-change-old"
+          />
+        </el-form-item>
+        <el-form-item
+          label="新密码"
+          prop="newPassword"
+        >
+          <el-input
+            v-model="changeForm.newPassword"
+            type="password"
+            show-password
+            data-testid="login-change-new"
+          />
+        </el-form-item>
+        <el-form-item
+          label="确认新密码"
+          prop="confirm"
+        >
+          <el-input
+            v-model="changeForm.confirm"
+            type="password"
+            show-password
+            data-testid="login-change-confirm"
+          />
+        </el-form-item>
+        <el-form-item>
+          <el-button
+            type="primary"
+            :loading="changeBusy"
+            data-testid="login-change-save"
+            @click="submitChange"
+          >
+            保存
+          </el-button>
+        </el-form-item>
+      </el-form>
+    </el-dialog>
   </section>
 </template>
 
