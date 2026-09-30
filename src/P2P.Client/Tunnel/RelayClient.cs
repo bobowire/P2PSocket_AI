@@ -38,21 +38,25 @@ public static class RelayClient
         TimeSpan? joinTimeout = null, TimeProvider? time = null, CancellationToken ct = default)
         => await RelayTransport.JoinAsync(grant, carrier, joinTimeout, time, ct).ConfigureAwait(false);
 
-    /// <summary>承载选择（02 §6.2：UDP 默认；UDP 被封场景 TCP，FR-S-704）：先 UDP、失败（JOIN 超时/
-    /// 端点缺失/承载故障）再 TCP 兜底（M2-18 客户端策略）。服务端按端独立转发（M2-07），两端承载可异构。
+    /// <summary>承载选择（02 §6.2，M2-38 口径反转：TCP 优先；UDP 兜底=7020 被封场景）：先 TCP、
+    /// 失败（JOIN 超时/端点缺失/承载故障）再 UDP 兜底。服务端按端独立转发（M2-07），两端承载可异构。
+    /// 反转动机（公网实测 M2-38）：UDP 承载无重传——并发大流量丢 DATA 帧（对端 TCP 字节流缺段，
+    /// 应用收不满 Content-Length 卡死）或丢 WINDOW 信用回报（M2-21 发送侧信用耗尽永久挂起）、
+    /// OPEN 控制帧丢失（连接即断）；单流轻载丢包率低不易察觉，多 channel 并发 burst 放大。
+    /// TCP 承载内核重传彻底消除丢帧面，代价仅拥塞控制自适应（中继场景可靠性 > 峰值速率）。
     /// 外部取消（ct）不吞——传播给调用方。</summary>
     public static async Task<RelayTransport> JoinWithCarrierFallbackAsync(RelayGrant grant,
         TimeSpan? joinTimeout = null, TimeProvider? time = null, CancellationToken ct = default)
     {
         try
         {
-            return await RelayTransport.JoinAsync(grant, RelayCarrier.Udp, joinTimeout, time, ct).ConfigureAwait(false);
+            return await RelayTransport.JoinAsync(grant, RelayCarrier.Tcp, joinTimeout, time, ct).ConfigureAwait(false);
         }
         catch (Exception e) when ((e is IOException or SocketException) && !ct.IsCancellationRequested)
         {
-            // UDP 承载不可用：转 TCP 兜底（留待下方重试；此处不吞外部取消）
+            // TCP 承载不可用：转 UDP 兜底（留待下方重试；此处不吞外部取消）
         }
-        return await RelayTransport.JoinAsync(grant, RelayCarrier.Tcp, joinTimeout, time, ct).ConfigureAwait(false);
+        return await RelayTransport.JoinAsync(grant, RelayCarrier.Udp, joinTimeout, time, ct).ConfigureAwait(false);
     }
 }
 

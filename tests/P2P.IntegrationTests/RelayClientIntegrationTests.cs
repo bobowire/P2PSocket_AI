@@ -197,6 +197,30 @@ public sealed class RelayClientIntegrationTests : IAsyncLifetime
 
     // ── 0x74 错误路径（客户端侧）──────────────────────────────────────
 
+    /// <summary>M2-38 承载顺序：TCP 优先（公网实测 UDP 承载并发大流量丢 DATA/WINDOW/OPEN 帧无重传）。
+    /// 双端点均健康时 JOIN 应落 TCP；UDP 为 7020 被封场景兜底（顺序反转，02 §6.2）。</summary>
+    [Fact]
+    public async Task 承载选择_双端点健康_优先TCP()
+    {
+        var (a, _) = await NewDeviceAsync("ord-a");
+        var (b, bId) = await NewDeviceAsync("ord-b");
+        var punchId = await PunchAsync(a, b, bId);
+        var grantBTask = AwaitGrantAsync(b);
+        var grantA = await RelayClient.AllocateAsync(a, punchId);
+        var grantB = await grantBTask;
+
+        var ta = await RelayClient.JoinWithCarrierFallbackAsync(grantA);
+        _transports.Add(ta);
+        var tb = await RelayClient.JoinWithCarrierFallbackAsync(grantB);
+        _transports.Add(tb);
+
+        Assert.Equal(_relay.TcpEndpoint!.Port, ta.RemoteEndPoint.Port); // JOIN 落 TCP 承载（M2-38）
+        Assert.Equal(_relay.TcpEndpoint!.Port, tb.RemoteEndPoint.Port);
+        var probe = PtpCiphertext(64);
+        await ta.SendAsync(probe);
+        Assert.Equal(probe, await tb.ReceiveAsync()); // TCP 承载上转发照常
+    }
+
     [Fact]
     public async Task 分配_未知打洞会话_收1001()
     {

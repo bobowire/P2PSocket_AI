@@ -962,6 +962,61 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(40 * 1024));
     }
 
+    /// <summary>M2-38 中继 TCP 承载优先（公网实测缺陷：UDP 承载并发大流量丢帧）：SymmetricRandom
+    /// 必败世界 + 回退开 → relay 态；8 并发连接各拉 ~300KB（模拟浏览器首屏并行资源）——TCP 承载
+    /// 内核重传保证多 channel 并发下全部完整到达（UDP 承载丢 DATA/WINDOW/OPEN 帧无重传：body 缺段
+    /// 卡死/信用耗尽挂起/连接即断，公网实测 8 并发 6 个卡 45s 超时）。</summary>
+    [Fact]
+    public async Task M2_38_中继TCP承载优先_8并发大文件全部完整到达()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone), tcpStub: false);
+        await StartTcpSimulatorAsync(mode: TcpNatMode.SymmetricRandom);
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("r38-a", IPAddress.Parse("127.0.0.4"), group, punchConcurrency: 2);
+        var b = await SeedClientAsync("r38-b", IPAddress.Parse("127.0.0.5"), group, punchConcurrency: 2);
+        var httpA = await StartRuntimeAsync(a);
+        var httpB = await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+        await WaitPhaseAsync(httpB, "running");
+
+        var put = await PutAsync(httpA, $"/api/peers/{b.DeviceId}", new { relayFallback = true });
+        Assert.Equal(0, put.GetProperty("code").GetInt32());
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+        await WaitMappingStateAsync(httpA, "relay", seconds: 40);
+
+        // 8 并发（浏览器并行连接语义）各 300KB，30s 预算内全部逐字节完整到达
+        //（卡死缺陷=无限期挂起，30s 预算不弱化捕获；CI 满载下单跑 10s 曾不够）
+        var payloads = Enumerable.Range(0, 8)
+            .Select(i => (i, RandomGenerator.Bytes(300 * 1024)))
+            .ToList();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var results = await Task.WhenAll(payloads.Select(async p =>
+        {
+            using var client = new TcpClient();
+            await client.ConnectAsync(IPAddress.Parse("127.0.0.4"), localPort).WaitAsync(cts.Token);
+            await using var stream = client.GetStream();
+            await stream.WriteAsync(p.Item2, cts.Token);
+            var got = new byte[p.Item2.Length];
+            var offset = 0;
+            while (offset < got.Length)
+            {
+                var n = await stream.ReadAsync(got.AsMemory(offset), cts.Token);
+                Assert.True(n > 0, $"并发 #{p.i} 流提前关闭（缺段/断连）");
+                offset += n;
+            }
+            Assert.True(p.Item2.AsSpan().SequenceEqual(got), $"并发 #{p.i} 载荷不一致（字节流错位）");
+            return p.i;
+        }));
+        Assert.Equal(8, results.Length);
+        _output.WriteLine("M2-38|relay-tcp-carrier|concurrent=8|300KB each|all-intact");
+    }
+
     // ── M2-32 场景 A-6（09 §2.2/§2.3、OQ-4/7）─────────────────────────
 
     /// <summary>A-6 断言①②：SymmetricRandom（随机分配导演端口）→ 端口预测失配 + APDF 身份过滤拒绝 →
@@ -1014,8 +1069,9 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
     }
 
     /// <summary>A-6 断言③ UdpBlocked 变体：B 的 UDP 出站全丢（STUN/JOIN 均不可达）→ TCP 打洞（SymmetricRandom
-    /// 亦必败）→ 回退 → JOIN 先 UDP（10s 超时）→ **TCP 承载兜底**（FR-S-704，两端承载可异构 02 §6.2：
-    /// A 保持 UDP、B 落 TCP）→ 中继仍建立且可访问。</summary>
+    /// 亦必败）→ 回退 → JOIN **TCP 承载优先**（M2-38 顺序反转，02 §6.2；两端承载可异构——本用例 A 亦落
+    /// TCP，B 的 UDP 全丢不再构成额外时序）→ 中继仍建立且可访问（原 M2-18"先 UDP 10s 超时再 TCP 兜底"
+    /// 时序随 M2-38 消失，断言语义不变）。</summary>
     [Fact]
     public async Task M2_32_A6_UdpBlocked变体_TCP中继承载relay可访问()
     {
@@ -1038,7 +1094,7 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         var localPort = FreePort();
         await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
 
-        // B JOIN UDP 重发 10s 超时计入回退预算（RelayFallbackTimeout=30s 独立计量覆盖）
+        // B JOIN TCP 优先直连（M2-38；原 UDP 10s 超时兜底时序已随顺序反转消失）
         await WaitMappingStateAsync(httpA, "relay", seconds: 50);
         await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(40 * 1024));
         await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(3 * 1024));
