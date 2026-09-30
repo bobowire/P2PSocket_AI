@@ -21,8 +21,8 @@ public sealed class RelayServiceOptions
     public string? PublicHost { get; init; }
 }
 
-/// <summary>中继运行统计（FR-S-810 仪表盘数据源，M3 展示）。</summary>
-public sealed record RelayStats(int Sessions, long BytesForwarded, long Reaped);
+/// <summary>中继运行统计（FR-S-810 仪表盘数据源，M3 展示）：进程内累计 + 自启动时刻。</summary>
+public sealed record RelayStats(int Sessions, long BytesForwarded, long Reaped, DateTime StartedAtUtc);
 
 /// <summary>
 /// 中继服务（02 §6、05 §6，FR-S-701/702/704，TD-11 零解密）：UDP（单 socket 收发循环）+
@@ -62,6 +62,7 @@ public sealed class RelayService : IAsyncDisposable
     private Task _tcpLoop = Task.CompletedTask;
     private long _bytesForwarded;
     private long _reaped;
+    private readonly DateTime _startedUtc; // FR-S-810 自启动时长（进程生命周期）
     private int _disposed; // 宿主 StopAsync 与容器释放各调一次（幂等）
 
     public RelayService(IDbContextFactory<AppDbContext> dbFactory, DeviceRegistry registry,
@@ -73,6 +74,7 @@ public sealed class RelayService : IAsyncDisposable
         _peerResolver = peerResolver;
         _options = options ?? new RelayServiceOptions();
         _time = time ?? TimeProvider.System;
+        _startedUtc = _time.GetLocalNow().UtcDateTime;
         _reaper = ReaperAsync(_cts.Token);
     }
 
@@ -85,7 +87,7 @@ public sealed class RelayService : IAsyncDisposable
     /// <summary>运行统计（测试断言与仪表盘）。</summary>
     public RelayStats Stats
     {
-        get { lock (_gate) return new(_table.Count, Interlocked.Read(ref _bytesForwarded), Interlocked.Read(ref _reaped)); }
+        get { lock (_gate) return new(_table.Count, Interlocked.Read(ref _bytesForwarded), Interlocked.Read(ref _reaped), _startedUtc); }
     }
 
     public Task StartAsync(int udpPort, int tcpPort, CancellationToken ct = default)

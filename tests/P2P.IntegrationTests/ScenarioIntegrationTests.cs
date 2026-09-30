@@ -9,8 +9,10 @@ using P2P.Client.Storage;
 using P2P.Core.Crypto;
 using P2P.Core.Stun;
 using P2P.IntegrationTests.NatSimulator;
+using P2P.Server;
 using P2P.Server.Data;
 using P2P.Server.Services;
+using P2P.Server.Web;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -50,6 +52,8 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
     private StubFactory _factory = null!;
     private string _rootDir = null!;
     private int _port;
+    private ServerWebHostService? _web; // M3-06 仪表盘集成：Web 宿主与场景服务端同进程（按需拉起）
+    private HttpClient? _webHttp;
 
     public ScenarioIntegrationTests(ITestOutputHelper output) => _output = output;
 
@@ -70,6 +74,8 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         foreach (var l in _echoListeners) l.Stop();
         foreach (var r in _runtimes) await r.DisposeAsync();
         foreach (var h in _https) h.Dispose();
+        if (_webHttp is not null) _webHttp.Dispose();
+        if (_web is not null) await _web.StopAsync(CancellationToken.None);
         if (_sim is not null) await _sim.DisposeAsync();
         if (_upstream is not null) await _upstream.DisposeAsync();
         if (_tcpStun is not null) await _tcpStun.DisposeAsync();
@@ -594,8 +600,32 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         await Task.WhenAll(direct, viaTunnel);
     }
 
-    // ── A-5 TCP 打洞：SymmetricSequential 双端全序列 + N=1~5 命中率矩阵 ──
+    // ── M3-06 仪表盘：打洞直达后成功率与时序桶（Web 宿主与场景服务端同进程）──
 
+    /// <summary>给已起场景栈挂服务端 Web 宿主（同 factory/registry/relay 实例——中继统计与
+    /// 在线数即场景真相源；stun 缺省=场景世界 STUN 由 NatSimulator 承担，仪表盘该节呈零值快照）。</summary>
+    private async Task<HttpClient> StartWebAsync()
+    {
+        var audit = new AuditLogger(_factory);
+        var groups = new GroupService(_factory, _registry, audit, new DeviceListPusher(_factory, _registry));
+        var admin = new AdminService(_factory, _registry, audit);
+        var options = new ServerOptions { Listen = { Web = Random.Shared.Next(21000, 24000) } };
+        _web = new ServerWebHostService(options, TimeProvider.System, new AdminSessionStore(TimeProvider.System),
+            _factory, audit, admin, _registry, groups, _relays[^1])
+        {
+            WebRootOverride = Path.Combine(Path.GetTempPath(), $"p2p-no-webroot-{Guid.NewGuid():N}"),
+        };
+        await _web.StartAsync(CancellationToken.None);
+        _webHttp = new HttpClient(new HttpClientHandler { CookieContainer = new CookieContainer() })
+        {
+            BaseAddress = new Uri($"http://127.0.0.1:{options.Listen.Web}/"),
+        };
+        var login = await PostAsync(_webHttp, "/api/auth/login", new { username = "admin", password = "admin" });
+        Assert.Equal(0, login.GetProperty("code").GetInt32());
+        return _webHttp;
+    }
+
+    // ── A-5 TCP 打洞：SymmetricSequential 双端全序列 + N=1~5 命中率矩阵 ──
     [Theory]
     [InlineData(1)]
     [InlineData(2)]
@@ -1319,5 +1349,58 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         Assert.Equal(grand, row.BytesUp);
         Assert.Equal(grand, row.BytesDown);
         Assert.Equal(0, row.RelayBytes); // 直连路径：无中继字节
+    }
+
+    // ── M3-06 仪表盘：打洞直达后成功率与时序桶（Web 宿主与场景服务端同进程；
+    //    声明序置于类尾——避免新增世界压到前序满载敏感用例[M2_38 家族]的执行窗口）──
+
+    [Fact]
+    public async Task M3_06_打洞直达后_仪表盘成功率与时序桶()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone));
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("m3-06-a", IPAddress.Parse("127.0.0.4"), group);
+        var b = await SeedClientAsync("m3-06-b", IPAddress.Parse("127.0.0.5"), group);
+        var web = await StartWebAsync();
+        var httpA = await StartRuntimeAsync(a);
+        var httpB = await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+        await WaitPhaseAsync(httpB, "running");
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        await CreateAndEnableMappingAsync(httpA, (ushort)FreePort(), b.RemoteCode, (ushort)echoPort);
+        await WaitMappingStateAsync(httpA, "direct");
+
+        // 0x72/0x62 均 fire-and-forget：仪表盘投影轮询至收敛（双事件都到位即停）
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        JsonElement data = default;
+        while (DateTime.UtcNow < deadline)
+        {
+            data = (await GetAsync(web, "/api/dashboard")).GetProperty("data");
+            if (data.GetProperty("punch").GetProperty("total24h").GetInt32() >= 1
+                && data.GetProperty("mappings").GetProperty("byStatus").GetProperty("direct").GetInt32() >= 1)
+                break;
+            await Task.Delay(100);
+        }
+
+        Assert.Equal(2, data.GetProperty("onlineDevices").GetInt32()); // 双运行时控制会话在线
+        Assert.Equal(2, data.GetProperty("groups").GetInt32()); // 默认组 + 共同分组
+        var mappings = data.GetProperty("mappings");
+        Assert.Equal(1, mappings.GetProperty("total").GetInt32());
+        Assert.Equal(1, mappings.GetProperty("enabled").GetInt32());
+        Assert.Equal(1, mappings.GetProperty("byStatus").GetProperty("direct").GetInt32()); // TD-22 流水投影
+        var punch = data.GetProperty("punch");
+        Assert.Equal(1, punch.GetProperty("total24h").GetInt32());
+        Assert.Equal(1, punch.GetProperty("direct24h").GetInt32());
+        Assert.Equal(1.0, punch.GetProperty("successRate24h").GetDouble(), 5);
+        var hourly = punch.GetProperty("hourly").EnumerateArray().ToList();
+        Assert.Equal(24, hourly.Count);
+        Assert.Equal(1, hourly.Sum(x => x.GetProperty("total").GetInt32()));
+        Assert.Equal(1, hourly.Sum(x => x.GetProperty("success").GetInt32()));
+        Assert.True(data.GetProperty("relay").GetProperty("uptimeSec").GetDouble() >= 0); // 同实例直读
+        Assert.Equal(0, data.GetProperty("stun").GetProperty("admitted").GetInt64()); // stun 未挂=零值快照
     }
 }

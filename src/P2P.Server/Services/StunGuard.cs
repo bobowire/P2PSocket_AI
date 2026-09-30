@@ -31,6 +31,9 @@ public sealed class StunGuardOptions
 /// <summary>丢弃计数快照（stun_dropped_total{reason=rate|auth|circuit}，04 §3.2 仪表盘消费）。</summary>
 public sealed record StunDropStats(long Rate, long Auth, long Circuit);
 
+/// <summary>综合快照（FR-S-810 仪表盘）：闸④ 放行到达累计（平均 QPS=Admitted/UptimeSec）+ 丢弃三分桶。</summary>
+public sealed record StunGuardMetrics(long Admitted, long Rate, long Auth, long Circuit, double UptimeSec);
+
 /// <summary>
 /// STUN 风暴防护四道闸（TD-18、05 §7.1）——UDP 与 TCP 两路共用同一实例，闸序越早越便宜：
 /// ④ 全局熔断（到达聚合，先于一切处理）→ ① 单 IP（UDP 令牌桶 / TCP 并发连接）→
@@ -54,6 +57,8 @@ public sealed class StunGuard(StunGuardOptions? options = null, TimeProvider? ti
     private long _windowSec;          // 闸④ 当前秒窗（UtcTicks/秒）
     private int _windowCount;
     private long _circuitUntilTicks;
+    private long _admitted;           // 闸④ 放行累计（FR-S-810 平均 QPS 分子）
+    private long _startedTicks;       // 首次到达/首次 Metrics 时刻（QPS 分母；惰性初始化——主构造类字段初始化器不可引用其他实例字段）
     private long _droppedRate;
     private long _droppedAuth;
     private long _droppedCircuit;
@@ -65,11 +70,12 @@ public sealed class StunGuard(StunGuardOptions? options = null, TimeProvider? ti
         lock (_gate)
         {
             var now = _time.GetLocalNow().UtcTicks;
+            if (_startedTicks == 0) _startedTicks = now; // 首次到达即起点（与 Metrics 首调同一惰性口径）
             if (now < _circuitUntilTicks) { _droppedCircuit++; return false; }
             var sec = now / TimeSpan.TicksPerSecond;
             if (sec != _windowSec) { _windowSec = sec; _windowCount = 0; }
             _windowCount++;
-            if (_windowCount <= _options.CircuitPps) return true;
+            if (_windowCount <= _options.CircuitPps) { _admitted++; return true; }
             _circuitUntilTicks = now + _options.CircuitBreak.Ticks;
             _windowCount = 0; // 复位：恢复后自新窗重评
             _droppedCircuit++;
@@ -128,6 +134,19 @@ public sealed class StunGuard(StunGuardOptions? options = null, TimeProvider? ti
 
     /// <summary>当前丢弃计数快照（测试断言与仪表盘 04 §3.2）。</summary>
     public StunDropStats Snapshot() { lock (_gate) return new(_droppedRate, _droppedAuth, _droppedCircuit); }
+
+    /// <summary>综合快照（FR-S-810 仪表盘）：到达吞吐（闸④ 放行累计）+ 丢弃三分桶 + 运行时长。
+    /// 首调惰性记起点——此后 uptime 单调递增（仪表盘平均 QPS=Admitted/UptimeSec）。</summary>
+    public StunGuardMetrics Metrics()
+    {
+        lock (_gate)
+        {
+            var now = _time.GetLocalNow().UtcTicks;
+            if (_startedTicks == 0) _startedTicks = now;
+            return new(Interlocked.Read(ref _admitted), _droppedRate, _droppedAuth, _droppedCircuit,
+                (now - _startedTicks) / (double)TimeSpan.TicksPerSecond);
+        }
+    }
 
     /// <summary>取一枚令牌（须持锁）：按距上次消耗的时长补币、封顶容量；不足即拒并计 rate。</summary>
     private bool TakeNoLock<TKey>(Dictionary<TKey, Bucket> dict, TKey key, int capacity, int ratePerSec)
