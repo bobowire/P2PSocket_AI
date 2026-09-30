@@ -1,7 +1,7 @@
 # AI-P2P · P2P 内网穿透产品
 
 > 单仓库（AI-P2P.sln）· 控制面中心化 + 数据面 P2P · .NET 10 + Vue 3
-> **当前状态**：文档阶段完成（PRD v0.5 / 技术设计 v1.7 / 开发规范 v1.0 / M1 任务清单 v1.3），编码未开始，下一步 **M1-01 解决方案骨架**。
+> **当前状态**：编码进行中——**M1 核心链路 ✅ 收官**（2026-09-12）；**M2 打洞完整与授权闭环 35/38**（余 M2-01/02/35 实机环境依赖项）；**M3 管理面与可观测 🔨 进行中**（0/18，2026-09-30 起）。进度详见 [任务清单](docs/任务清单/README.md)。
 
 ## 1. 这是什么
 
@@ -47,17 +47,25 @@
 ```
 AI_P2P_Project/
 ├─ README.md                   # 本文件
-├─ docs/                       # 全部文档（当前仓库主体，见 §5 导航）
+├─ AI-P2P.sln                  # .NET 解决方案
+├─ docs/                       # 全部文档（见 §5 导航）
 │  ├─ prd/                     #   产品需求文档 v0.5
 │  ├─ 技术设计文档/             #   施工图纸 v1.7（01~10 + README/TD 台账）
 │  ├─ 开发规范/                 #   编码约束层 v1.0（AI 规则/模块边界/目录规范）
-│  └─ 任务清单/                 #   实现层执行台账（M1 进行中）
-└─ （编码开始后按 01 §2 落地）
-   ├─ AI-P2P.sln
-   ├─ src/    P2P.Core / P2P.Nic / P2P.Server / P2P.Client
-   ├─ web/    ui-shared / client-app / server-app
-   ├─ tests/  P2P.Core.Tests / P2P.Server.Tests / P2P.Client.Tests / P2P.IntegrationTests
-   └─ build/  打包脚本（Inno Setup / deb / rpm / Docker）
+│  └─ 任务清单/                 #   实现层执行台账（M1 ✅ / M2 · M3 🔨）
+├─ src/                        # C# 后端（01 §2 目录规范）
+│  ├─ P2P.Core/                #   协议 / 隧道 / 打洞 / 映射引擎（平台无关核心）
+│  ├─ P2P.Nic/                 #   虚拟网卡适配（Windows Wintun / Linux TUN）
+│  ├─ P2P.Server/              #   服务端：控制面 + STUN + 中继 + Web 后台宿主
+│  ├─ P2P.Client/              #   客户端宿主：系统服务 + 本地 Web（127.0.0.1:7100）
+│  └─ Tools/ExportTs/          #   API 类型导出器（反射生成 ui-shared 类型）
+├─ web/                        # pnpm workspace 前端（构建产物嵌入宿主 wwwroot）
+│  ├─ ui-shared/               #   共享组件 + API 类型（api.d.ts / api-paths.ts）
+│  ├─ client-app/              #   客户端本地 SPA
+│  └─ server-app/              #   服务端后台 SPA（M3 建设中）
+├─ tests/                      # xUnit：Core / Server / Client / Nic 四项目测试 + 集成测试
+├─ build/build.sh              # 本地构建全链（build → export-ts → pnpm build → test）
+└─ deploy/                     # 部署脚本（Windows 服务安装/卸载、systemd unit）
 ```
 
 ## 5. 文档体系（先读这里）
@@ -69,15 +77,15 @@ AI_P2P_Project/
 | 需求 | [docs/prd/README.md](docs/prd/README.md) | 产品要做什么。v0.5，决策 D1~D21，开放问题 OQ-1~18 全部决议（台账见 [09-里程碑与验收](docs/prd/09-里程碑与验收.md) §3） |
 | 设计 | [docs/技术设计文档/README.md](docs/技术设计文档/README.md) | 怎么做（施工图纸）。v1.7，技术决策 TD-01~19；11 份分册 + [10-追溯矩阵](docs/技术设计文档/10-追溯矩阵.md)（PRD⇄设计全量对照台账） |
 | 规范 | [docs/开发规范/README.md](docs/开发规范/README.md) | 编码时的硬约束：[01 AI 开发基础规则](docs/开发规范/01-AI开发基础规则.md)（AI-01~34）· [02 模块职责边界](docs/开发规范/02-模块职责边界.md)（MOD-1~6）· [03 目录结构规范](docs/开发规范/03-目录结构规范.md)（DIR-1~7） |
-| 任务 | [docs/任务清单/README.md](docs/任务清单/README.md) | 写到哪了（执行台账）。[M1-核心链路](docs/任务清单/M1-核心链路.md)：37 项任务 + 非目标清单 + 出口检查表 |
+| 任务 | [docs/任务清单/README.md](docs/任务清单/README.md) | 写到哪了（执行台账）。[M1-核心链路](docs/任务清单/M1-核心链路.md) ✅ 收官 · [M2-打洞完整与授权闭环](docs/任务清单/M2-打洞完整与授权闭环.md)（35/38）· [M3-管理面与可观测](docs/任务清单/M3-管理面与可观测.md)（0/18）+ 待办池 |
 
 ## 6. 里程碑与进度
 
 | 里程碑 | 目标 | 出口标准 | 状态 |
 |---|---|---|---|
-| **M1 核心链路可用** | 两台设备注册 + 第一条 UDP 直连映射 | 验收场景 A-1~A-4 | ☐ 未开始（任务清单已就绪） |
-| M2 打洞完整与授权闭环 | TCP 打洞、中继回退、分组/邀请码 | A-5~A-9 | 待建清单 |
-| M3 管理面与可观测 | 服务端 Web 后台、仪表盘、统计 | A-10~A-12 | 待建清单 |
+| **M1 核心链路可用** | 两台设备注册 + 第一条 UDP 直连映射 | 验收场景 A-1~A-4 | ✅ 收官（2026-09-12） |
+| M2 打洞完整与授权闭环 | TCP 打洞、中继回退、分组/远程码 | A-5~A-9 | 🔨 进行中（35/38；余实机环境依赖项） |
+| M3 管理面与可观测 | 服务端 Web 后台、仪表盘、统计 | A-10~A-12 | 🔨 进行中（0/18） |
 | M4 交付打磨 | 安装包、Docker、基准报告、交付文档 | 交付清单齐全 | 待建清单 |
 
 ## 7. 端口与地址规划
@@ -93,18 +101,23 @@ AI_P2P_Project/
 
 ## 8. 构建与运行
 
-编码尚未开始；以下为设计约定的构建链（一条命令全链，落地于 M1-02，详见 [08-构建与部署设计](docs/技术设计文档/08-构建与部署设计.md) §2）：
+环境依赖：**.NET 10 SDK**、**Node ≥ 20**、**pnpm**（`corepack enable pnpm`）。
 
 ```bash
-dotnet build -c Release                      # ① C# 编译
-dotnet export-ts                             # ② 反射导出 API 类型 → ui-shared/types/api.d.ts
-pnpm --filter @p2p/client-app build          # ③ 前端产物 → 嵌入宿主 wwwroot
-pnpm --filter @p2p/server-app build
-dotnet test                                  # ④ 测试
+sh build/build.sh            # 一条命令全链：① dotnet build → ② export-ts → ③ pnpm build → ④ dotnet test
+sh build/build.sh quick      # quick = 跳过前端构建阶段
+
+# 或分步执行（08 §2）
+dotnet build AI-P2P.sln -c Release
+dotnet run --project src/Tools/ExportTs -c Release   # API 类型 → web/ui-shared（api.d.ts / api-paths.ts）
+pnpm -C web --filter @p2p/client-app --filter @p2p/server-app build   # 前端产物 → 嵌入宿主 wwwroot
+dotnet test AI-P2P.sln -c Release                    # xUnit 全仓测试（M2-34 收口：606 项全绿，Core 覆盖率 80.44%）
 
 # 前端开发（MSW mock，与后端进度解耦）
 cd web && pnpm install && pnpm dev
 ```
+
+部署脚本见 `deploy/`（Windows 服务安装/卸载 PowerShell、systemd unit）。构建产物与运行时数据不入库（DIR-4，见 [.gitignore](.gitignore)）。
 
 ## 9. 开发协作约定
 
