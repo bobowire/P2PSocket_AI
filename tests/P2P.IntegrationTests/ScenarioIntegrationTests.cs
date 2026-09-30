@@ -188,10 +188,13 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
     private async Task<HttpClient> StartRuntimeAsync(SeededClient c, TimeSpan? relayRetryInterval = null,
         TimeSpan? statsInterval = null)
     {
+        // 每运行时独立网卡替身：共享单例时后启动客户端的 Ensure 覆盖共享 BoundIp，先启动者健康探测
+        // 即 IpMismatch → 双端 30s 周期互相重建乒乓（Restored 沿重绑映射监听，杀死在途传输——
+        // 慢机/负载下测试超 30s 即触发，M2-38 曾 42s 卡死翻车）
         var runtime = new ClientRuntime(new ClientRuntimeOptions
         {
             BaseDir = c.Dir,
-            NicOverride = _nic,
+            NicOverride = new StubNicManager(),
             PunchBindOverride = c.Ip,
             RelayRetryIntervalOverride = relayRetryInterval,
             StatsIntervalOverride = statsInterval,
@@ -1278,7 +1281,7 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         var runtime = new ClientRuntime(new ClientRuntimeOptions
         {
             BaseDir = a.Dir,
-            NicOverride = _nic,
+            NicOverride = new StubNicManager(), // 独立替身：B 经 StartRuntimeAsync 共享会乒乓（同上）
             PunchBindOverride = a.Ip,
             StatsIntervalOverride = TimeSpan.FromMilliseconds(300),
         });

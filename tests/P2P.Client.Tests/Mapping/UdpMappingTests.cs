@@ -18,11 +18,18 @@ public sealed class UdpMappingTests
 {
     private static int FreePort()
     {
-        var l = new TcpListener(IPAddress.Loopback, 0);
-        l.Start();
-        var port = ((IPEndPoint)l.LocalEndpoint).Port;
-        l.Stop();
-        return port;
+        // 测试专有端口带（24000-28000，避开 Windows 临时端口段 49152+）：FreePort 释放→引擎真实 bind
+        // 之间存在竞选窗口，并行测试类的 :0 抓取（OS 临时段）可能抢走该口——跨类串扰曾致监听位失守、
+        // 应用客户端连入对方目标。专有带内 :0 分配器不踏足，仅剩带内随机对撞（~1/7000，探测重试兜底）。
+        while (true)
+        {
+            var port = Random.Shared.Next(24000, 28000);
+            var l = new TcpListener(IPAddress.Loopback, port);
+            try { l.Start(); }
+            catch (SocketException) { continue; }
+            l.Stop();
+            return port;
+        }
     }
 
     private static async Task UntilAsync(Func<bool> condition, string what, TimeSpan? timeout = null)
