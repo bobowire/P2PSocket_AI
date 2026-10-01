@@ -151,6 +151,9 @@ internal static partial class TsGen // 生成逻辑集中（顶层语句宿主�
         typeof(LanSegmentView),  // M2-27 白名单（04 §2.5 /api/lan-segments）
         typeof(LogEntryView),    // M2-27 日志（04 §2.6 /api/logs）
         typeof(LogPageView),
+        typeof(MappingStatsView), // M3-12 流量汇总（04 §2.5 /api/stats/summary，FR-C-1002）
+        typeof(DeviceStatsView),
+        typeof(StatsSummaryView),
     ];
 
     internal static string EmitPathsTs(List<(string Pattern, string Methods)> endpoints,

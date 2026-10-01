@@ -1,5 +1,5 @@
 // 本文件由 export-ts 反射生成（06 §5、08 §2③），禁止手改；
-// 源：LocalWebApi 真实路由表（src/Tools/ExportTs @ 2026-10-01T11:42:33Z）。前端禁止手写 API 字符串路径。
+// 源：LocalWebApi 真实路由表（src/Tools/ExportTs @ 2026-10-01T12:05:16Z）。前端禁止手写 API 字符串路径。
 
 export const ApiPaths = {
   AuthChangePassword: "/api/auth/change-password",
@@ -31,6 +31,8 @@ export const ApiPaths = {
   MappingsByIdRetry: "/api/mappings/{id}/retry",
   PeersByDeviceid: "/api/peers/{deviceId}",
   Settings: "/api/settings",
+  StatsExport: "/api/stats/export",
+  StatsSummary: "/api/stats/summary",
   SystemState: "/api/system/state",
   UpgradeInfo: "/api/upgrade/info",
   WizardRegister: "/api/wizard/register",
@@ -81,6 +83,8 @@ export const ApiEndpoints = [
   { path: "/api/peers/{deviceId}", methods: ["PUT"] },
   { path: "/api/settings", methods: ["GET"] },
   { path: "/api/settings", methods: ["PUT"] },
+  { path: "/api/stats/export", methods: ["GET"] },
+  { path: "/api/stats/summary", methods: ["GET"] },
   { path: "/api/system/state", methods: ["GET"] },
   { path: "/api/upgrade/info", methods: ["GET"] },
   { path: "/api/wizard/register", methods: ["POST"] },

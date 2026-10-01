@@ -1,5 +1,5 @@
 // 本文件由 export-ts 反射生成（06 §5、08 §2③），禁止手改。
-// 源：P2P.Client 展示 DTO + WsEventNames 常量（src/Tools/ExportTs @ 2026-10-01T11:42:33Z）。
+// 源：P2P.Client 展示 DTO + WsEventNames 常量（src/Tools/ExportTs @ 2026-10-01T12:05:16Z）。
 
 /** 响应包裹（04 §0：code=0 成功；!=0 见错误码表 04 §5）。 */
 export interface ApiEnvelope<T> {
@@ -112,6 +112,38 @@ export interface LogPageView {
   pageSize: number;
   total: number;
   hasMore: boolean;
+}
+
+
+export interface MappingStatsView {
+  mappingId: string;
+  name: string;
+  proto: string;
+  localPort: number;
+  targetRemoteCode: string;
+  targetPort: number;
+  path: string;
+  bytesUp: number;
+  bytesDown: number;
+  relayBytes: number;
+}
+
+
+export interface DeviceStatsView {
+  targetRemoteCode: string;
+  mappings: number;
+  bytesUp: number;
+  bytesDown: number;
+  relayBytes: number;
+}
+
+
+export interface StatsSummaryView {
+  byMappings: MappingStatsView[];
+  byDevices: DeviceStatsView[];
+  totalBytesUp: number;
+  totalBytesDown: number;
+  totalRelayBytes: number;
 }
 
 

@@ -79,6 +79,7 @@ public static class LocalWebApi
         app.MapAuthApi(services.Control, services.Wizard, services.Context);
         app.MapWizardApi(services.Control, services.Wizard, services.State, services.Settings, services.Context);
         app.MapMappingApi(services.Mappings);
+        app.MapStatsApi(services.Mappings); // M3-12 流量汇总/导出（FR-C-1002）
         app.MapDeviceApi(services.Control, services.State, services.Hub); // M2-15 加 0x14 重置端点
         app.MapPeersApi(services.Control, services.Peers); // M2-23 目标设备级配置（04 §2.4）
         app.MapUpgradeApi(services.Control); // M2-26 升级引导（04 §2.7）

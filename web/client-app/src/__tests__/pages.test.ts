@@ -85,6 +85,33 @@ describe("Dashboard 走查", () => {
     const { wrapper } = await mountPage(Dashboard, state);
     expect(wrapper.find('[data-testid="dash-info"]').text()).toContain("已登录：demo");
   });
+
+  it("M3-12 流量汇总卡：总计 humanBytes+设备维聚合行+CSV 导出 window.open", async () => {
+    const { wrapper } = await mountPage(Dashboard);
+    const stats = await vi.waitFor(() => {
+      const c = wrapper.find('[data-testid="dash-stats"]');
+      expect(c.exists()).toBe(true);
+      return c;
+    });
+
+    // 总计=映射维全量和（1 MiB+512 KiB 上行 / 2 MiB+512 KiB 下行 / 512 KiB 中继）
+    expect(wrapper.find('[data-testid="dash-stats-up"]').text()).toBe("1.5 MiB");
+    expect(stats.text()).toContain("2.5 MiB");
+    expect(stats.text()).toContain("512 KiB");
+
+    // 设备维（目标远程码字典序）：0a1b2c 一条零流量在前、d4e5f6 两映射聚合在后
+    const rows = wrapper.findAll('[data-testid="dash-stats-devices"] .el-table__row');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.text()).toContain("0a1b2c");
+    expect(rows[1]!.text()).toContain("d4e5f6");
+    expect(rows[1]!.text()).toContain("1.5 MiB / 2.5 MiB / 512 KiB");
+
+    // 导出入口：同源新窗口直下（服务端 text/csv 附件，/logs 导出同模式）
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    await wrapper.find('[data-testid="dash-stats-export"]').trigger("click");
+    expect(openSpy).toHaveBeenCalledWith("/api/stats/export?format=csv", "_blank");
+    openSpy.mockRestore();
+  });
 });
 
 // ── 向导 ───────────────────────────────────────────────────────────

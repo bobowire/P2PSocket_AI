@@ -1403,4 +1403,64 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         Assert.True(data.GetProperty("relay").GetProperty("uptimeSec").GetDouble() >= 0); // 同实例直读
         Assert.Equal(0, data.GetProperty("stun").GetProperty("admitted").GetInt64()); // stun 未挂=零值快照
     }
+
+    // ── M3-12 流量汇总与导出（FR-C-1002）：经隧道跑量后 summary 数值 + CSV 行完整
+    //    （本地引擎累计即时可读，无 0x64 周期等待；声明序类尾同 M3-06 避让满载敏感窗口）──
+
+    [Fact]
+    public async Task M3_12_经隧道跑量后_流量汇总与CSV导出()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone));
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("m3-12-a", IPAddress.Parse("127.0.0.4"), group);
+        var b = await SeedClientAsync("m3-12-b", IPAddress.Parse("127.0.0.5"), group);
+        var httpA = await StartRuntimeAsync(a);
+        await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+        await WaitMappingStateAsync(httpA, "direct");
+
+        var payload = RandomGenerator.Bytes(16 * 1024);
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, payload);
+        await Task.Delay(300); // splice 计数尾包竞态宽限（M2-22 同口径）
+
+        // summary 两维一致：echo 对称（up=down=总量）、直连 relay=0、归属与路径正确
+        var data = (await GetAsync(httpA, "/api/stats/summary")).GetProperty("data");
+        var row = data.GetProperty("byMappings").EnumerateArray().Single();
+        Assert.Equal((long)payload.Length, row.GetProperty("bytesUp").GetInt64());
+        Assert.Equal((long)payload.Length, row.GetProperty("bytesDown").GetInt64());
+        Assert.Equal(0L, row.GetProperty("relayBytes").GetInt64());
+        Assert.Equal("direct", row.GetProperty("path").GetString());
+        Assert.Equal(b.RemoteCode, row.GetProperty("targetRemoteCode").GetString());
+        var dev = data.GetProperty("byDevices").EnumerateArray().Single();
+        Assert.Equal(b.RemoteCode, dev.GetProperty("targetRemoteCode").GetString());
+        Assert.Equal(1, dev.GetProperty("mappings").GetInt32());
+        Assert.Equal((long)payload.Length, dev.GetProperty("bytesUp").GetInt64());
+        Assert.Equal((long)payload.Length, data.GetProperty("totalBytesUp").GetInt64());
+        Assert.Equal(0L, data.GetProperty("totalRelayBytes").GetInt64());
+
+        // CSV 同源：BOM 字节+两段表头+映射行/设备行/total 行数值完整
+        // （ReadAsStringAsync 会剥 BOM，故按字节断言 EF BB BF；ContentType 附件口径）
+        using var csvResp = await httpA.GetAsync("/api/stats/export?format=csv");
+        Assert.Equal("text/csv", csvResp.Content.Headers.ContentType?.MediaType);
+        var csvBytes = await csvResp.Content.ReadAsByteArrayAsync();
+        Assert.True(csvBytes is [0xEF, 0xBB, 0xBF, ..], "CSV 须以 UTF-8 BOM 开头（Excel 中文识别）");
+        var csv = System.Text.Encoding.UTF8.GetString(csvBytes);
+        Assert.Contains("维度,名称,协议,本地端口", csv);
+        Assert.Contains("mapping,", csv);
+        Assert.Contains($",{b.RemoteCode},{echoPort},direct,{payload.Length},{payload.Length},0", csv);
+        Assert.Contains("维度,目标远程码,映射数", csv);
+        Assert.Contains($"device,{b.RemoteCode},1,{payload.Length},{payload.Length},0", csv);
+        Assert.Contains($"total,,1,{payload.Length},{payload.Length},0", csv);
+
+        // 非 csv 格式值拒绝（400 域内业务码 1001，envelope HTTP 200）
+        var bad = await GetAsync(httpA, "/api/stats/export?format=json");
+        Assert.NotEqual(0, bad.GetProperty("code").GetInt32());
+    }
 }

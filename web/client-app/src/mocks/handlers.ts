@@ -16,6 +16,8 @@ export interface MockMapping {
   enabled: boolean;
   state: string;
   detail: string | null;
+  /** M3-12 流量汇总演示值（本地引擎累计口径；缺省 0）。 */
+  bytes?: { up: number; down: number; relay: number };
 }
 
 export interface MockGroup {
@@ -126,6 +128,7 @@ export function createDefaultState(): MockState {
         enabled: true,
         state: "direct",
         detail: null,
+        bytes: { up: 1048576, down: 2097152, relay: 0 },
       },
       {
         mappingId: "55555555-5555-4555-8555-555555555555",
@@ -150,6 +153,7 @@ export function createDefaultState(): MockState {
         enabled: true,
         state: "relay",
         detail: null,
+        bytes: { up: 524288, down: 524288, relay: 524288 },
       },
     ],
     groups: [
@@ -194,6 +198,40 @@ export function createDefaultState(): MockState {
 
 function ok<T>(data: T) {
   return HttpResponse.json({ code: 0, msg: "ok", data });
+}
+
+/** M3-12 汇总派生（生产 MappingSyncService.BuildSummary 同口径：映射行名+Id 序、
+ * 设备维按目标远程码分组求和、总计=全量和）。 */
+function summaryOf(state: MockState) {
+  const byMappings = state.mappings
+    .map((m) => ({
+      mappingId: m.mappingId, name: m.name, proto: m.proto, localPort: m.localPort,
+      targetRemoteCode: m.targetRemoteCode, targetPort: m.targetPort, path: m.state,
+      bytesUp: m.bytes?.up ?? 0, bytesDown: m.bytes?.down ?? 0, relayBytes: m.bytes?.relay ?? 0,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name) || a.mappingId.localeCompare(b.mappingId));
+  const byDevices = Object.values(
+    byMappings.reduce<Record<string, { targetRemoteCode: string; mappings: number; bytesUp: number; bytesDown: number; relayBytes: number }>>(
+      (acc, m) => {
+        const d = (acc[m.targetRemoteCode] ??= {
+          targetRemoteCode: m.targetRemoteCode, mappings: 0, bytesUp: 0, bytesDown: 0, relayBytes: 0,
+        });
+        d.mappings += 1;
+        d.bytesUp += m.bytesUp;
+        d.bytesDown += m.bytesDown;
+        d.relayBytes += m.relayBytes;
+        return acc;
+      },
+      {},
+    ),
+  ).sort((a, b) => a.targetRemoteCode.localeCompare(b.targetRemoteCode));
+  return {
+    byMappings,
+    byDevices,
+    totalBytesUp: byMappings.reduce((s, m) => s + m.bytesUp, 0),
+    totalBytesDown: byMappings.reduce((s, m) => s + m.bytesDown, 0),
+    totalRelayBytes: byMappings.reduce((s, m) => s + m.relayBytes, 0),
+  };
 }
 
 function fail(code: number, msg: string) {
@@ -581,6 +619,30 @@ export function createHandlers(state: MockState = createDefaultState()) {
         headers: {
           "content-type": "text/plain; charset=utf-8",
           "content-disposition": 'attachment; filename="p2p-logs-demo.txt"',
+        },
+      });
+    }),
+
+    // ── M3-12 流量汇总与导出（FR-C-1002；summary 由 mappings 派生两维聚合）──
+    http.get("*/api/stats/summary", () => ok(summaryOf(state))),
+    http.get("*/api/stats/export", ({ request }) => {
+      const format = new URL(request.url).searchParams.get("format");
+      if ((format ?? "").toLowerCase() !== "csv") return fail(1001, "format 仅支持 csv");
+      const s = summaryOf(state);
+      const lines = [
+        "维度,名称,协议,本地端口,目标远程码,目标端口,当前路径,累计上行(B),累计下行(B),其中中继(B)",
+        ...s.byMappings.map((m) =>
+          `mapping,${m.name},${m.proto},${m.localPort},${m.targetRemoteCode},${m.targetPort},${m.path},${m.bytesUp},${m.bytesDown},${m.relayBytes}`),
+        "",
+        "维度,目标远程码,映射数,累计上行(B),累计下行(B),其中中继(B)",
+        ...s.byDevices.map((d) =>
+          `device,${d.targetRemoteCode},${d.mappings},${d.bytesUp},${d.bytesDown},${d.relayBytes}`),
+        `total,,${s.byMappings.length},${s.totalBytesUp},${s.totalBytesDown},${s.totalRelayBytes}`,
+      ];
+      return new HttpResponse("﻿" + lines.join("\n"), {
+        headers: {
+          "content-type": "text/csv; charset=utf-8",
+          "content-disposition": 'attachment; filename="p2p-stats-demo.csv"',
         },
       });
     }),

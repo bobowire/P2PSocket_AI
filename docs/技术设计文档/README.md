@@ -1,6 +1,6 @@
 # P2P 内网穿透产品 · 技术设计文档
 
-> 版本：v1.46　创建日期：2026-08-19　状态：待评审
+> 版本：v1.47　创建日期：2026-08-19　状态：待评审
 > 依据：[产品需求文档 PRD v0.6](../prd/README.md)（决策 D1~D21，D3 经 v0.4 修订；开放问题 OQ-1~OQ-19 已全部决议）
 > 定位：开发阶段的**施工图纸**——所有实现以本文档为准；与 PRD 冲突时以 PRD 为准并提出修订。
 
@@ -121,3 +121,4 @@
 | 2026-10-01 | v1.44 | M2_38 根因修复落地同步（02 §4.2/05 §2.3 实现注记）："中继满载间歇停滞"双根因收口——①CreditWindow 跨线程原子化（M2-21 集成后 TryConsume/Grant 分属 splice 发送与接收两线程，原 Actor 单线程假设不成立，非原子 RMW 交错丢失 Grant=发送侧差 k×chunk 永久挂起，压力实证 ~1% 丢失率；改 Interlocked CAS，05 §0 纪律 1 白名单外豁免点）；②SendChannelFrameAsync 闸内写传输（counter 序=线上序——闸外写倒置超 ReplayWindow 容差 64 即整帧丢弃=静默缺段+信用不回报；顺带根治 TCP 承载并发写交错）；诊断补缺：PunchScheduler.Log/TunnelHost.SessionLog 接线。回归双测试（CreditWindowRaceTests/TunnelSendOrderingTests）红绿 A/B 实证。README 版本头 v1.40→v1.44（此前三版漏更一并修正） |
 | 2026-10-01 | v1.45 | M3-10 落地同步（06 §3/§5 注记）：四管理页（/users /devices /groups /mappings）+服务端 DTO 具名化扩全（AdminUsers/Devices/Groups/Mappings/System 五 API 匿名对象→ServerViews 17 record，ExportTs 反射入 api-server.d.ts，与客户端域同名 record typeof 全限定消歧）；§3 关键注记——注册开关 ElSwitch 对 null modelValue 挂载即自纠偏 emit("change",false) 会误触 PUT registration_open=0 静默关闭注册（store 定值前不渲染开关根治）、ElMessageBox 关闭后 overlay v-show 残留 DOM（二次弹窗断言须按 display 过滤取可见框）、临时密码/新远程码 alert 一次性出口、admin 行 :disabled 前置 400{1003} |
 | 2026-10-01 | v1.46 | M3-11 落地同步（06 §3/§5 注记）：§3 补运维页注记——/relay 开关 confirm 区分开/关语义（关闭=拒新 5002 存量不受杀，TD-23）与取消回读防漂移、/system KEY_META 行级保存（控件映射与服务端 Validators 同键集，值校验仍在服务端）与审计 detail 截断透传；**ui-shared useApi 错误拦截补服务端 envelope 形态**（M1-31 缺口收口：HTTP 非 200 携 envelope{code,message} 时按响应体 code 抛 ApiError 且服务端 message 优先——原统一替换"本地服务响应异常"致校验错误丢定位；客户端 msg 字段仍走码表优先零回归；401{2001} 与 -401 双兜底）；server-app 构建产物口径（vite outDir 直写宿主 wwwroot+build.sh M1-03 已接线+.gitignore 不入库）；§5 DTO 入列 M3-11=Relay 族+AuditLogs |
+| 2026-10-01 | v1.47 | M3-12 落地同步（06 §2 注记）：仪表盘流量汇总卡+CSV 导出（FR-C-1002 收口）——本地引擎累计口径（state.json 全量映射×引擎 TrafficSnapshots 含 RelayBytes join，聚合纯函数 BuildSummary 供单测；与 0x64 服务端落库持久累计两视角）、CSV 两段式（映射明细+设备汇总+total）text/csv 附件带 UTF-8 BOM（Excel 中文识别；集成测按字节断言 EF BB BF——ReadAsStringAsync 会剥 BOM）+RFC 4180 字段转义、导出同源 window.open（/logs 同模式）；api.d.ts 入列 MappingStatsView/DeviceStatsView/StatsSummaryView、api-paths +stats 两端点（45 HTTP） |

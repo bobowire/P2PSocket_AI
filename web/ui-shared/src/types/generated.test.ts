@@ -41,6 +41,8 @@ const DOCUMENTED: ReadonlyArray<{ path: string; methods: readonly string[] }> = 
   { path: "/api/lan-segments/{id}", methods: ["DELETE"] },
   { path: "/api/logs", methods: ["GET"] },
   { path: "/api/logs/export", methods: ["GET"] },
+  { path: "/api/stats/summary", methods: ["GET"] }, // M3-12（FR-C-1002）
+  { path: "/api/stats/export", methods: ["GET"] },
   { path: "/api/upgrade/info", methods: ["GET"] },
   { path: "/api/settings", methods: ["GET", "PUT"] },
   { path: "/api/diagnostics", methods: ["GET"] },
@@ -93,6 +95,9 @@ describe("export-ts 生成物", () => {
       "interface GroupsView",
       "interface LanSegmentView",
       "interface LogPageView",
+      "interface StatsSummaryView", // M3-12
+      "interface MappingStatsView",
+      "interface DeviceStatsView",
     ])
       expect(dts).toContain(snippet);
   });

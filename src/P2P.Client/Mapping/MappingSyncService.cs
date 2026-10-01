@@ -32,6 +32,18 @@ public sealed record MappingView(
 /// <summary>映射流量视图（04 §2.8 mapping_stats 事件源：累计字节 + 当前路径）。</summary>
 public sealed record MappingTrafficView(Guid MappingId, long BytesUp, long BytesDown, string Path);
 
+/// <summary>按映射统计行（FR-C-1002 汇总）：配置字段 + 本地引擎累计（up/down/其中中继）+ 当前路径。</summary>
+public sealed record MappingStatsView(Guid MappingId, string Name, string Proto, ushort LocalPort,
+    string TargetRemoteCode, ushort TargetPort, string Path, long BytesUp, long BytesDown, long RelayBytes);
+
+/// <summary>按设备统计行（FR-C-1002 汇总）：目标远程码聚合（映射数 + 三向字节和）。</summary>
+public sealed record DeviceStatsView(string TargetRemoteCode, int Mappings, long BytesUp, long BytesDown,
+    long RelayBytes);
+
+/// <summary>流量汇总（FR-C-1002）：本地引擎累计口径——进程重启清零如实反映（M2-22 目标侧归对端映射）。</summary>
+public sealed record StatsSummaryView(MappingStatsView[] ByMappings, DeviceStatsView[] ByDevices,
+    long TotalBytesUp, long TotalBytesDown, long TotalRelayBytes);
+
 /// <summary>
 /// 映射同步服务：CRUD 编排（校验→服务端同步→引擎启停→落盘）。
 /// 写顺序=服务端先行（拒绝则本地不动，事务性），引擎动作在后。
@@ -80,6 +92,36 @@ public sealed class MappingSyncService
             .Select(t => new MappingTrafficView(t.MappingId, t.BytesUp, t.BytesDown,
                 StateString(states.GetValueOrDefault(t.MappingId))))
             .ToList();
+    }
+
+    /// <summary>流量汇总（FR-C-1002）：全量映射（含停用——零值行）× 引擎累计 join，
+    /// 经 <see cref="BuildSummary"/> 两维聚合。</summary>
+    public StatsSummaryView Summary()
+    {
+        var traffic = _engine.TrafficSnapshots().ToDictionary(t => t.MappingId);
+        var states = _engine.Snapshots.ToDictionary(s => s.Config.MappingId, s => s.State);
+        var rows = _store.State.Mappings.Select(m =>
+        {
+            var t = traffic.GetValueOrDefault(m.MappingId);
+            return new MappingStatsView(m.MappingId, m.Name, m.Proto, m.LocalPort, m.TargetRemoteCode,
+                m.TargetPort, StateString(states.GetValueOrDefault(m.MappingId)),
+                t?.BytesUp ?? 0, t?.BytesDown ?? 0, t?.RelayBytes ?? 0);
+        }).ToList();
+        return BuildSummary(rows);
+    }
+
+    /// <summary>两维聚合（纯函数供单测）：映射行序=名称+Id（与 <see cref="List"/> 同口径）；
+    /// 设备维按目标远程码分组求和、远程码字典序；总计=映射维全量和（=设备维全量和）。</summary>
+    internal static StatsSummaryView BuildSummary(IReadOnlyList<MappingStatsView> rows)
+    {
+        var byMappings = rows.OrderBy(m => m.Name).ThenBy(m => m.MappingId).ToArray();
+        var byDevices = rows.GroupBy(m => m.TargetRemoteCode)
+            .Select(g => new DeviceStatsView(g.Key, g.Count(),
+                g.Sum(x => x.BytesUp), g.Sum(x => x.BytesDown), g.Sum(x => x.RelayBytes)))
+            .OrderBy(d => d.TargetRemoteCode)
+            .ToArray();
+        return new StatsSummaryView(byMappings, byDevices,
+            rows.Sum(m => m.BytesUp), rows.Sum(m => m.BytesDown), rows.Sum(m => m.RelayBytes));
     }
 
     /// <summary>枚举 → 状态字符串（04 §2.8 mapping_state.state 同表）。</summary>
