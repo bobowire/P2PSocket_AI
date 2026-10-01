@@ -5,11 +5,13 @@
 // ——与生产中间件形状一致（api.ts 拦截器按 -401/2001 跳登录）。
 import { http, HttpResponse } from "msw";
 import type {
+  AuditLogView,
   DashboardView,
   DeviceView,
   GroupRequestView,
   GroupView,
   MappingView,
+  RelaySessionsView,
   UserView,
 } from "@p2p/ui-shared";
 
@@ -24,6 +26,8 @@ export interface MockServerState {
   groupRequests: GroupRequestView[];
   mappings: MappingView[];
   config: Record<string, string>; // server_config 现值（白名单键）
+  relaySessions: RelaySessionsView["sessions"]; // M3-11 /relay 会话表
+  auditLogs: AuditLogView[]; // M3-11 /system 审计（id 升序存，端点降序出）
 }
 
 /// 测试固定身份（过滤联动断言用稳定 UUID）
@@ -132,6 +136,29 @@ export function createDefaultServerState(): MockServerState {
       },
     ],
     config: { registration_open: "1", default_join_policy: "free" },
+    relaySessions: [
+      {
+        sid: "9007199254740993", // u64 超 JS 53 位精度示例（字符串承载）
+        punchSessionId: "99999999-9999-9999-9999-999999999999",
+        a: { deviceId: DEV_A, controlIp: "203.0.113.10:52001", udpAddr: "203.0.113.10:52001", carrier: "tcp" },
+        b: { deviceId: DEV_B, controlIp: "203.0.113.20:52002", udpAddr: null, carrier: "pending" },
+        bytesForwarded: 1048576,
+        createdAt: "2026-10-01T01:00:00Z",
+        lastActivity: "2026-10-01T01:05:00Z",
+      },
+    ],
+    // 审计 25 行（分页走查：pageSize 20 → 2 页）；id 升序存储，端点 newest-first 降序输出
+    auditLogs: Array.from({ length: 25 }, (_, i) => {
+      const events = ["admin_login", "group_join", "group_join", "device_disable", "relay_config_change"];
+      return {
+        id: i + 1,
+        ts: `2026-10-01T0${Math.floor(i / 12)}:${String(i % 12).padStart(2, "0")}:00Z`,
+        event: events[i % events.length]!,
+        deviceId: i % 3 === 0 ? DEV_A : null,
+        userId: null,
+        detail: i % 3 === 0 ? JSON.stringify({ macCode: `AA:BB:CC:00:00:${String(i).padStart(2, "0")}` }) : null,
+      } satisfies AuditLogView;
+    }),
   };
 }
 
@@ -158,7 +185,10 @@ const CONFIG_DEFAULTS: Record<string, string> = {
 };
 
 const ok = (data: unknown) => HttpResponse.json({ code: 0, message: "ok", data });
-const badRequest = (message: string) => HttpResponse.json({ code: 1001, message, data: null });
+// 与生产形状对齐：HTTP 400 + envelope（AdminSystemApi 等真回 400；HttpResponse.json 默认 200
+// 会令错误走成功拦截器、文案落码表通用词——服务端 message 丢失，M3-11 走查抓出）
+const badRequest = (message: string) =>
+  HttpResponse.json({ code: 1001, message, data: null }, { status: 400 });
 const unauthorized = () =>
   new HttpResponse(JSON.stringify({ code: 2001, message: "未登录或会话失效" }), {
     status: 401,
@@ -355,10 +385,21 @@ export function createServerHandlers(state: MockServerState) {
       if (!state.authed) return unauthorized();
       const body = (await request.json()) as Record<string, string>;
       if (!body || Object.keys(body).length === 0) return badRequest("参数错误（须提供至少一个配置键）");
+      const ENUM_KEYS: Record<string, string[]> = {
+        registration_open: ["0", "1"],
+        relay_enabled: ["0", "1"],
+        stun_auth: ["0", "1"],
+        default_join_policy: ["free", "approval"],
+        log_level: ["Trace", "Debug", "Information", "Warning", "Error", "Fatal"],
+      };
       for (const [key, value] of Object.entries(body)) {
         if (!(key in CONFIG_DEFAULTS)) return badRequest(`参数错误（${key}：不在配置白名单内）`);
-        if (key === "registration_open" && value !== "0" && value !== "1")
-          return badRequest(`参数错误（${key}：须为 0|1）`);
+        const allowed = ENUM_KEYS[key];
+        if (allowed && !allowed.includes(value))
+          return badRequest(`参数错误（${key}：须为 ${allowed.join("|")}）`);
+        // public_addr：IP 或域名（AdminSystemApi.Validators 同口径的 mock 简化，供校验错误走查）
+        if (key === "public_addr" && value !== "" && !/^[a-zA-Z0-9.:-]+$/.test(value))
+          return badRequest(`参数错误（${key}：须为 IP 或域名）`);
       }
       Object.assign(state.config, body);
       const restartKeys = new Set([
@@ -370,6 +411,53 @@ export function createServerHandlers(state: MockServerState) {
           value: state.config[key] ?? def,
           restartRequired: restartKeys.has(key),
         })),
+      });
+    }),
+
+    // ── 中继管理（M3-07 端点形状；config 现值走 state.config 两键）────────
+    http.get("*/api/relay/sessions", () =>
+      state.authed ? ok({ sessions: state.relaySessions }) : unauthorized()),
+
+    http.get("*/api/relay/config", () => {
+      if (!state.authed) return unauthorized();
+      return ok({
+        relayEnabled: (state.config.relay_enabled ?? "1") === "1",
+        rateLimitBytes: Number(state.config.relay_rate_limit ?? "0"),
+      });
+    }),
+
+    http.put("*/api/relay/config", async ({ request }) => {
+      if (!state.authed) return unauthorized();
+      const body = (await request.json()) as { relayEnabled?: boolean; rateLimitBytes?: number };
+      if (body.relayEnabled === undefined && body.rateLimitBytes === undefined)
+        return badRequest("参数错误（relayEnabled/rateLimitBytes 至少提供一项）");
+      if (body.rateLimitBytes !== undefined && (body.rateLimitBytes < 0 || body.rateLimitBytes > 2147483647))
+        return badRequest("参数错误（rateLimitBytes 须为 0~2147483647，0=不限）");
+      if (body.relayEnabled !== undefined)
+        state.config.relay_enabled = body.relayEnabled ? "1" : "0";
+      if (body.rateLimitBytes !== undefined)
+        state.config.relay_rate_limit = String(body.rateLimitBytes);
+      return ok({
+        relayEnabled: (state.config.relay_enabled ?? "1") === "1",
+        rateLimitBytes: Number(state.config.relay_rate_limit ?? "0"),
+      });
+    }),
+
+    // ── 审计日志（M3-08：newest-first + event 过滤 + 分页）────────────────
+    http.get("*/api/audit-logs", ({ request }) => {
+      if (!state.authed) return unauthorized();
+      const q = new URL(request.url).searchParams;
+      const page = Math.max(1, Number(q.get("page") ?? 1));
+      const pageSize = Math.min(100, Math.max(1, Number(q.get("pageSize") ?? 20)));
+      const event = q.get("event") ?? "";
+      const rows = state.auditLogs
+        .filter((a) => !event || a.event === event)
+        .sort((x, y) => y.id - x.id); // newest-first（Id 自增=写入序）
+      return ok({
+        items: rows.slice((page - 1) * pageSize, page * pageSize),
+        total: rows.length,
+        page,
+        pageSize,
       });
     }),
   ];

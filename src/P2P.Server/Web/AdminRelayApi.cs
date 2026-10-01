@@ -24,30 +24,18 @@ public sealed class AdminRelayApi(
         app.MapGet("/api/relay/sessions", async ctx =>
         {
             var sessions = relay?.ListSessions() ?? [];
-            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new
-            {
-                sessions = sessions.Select(s => new
-                {
-                    sid = s.RelaySessionId.ToString(), // u64 → 字符串（JS 精度边界）
-                    punchSessionId = s.PunchSessionId,
-                    a = End(s.A),
-                    b = End(s.B),
-                    bytesForwarded = s.BytesForwarded,
-                    createdAt = s.CreatedAt,
-                    lastActivity = s.LastActivity,
-                }),
-            });
+            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok",
+                new RelaySessionsView(sessions.Select(s => new RelaySessionView(
+                    s.RelaySessionId.ToString(), // u64 → 字符串（JS 精度边界）
+                    s.PunchSessionId, End(s.A), End(s.B),
+                    s.BytesForwarded, s.CreatedAt, s.LastActivity)).ToList()));
         });
 
         app.MapGet("/api/relay/config", async ctx =>
         {
             await using var db = await dbFactory.CreateDbContextAsync(ctx.RequestAborted);
             var cfg = new ServerConfigStore(db);
-            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new
-            {
-                relayEnabled = cfg.GetBool("relay_enabled"),
-                rateLimitBytes = cfg.GetInt("relay_rate_limit"),
-            });
+            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", ReadConfigAsync(cfg));
         });
 
         app.MapPut("/api/relay/config", async ctx =>
@@ -84,22 +72,17 @@ public sealed class AdminRelayApi(
                 rateLimitBytes = body.RateLimitBytes,
             }, ct: ctx.RequestAborted);
             var cfg = new ServerConfigStore(db);
-            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new
-            {
-                relayEnabled = cfg.GetBool("relay_enabled"),
-                rateLimitBytes = cfg.GetInt("relay_rate_limit"),
-            });
+            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", ReadConfigAsync(cfg));
         });
     }
 
+    private static RelayConfigView ReadConfigAsync(ServerConfigStore cfg)
+        => new(cfg.GetBool("relay_enabled"), cfg.GetInt("relay_rate_limit"));
+
     /// <summary>端点承载表达：tcp 优先（与转发偏好同口径），次 udp 已学地址，未 JOIN=pending。</summary>
-    private static object End(RelayEndpointView e) => new
-    {
-        deviceId = e.DeviceId,
-        controlIp = e.ControlIp,
-        udpAddr = e.UdpAddr,
-        carrier = e.TcpConnected ? "tcp" : e.UdpAddr is not null ? "udp" : "pending",
-    };
+    private static RelayEndView End(RelayEndpointView e) => new(
+        e.DeviceId, e.ControlIp, e.UdpAddr,
+        e.TcpConnected ? "tcp" : e.UdpAddr is not null ? "udp" : "pending");
 
     private static async Task WriteAsync(HttpContext ctx, int status, int code, string message, object? data = null)
     {

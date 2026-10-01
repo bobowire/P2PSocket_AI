@@ -1,6 +1,6 @@
 # P2P 内网穿透产品 · 技术设计文档
 
-> 版本：v1.45　创建日期：2026-08-19　状态：待评审
+> 版本：v1.46　创建日期：2026-08-19　状态：待评审
 > 依据：[产品需求文档 PRD v0.6](../prd/README.md)（决策 D1~D21，D3 经 v0.4 修订；开放问题 OQ-1~OQ-19 已全部决议）
 > 定位：开发阶段的**施工图纸**——所有实现以本文档为准；与 PRD 冲突时以 PRD 为准并提出修订。
 
@@ -120,3 +120,4 @@
 | 2026-10-01 | v1.43 | M3-09 落地同步（06 §3/§5 注记）：§3 补 server-app 落地注记——守卫判据双通道（store 记忆+sessionStorage 刷新标记的响应式镜像 ref，直接读非响应源会被 computed 短路缓存吞标记翻转致登出回跳死循环）、401 全局拦截**豁免认证端点**（改密旧密码错=HTTP 401{2001} 属凭据错误≠会话失效，04 §3.1）、首登提示+改密弹窗成功继续、折线纯 SVG+数据变换纯函数；§5 补 ExportTs 服务端域生成物（api-server-paths.ts/api-server.d.ts 分文件防常量冲突、DTO 源=ServerViews.cs 具名化[JSON 形状逐字段等价]、envelope 字段名 message 与客户端 msg 并存、DTO 渐进入列、server-generated.test.ts 契约测试同 M2-27 纪律）；ui-shared useApi 的 ApiError 附加可选 url 字段（调用方可按端点分流 401 语义，向后兼容） |
 | 2026-10-01 | v1.44 | M2_38 根因修复落地同步（02 §4.2/05 §2.3 实现注记）："中继满载间歇停滞"双根因收口——①CreditWindow 跨线程原子化（M2-21 集成后 TryConsume/Grant 分属 splice 发送与接收两线程，原 Actor 单线程假设不成立，非原子 RMW 交错丢失 Grant=发送侧差 k×chunk 永久挂起，压力实证 ~1% 丢失率；改 Interlocked CAS，05 §0 纪律 1 白名单外豁免点）；②SendChannelFrameAsync 闸内写传输（counter 序=线上序——闸外写倒置超 ReplayWindow 容差 64 即整帧丢弃=静默缺段+信用不回报；顺带根治 TCP 承载并发写交错）；诊断补缺：PunchScheduler.Log/TunnelHost.SessionLog 接线。回归双测试（CreditWindowRaceTests/TunnelSendOrderingTests）红绿 A/B 实证。README 版本头 v1.40→v1.44（此前三版漏更一并修正） |
 | 2026-10-01 | v1.45 | M3-10 落地同步（06 §3/§5 注记）：四管理页（/users /devices /groups /mappings）+服务端 DTO 具名化扩全（AdminUsers/Devices/Groups/Mappings/System 五 API 匿名对象→ServerViews 17 record，ExportTs 反射入 api-server.d.ts，与客户端域同名 record typeof 全限定消歧）；§3 关键注记——注册开关 ElSwitch 对 null modelValue 挂载即自纠偏 emit("change",false) 会误触 PUT registration_open=0 静默关闭注册（store 定值前不渲染开关根治）、ElMessageBox 关闭后 overlay v-show 残留 DOM（二次弹窗断言须按 display 过滤取可见框）、临时密码/新远程码 alert 一次性出口、admin 行 :disabled 前置 400{1003} |
+| 2026-10-01 | v1.46 | M3-11 落地同步（06 §3/§5 注记）：§3 补运维页注记——/relay 开关 confirm 区分开/关语义（关闭=拒新 5002 存量不受杀，TD-23）与取消回读防漂移、/system KEY_META 行级保存（控件映射与服务端 Validators 同键集，值校验仍在服务端）与审计 detail 截断透传；**ui-shared useApi 错误拦截补服务端 envelope 形态**（M1-31 缺口收口：HTTP 非 200 携 envelope{code,message} 时按响应体 code 抛 ApiError 且服务端 message 优先——原统一替换"本地服务响应异常"致校验错误丢定位；客户端 msg 字段仍走码表优先零回归；401{2001} 与 -401 双兜底）；server-app 构建产物口径（vite outDir 直写宿主 wwwroot+build.sh M1-03 已接线+.gitignore 不入库）；§5 DTO 入列 M3-11=Relay 族+AuditLogs |

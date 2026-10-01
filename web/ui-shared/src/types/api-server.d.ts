@@ -1,5 +1,5 @@
 // 本文件由 export-ts 反射生成（06 §5、编制定案③），禁止手改。
-// 源：P2P.Server Web 展示 DTO（ServerViews，src/Tools/ExportTs @ 2026-10-01T07:07:40Z）。
+// 源：P2P.Server Web 展示 DTO（ServerViews，src/Tools/ExportTs @ 2026-10-01T11:42:33Z）。
 
 /** 服务端响应包裹（04 §3：code=0 成功；!=0 见错误码表 04 §5）。注意字段名 message（客户端为 msg）。 */
 export interface ServerApiEnvelope<T> {
@@ -203,6 +203,54 @@ export interface ConfigItemView {
 
 export interface ConfigListView {
   items: ConfigItemView[];
+}
+
+
+export interface RelayConfigView {
+  relayEnabled: boolean;
+  rateLimitBytes: number;
+}
+
+
+export interface RelayEndView {
+  deviceId: string;
+  controlIp: string;
+  udpAddr: string | null;
+  carrier: string;
+}
+
+
+export interface RelaySessionView {
+  sid: string;
+  punchSessionId: string;
+  a: RelayEndView;
+  b: RelayEndView;
+  bytesForwarded: number;
+  createdAt: string;
+  lastActivity: string;
+}
+
+
+export interface RelaySessionsView {
+  sessions: RelaySessionView[];
+}
+
+
+export interface AuditLogView {
+  id: number;
+  ts: string;
+  event: string;
+  deviceId: string | null;
+  userId: string | null;
+  detail: string | null;
+}
+
+
+export interface AuditLogListView {
+  items: AuditLogView[];
+  total: number;
+  page: number;
+  pageSize: number;
 }
 
 

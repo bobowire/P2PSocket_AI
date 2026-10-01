@@ -58,6 +58,12 @@ export function createApiClient(baseURL = ""): AxiosInstance {
     },
     (error) => {
       if (axios.isAxiosError(error)) {
+        // HTTP 非 200 但携 envelope（服务端域错误通道 04 §3：HTTP 状态码+{code,message,data}）：
+        // 按响应体 code 抛 ApiError，服务端具体 message 优先（含键名等定位信息）。
+        // 客户端 envelope 字段为 msg（无 message）→ 仍走码表映射优先，语义不变。
+        const env = error.response?.data as { code?: number; msg?: string; message?: string } | undefined;
+        if (env && typeof env.code === "number" && env.code !== 0)
+          throw new ApiError(env.code, env.message ?? ERROR_TEXT[env.code] ?? env.msg ?? `错误 ${env.code}`, error.config?.url);
         const status = error.response?.status ?? 0;
         throw new ApiError(status === 0 ? 0 : -status, status === 0
           ? "无法连接本地服务（进程可能未运行）"

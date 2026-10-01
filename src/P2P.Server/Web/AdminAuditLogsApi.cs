@@ -28,9 +28,9 @@ public sealed class AdminAuditLogsApi(IDbContextFactory<AppDbContext> dbFactory)
             var items = await query
                 .OrderByDescending(a => a.Id)
                 .Skip((page - 1) * pageSize).Take(pageSize)
-                .Select(a => new { a.Id, a.Ts, a.Event, a.DeviceId, a.UserId, a.Detail })
+                .Select(a => new AuditLogView(a.Id, a.Ts, a.Event, a.DeviceId, a.UserId, a.Detail))
                 .ToListAsync(ctx.RequestAborted);
-            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new { items, total, page, pageSize });
+            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new AuditLogListView(items, total, page, pageSize));
         });
     }
 

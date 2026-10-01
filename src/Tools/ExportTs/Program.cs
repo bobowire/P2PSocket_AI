@@ -207,6 +207,12 @@ internal static partial class TsGen // 生成逻辑集中（顶层语句宿主�
         typeof(MappingListView),
         typeof(ConfigItemView),     // M3-10 注册开关（registration_open 经 system/config，M3-11 全页）
         typeof(ConfigListView),
+        typeof(RelayConfigView),    // M3-11 运维页（FR-S-824/825）
+        typeof(RelayEndView),
+        typeof(P2P.Server.Web.RelaySessionView),  // 与 Services.RelaySessionView 同名全限定
+        typeof(RelaySessionsView),
+        typeof(AuditLogView),
+        typeof(AuditLogListView),
     ];
 
     /// <summary>api-server.d.ts（M3-09 编制定案③：server-app 类型同源）。</summary>

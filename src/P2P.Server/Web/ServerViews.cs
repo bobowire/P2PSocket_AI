@@ -109,3 +109,24 @@ public sealed record ConfigItemView(string Key, string Value, bool RestartRequir
 
 /// <summary>配置键值集合（白名单=ConfigDefaults 全集现值）。</summary>
 public sealed record ConfigListView(List<ConfigItemView> Items);
+
+/// <summary>中继配置现值（GET/PUT /api/relay/config；PUT 响应=回读）。</summary>
+public sealed record RelayConfigView(bool RelayEnabled, int RateLimitBytes);
+
+/// <summary>中继会话端点（carrier=tcp 优先/次 udp 已学地址/未 JOIN=pending，与转发偏好同口径）。</summary>
+public sealed record RelayEndView(Guid DeviceId, string ControlIp, string? UdpAddr, string Carrier);
+
+/// <summary>中继会话行（GET /api/relay/sessions）：sid 以字符串承载（u64 超 JS Number 53 位精度）。
+/// 时间戳=RelayService 现值 DateTimeOffset（与仪表盘 RelaySnapshotView 同源）。</summary>
+public sealed record RelaySessionView(
+    string Sid, Guid PunchSessionId, RelayEndView A, RelayEndView B,
+    long BytesForwarded, DateTimeOffset CreatedAt, DateTimeOffset LastActivity);
+
+/// <summary>中继会话表快照（GET /api/relay/sessions）。</summary>
+public sealed record RelaySessionsView(List<RelaySessionView> Sessions);
+
+/// <summary>审计日志行（GET /api/audit-logs）：detail 为原始 JSON 文本透传（SEC-51 写入侧已保证不含凭据）。</summary>
+public sealed record AuditLogView(long Id, DateTime Ts, string Event, Guid? DeviceId, Guid? UserId, string? Detail);
+
+/// <summary>审计日志列表（newest-first + event 过滤 + 分页）。</summary>
+public sealed record AuditLogListView(List<AuditLogView> Items, int Total, int Page, int PageSize);

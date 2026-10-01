@@ -12,6 +12,12 @@ const server = setupServer(
   http.get("http://localhost/api/biz", () => envelope(4001, "target_not_authorized", null)),
   http.get("http://localhost/api/unknown-code", () => envelope(9999, "custom_msg", null)),
   http.get("http://localhost/api/http500", () => new HttpResponse(null, { status: 500 })),
+  // 服务端域错误通道（04 §3）：HTTP 400 + envelope{code,message,data}（字段名 message 非 msg）
+  http.put("http://localhost/api/server-400", () =>
+    new HttpResponse(JSON.stringify({ code: 1001, message: "参数错误（public_addr：须为 IP 或域名）", data: null }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    })),
 );
 
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
@@ -53,6 +59,14 @@ describe("useApi envelope 与错误码拦截", () => {
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).code).toBe(0);
     expect((err as ApiError).message).toContain("无法连接本地服务");
+  });
+
+  it("HTTP 非 200 携服务端 envelope：code 取响应体、服务端 message 优先（M3-11）", async () => {
+    const api = useApi("http://localhost");
+    const err = await api.put("/api/server-400", {}).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).code).toBe(1001); // 响应体 code（非 -400）
+    expect((err as ApiError).message).toBe("参数错误（public_addr：须为 IP 或域名）"); // 具体定位信息
   });
 
   it("apiPath 填参（生成路径模板 {id}）", () => {
