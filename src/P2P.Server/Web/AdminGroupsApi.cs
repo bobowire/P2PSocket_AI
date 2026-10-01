@@ -25,33 +25,15 @@ public sealed class AdminGroupsApi(
             await using var db = await dbFactory.CreateDbContextAsync(ctx.RequestAborted);
             var items = await db.Groups.AsNoTracking()
                 .OrderBy(g => g.IsDefault ? 0 : 1).ThenBy(g => g.Name).ThenBy(g => g.Id)
-                .Select(g => new
-                {
-                    g.Id,
-                    g.Name,
-                    g.JoinPolicy,
-                    g.IsDefault,
-                    g.CreatedAt,
-                    OwnerUsername = db.Users.Where(u => u.Id == g.OwnerUserId)
+                .Select(g => new GroupView(
+                    g.Id, g.Name, g.JoinPolicy, g.IsDefault,
+                    db.Users.Where(u => u.Id == g.OwnerUserId)
                         .Select(u => u.Username).FirstOrDefault(),
-                    MemberCount = db.GroupMembers.Count(m => m.GroupId == g.Id && m.Approved),
-                    PendingCount = db.JoinRequests.Count(r => r.GroupId == g.Id && r.Status == "pending"),
-                })
+                    db.GroupMembers.Count(m => m.GroupId == g.Id && m.Approved),
+                    db.JoinRequests.Count(r => r.GroupId == g.Id && r.Status == "pending"),
+                    g.CreatedAt))
                 .ToListAsync(ctx.RequestAborted);
-            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new
-            {
-                items = items.Select(g => new
-                {
-                    groupId = g.Id,
-                    g.Name,
-                    g.JoinPolicy,
-                    g.IsDefault,
-                    g.OwnerUsername,
-                    g.MemberCount,
-                    g.PendingCount,
-                    g.CreatedAt,
-                }),
-            });
+            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new GroupListView(items));
         });
 
         app.MapPut("/api/groups/default", async ctx =>
@@ -74,7 +56,7 @@ public sealed class AdminGroupsApi(
             await db.SaveChangesAsync(ctx.RequestAborted);
             await audit.WriteAsync("default_join_policy_change", detail: new { policy },
                 ct: ctx.RequestAborted);
-            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new { policy });
+            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new PolicyResult(policy));
         });
 
         app.MapGet("/api/group-requests", async ctx =>
@@ -97,30 +79,11 @@ public sealed class AdminGroupsApi(
                     join d in db.Devices on r.DeviceId equals d.Id into devices
                     from d in devices.DefaultIfEmpty()
                     orderby r.CreatedAt, r.Id
-                    select new
-                    {
-                        r.Id,
-                        r.GroupId,
-                        GroupName = g.Name,
-                        r.DeviceId,
-                        DeviceName = d.DeviceName ?? "",
-                        OwnerUsername = u.Username ?? "",
-                        r.CreatedAt,
-                    })
+                    select new GroupRequestView(
+                        r.Id, r.GroupId, g.Name, r.DeviceId,
+                        d.DeviceName ?? "", u.Username ?? "", r.CreatedAt))
                 .ToListAsync(ctx.RequestAborted);
-            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new
-            {
-                items = items.Select(r => new
-                {
-                    requestId = r.Id,
-                    groupId = r.GroupId,
-                    groupName = r.GroupName,
-                    deviceId = r.DeviceId,
-                    deviceName = r.DeviceName,
-                    ownerUsername = r.OwnerUsername,
-                    createdAt = r.CreatedAt,
-                }),
-            });
+            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new GroupRequestListView(items));
         });
 
         app.MapPost("/api/group-requests/{id}/approve", ctx => DecideAsync(ctx, approve: true));
@@ -146,14 +109,14 @@ public sealed class AdminGroupsApi(
         }
         if (row.Status != "pending")
         {
-            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "已处理", new { ok = false });
+            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "已处理", new DecisionResult(false));
             return;
         }
 
         var adminId = await db.Users.AsNoTracking().Where(u => u.IsAdmin).Select(u => u.Id)
             .SingleOrDefaultAsync(ctx.RequestAborted);
         var ok = await groups.DecideJoinRequestAsync(requestId, approve, actorUserId: adminId);
-        await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new { ok });
+        await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new DecisionResult(ok));
     }
 
     private static async Task WriteAsync(HttpContext ctx, int status, int code, string message, object? data = null)

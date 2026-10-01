@@ -138,15 +138,15 @@ internal static partial class TsGen // 生成逻辑集中（顶层语句宿主�
     /// <summary>展示 DTO 清单（无机密字段；ClientState 的 deviceSecret/静态私钥不导出）。</summary>
     internal static readonly Type[] DtoTypes =
     [
-        typeof(MappingView),
+        typeof(P2P.Client.Mapping.MappingView), // 与服务端域同名，全限定消歧
         typeof(MappingTrafficView),
         typeof(RegistrationResult),
         typeof(GroupInfo),
         typeof(ClientSettings),
         typeof(ReconnectSettings),
         typeof(UpgradeInfoView), // M2-26 升级引导（04 §2.7 /api/upgrade/info 载荷）
-        typeof(GroupView),       // M2-27 分组全套（04 §2.4 /api/groups）
-        typeof(GroupRequestView),
+        typeof(P2P.Client.Web.GroupView),       // M2-27 分组全套（04 §2.4 /api/groups）——与服务端域同名，全限定消歧
+        typeof(P2P.Client.Web.GroupRequestView),
         typeof(GroupsView),
         typeof(LanSegmentView),  // M2-27 白名单（04 §2.5 /api/lan-segments）
         typeof(LogEntryView),    // M2-27 日志（04 §2.6 /api/logs）
@@ -190,6 +190,23 @@ internal static partial class TsGen // 生成逻辑集中（顶层语句宿主�
         typeof(StunDroppedView),
         typeof(PunchStatsView),
         typeof(HourlyBucketView),
+        typeof(UserView),           // M3-10 用户页（FR-S-820）
+        typeof(UserListView),
+        typeof(TempPasswordResult),
+        typeof(DeviceView),         // M3-10 设备页（FR-S-821）
+        typeof(DeviceListView),
+        typeof(RemoteCodeResult),
+        typeof(P2P.Server.Web.GroupView),          // M3-10 分组页（FR-S-822/305；与服务端域同名全限定）
+        typeof(GroupListView),
+        typeof(PolicyResult),
+        typeof(P2P.Server.Web.GroupRequestView),
+        typeof(GroupRequestListView),
+        typeof(DecisionResult),
+        typeof(P2P.Server.Web.MappingView),        // M3-10 映射页（FR-S-823；与服务端域同名全限定）
+        typeof(MappingBytesView),
+        typeof(MappingListView),
+        typeof(ConfigItemView),     // M3-10 注册开关（registration_open 经 system/config，M3-11 全页）
+        typeof(ConfigListView),
     ];
 
     /// <summary>api-server.d.ts（M3-09 编制定案③：server-app 类型同源）。</summary>

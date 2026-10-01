@@ -63,30 +63,18 @@ public sealed class AdminMappingsApi(IDbContextFactory<AppDbContext> dbFactory)
                 mappings.Select(m => m.Id).ToHashSet(), ctx.RequestAborted);
 
             var items = mappings
-                .Select(m => new
-                {
-                    m.Id,
-                    m.Name,
-                    m.LocalPort,
-                    m.Proto,
-                    m.TargetDeviceId,
-                    m.TargetAddr,
-                    m.TargetPort,
-                    m.Enabled,
-                    m.CreatedAt,
-                    m.OwnerDeviceId,
-                    ownerDeviceName = m.OwnerDeviceName,
-                    ownerRemoteCode = m.OwnerRemoteCode,
-                    targetDeviceName = m.TargetDeviceName,
-                    bytes = new { up = m.BytesUp, down = m.BytesDown, relay = m.BytesRelay },
-                    statsUpdatedAt = m.StatsUpdatedAt,
-                    status = latest.TryGetValue(m.Id, out var s) && KnownStates.Contains(s) ? s : "unknown",
-                })
+                .Select(m => new MappingView(
+                    m.Id, m.Name, m.LocalPort, m.Proto, m.TargetDeviceId, m.TargetAddr, m.TargetPort,
+                    m.Enabled, m.CreatedAt, m.OwnerDeviceId, m.OwnerDeviceName, m.OwnerRemoteCode,
+                    m.TargetDeviceName,
+                    new MappingBytesView(m.BytesUp, m.BytesDown, m.BytesRelay),
+                    m.StatsUpdatedAt,
+                    latest.TryGetValue(m.Id, out var s) && KnownStates.Contains(s) ? s : "unknown"))
                 .Where(m => deviceFilter is null || m.OwnerDeviceId == deviceFilter)
-                .Where(m => statusFilter.Length == 0 || m.status == statusFilter)
+                .Where(m => statusFilter.Length == 0 || m.Status == statusFilter)
                 .ToList();
 
-            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new { items, total = items.Count });
+            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new MappingListView(items, items.Count));
         });
     }
 

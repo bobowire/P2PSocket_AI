@@ -45,3 +45,67 @@ public sealed record PunchStatsView(
 
 /// <summary>整点对齐小时桶（最旧→最新共 24 桶，空桶保留；hourStart=Unix ms）。</summary>
 public sealed record HourlyBucketView(long HourStart, int Total, int Success);
+
+// ── M3-10 管理页载荷（FR-S-820/821/822/823；形状自各 Admin*Api 匿名对象逐字段迁移）──
+
+/// <summary>用户列表项（GET /api/users）：deviceCount=名下设备数子查询。</summary>
+public sealed record UserView(
+    Guid Id, string Username, bool Disabled, bool IsAdmin, int DeviceCount, DateTime CreatedAt);
+
+/// <summary>用户分页列表（GET /api/users）。</summary>
+public sealed record UserListView(List<UserView> Items, int Total, int Page, int PageSize);
+
+/// <summary>密码重置结果（PUT /api/users/{id}/password-reset）：临时密码仅本次响应返回一次。</summary>
+public sealed record TempPasswordResult(string TempPassword);
+
+/// <summary>设备列表项（GET /api/devices）：online=DeviceRegistry 连接级真相源（与 Disabled 正交）。</summary>
+public sealed record DeviceView(
+    Guid DeviceId, string DeviceName, string Os, string RemoteCode, string? VirtualIp,
+    string? OwnerUsername, string[] Groups, bool Online, bool Disabled, DateTime CreatedAt);
+
+/// <summary>设备全量列表（GET /api/devices，无分页）。</summary>
+public sealed record DeviceListView(List<DeviceView> Items);
+
+/// <summary>远程码重置结果（POST /api/devices/{id}/reset-remote-code）：新码仅本次响应返回一次。</summary>
+public sealed record RemoteCodeResult(string RemoteCode);
+
+/// <summary>分组总览项（GET /api/groups）：memberCount=approved 成员；pendingCount=待审批单。</summary>
+public sealed record GroupView(
+    Guid GroupId, string Name, string JoinPolicy, bool IsDefault, string? OwnerUsername,
+    int MemberCount, int PendingCount, DateTime CreatedAt);
+
+/// <summary>分组总览列表（默认分组置顶排序）。</summary>
+public sealed record GroupListView(List<GroupView> Items);
+
+/// <summary>默认分组策略变更结果（PUT /api/groups/default，回读新值）。</summary>
+public sealed record PolicyResult(string Policy);
+
+/// <summary>跨分组待审批申请单（GET /api/group-requests?status=pending）。</summary>
+public sealed record GroupRequestView(
+    Guid RequestId, Guid GroupId, string GroupName, Guid DeviceId, string DeviceName,
+    string OwnerUsername, DateTime CreatedAt);
+
+/// <summary>审批队列（GET /api/group-requests）。</summary>
+public sealed record GroupRequestListView(List<GroupRequestView> Items);
+
+/// <summary>审批动作结果（approve/reject）：已处理单 {ok:false} 诚实应答（0x53 Ack Ok=false 同口径）。</summary>
+public sealed record DecisionResult(bool Ok);
+
+/// <summary>映射累计流量三向（mapping_stats join）。</summary>
+public sealed record MappingBytesView(long Up, long Down, long Relay);
+
+/// <summary>映射明细（GET /api/mappings）：status=TD-22 投影（无流水=unknown；disabled 仍投影=明细口径）。</summary>
+public sealed record MappingView(
+    Guid Id, string Name, int LocalPort, string Proto, Guid TargetDeviceId, string TargetAddr,
+    int TargetPort, bool Enabled, DateTime CreatedAt, Guid OwnerDeviceId, string OwnerDeviceName,
+    string OwnerRemoteCode, string TargetDeviceName, MappingBytesView Bytes,
+    DateTime? StatsUpdatedAt, string Status);
+
+/// <summary>映射列表（GET /api/mappings，过滤后 total=items.Count）。</summary>
+public sealed record MappingListView(List<MappingView> Items, int Total);
+
+/// <summary>server_config 键值项（GET/PUT /api/system/config）：restartRequired=启动期读取键（改动须重启）。</summary>
+public sealed record ConfigItemView(string Key, string Value, bool RestartRequired);
+
+/// <summary>配置键值集合（白名单=ConfigDefaults 全集现值）。</summary>
+public sealed record ConfigListView(List<ConfigItemView> Items);

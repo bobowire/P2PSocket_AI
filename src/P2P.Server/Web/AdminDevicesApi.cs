@@ -38,20 +38,10 @@ public sealed class AdminDevicesApi(
                 })
                 .ToListAsync(ctx.RequestAborted);
             // 在线=连接级真相源（registry），与库行禁用态正交：禁用未踢线的离线行两者可同时为真
-            var items = rows.Select(d => new
-            {
-                deviceId = d.Id,
-                d.DeviceName,
-                d.Os,
-                d.RemoteCode,
-                d.VirtualIp,
-                d.OwnerUsername,
-                d.Groups,
-                online = registry.IsOnline(d.Id),
-                d.Disabled,
-                d.CreatedAt,
-            });
-            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new { items });
+            var items = rows.Select(d => new DeviceView(
+                d.Id, d.DeviceName, d.Os, d.RemoteCode, d.VirtualIp, d.OwnerUsername,
+                d.Groups, registry.IsOnline(d.Id), d.Disabled, d.CreatedAt));
+            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new DeviceListView(items.ToList()));
         });
 
         app.MapPost("/api/devices/{id}/disable", async ctx =>
@@ -100,7 +90,7 @@ public sealed class AdminDevicesApi(
                 await WriteAsync(ctx, StatusCodes.Status404NotFound, 1002, "设备不存在");
                 return;
             }
-            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new { remoteCode }); // 新码一次返回
+            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new RemoteCodeResult(remoteCode)); // 新码一次返回
         });
     }
 

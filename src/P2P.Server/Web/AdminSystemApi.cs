@@ -59,7 +59,7 @@ public sealed class AdminSystemApi(
         app.MapGet("/api/system/config", async ctx =>
         {
             await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok",
-                new { items = await ReadConfigAsync(ctx.RequestAborted) });
+                new ConfigListView(await ReadConfigAsync(ctx.RequestAborted)));
         });
 
         app.MapPut("/api/system/config", async ctx =>
@@ -105,22 +105,20 @@ public sealed class AdminSystemApi(
             }, ct: ctx.RequestAborted);
 
             await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok",
-                new { items = await ReadConfigAsync(ctx.RequestAborted) });
+                new ConfigListView(await ReadConfigAsync(ctx.RequestAborted)));
         });
     }
 
     /// <summary>白名单全集现值（缺键回退 ConfigDefaults 种子值——理论不可达，Seed 幂等补齐）。</summary>
-    private async Task<List<object>> ReadConfigAsync(CancellationToken ct)
+    private async Task<List<ConfigItemView>> ReadConfigAsync(CancellationToken ct)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var current = await db.ServerConfig.AsNoTracking().ToDictionaryAsync(c => c.Key, c => c.Value, ct);
         return [.. DbInitializer.ConfigDefaults
-            .Select(seed => (object)new
-            {
-                key = seed.Key,
-                value = current.TryGetValue(seed.Key, out var v) ? v : seed.Value,
-                restartRequired = RestartKeys.Contains(seed.Key),
-            })];
+            .Select(seed => new ConfigItemView(
+                seed.Key,
+                current.TryGetValue(seed.Key, out var v) ? v : seed.Value,
+                RestartKeys.Contains(seed.Key)))];
     }
 
     private static async Task WriteAsync(HttpContext ctx, int status, int code, string message, object? data = null)

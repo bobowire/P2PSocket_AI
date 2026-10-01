@@ -1,5 +1,5 @@
 // 本文件由 export-ts 反射生成（06 §5、08 §2③），禁止手改；
-// 源：ServerWebHost 服务端 Web 路由表（src/Tools/ExportTs @ 2026-10-01T00:33:29Z）。前端禁止手写 API 字符串路径。
+// 源：ServerWebHost 服务端 Web 路由表（src/Tools/ExportTs @ 2026-10-01T07:07:40Z）。前端禁止手写 API 字符串路径。
 
 export const ServerApiPaths = {
   AuditLogs: "/api/audit-logs",

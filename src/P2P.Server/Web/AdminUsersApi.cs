@@ -33,18 +33,12 @@ public sealed class AdminUsersApi(
             var items = await db.Users.AsNoTracking()
                 .OrderBy(u => u.CreatedAt).ThenBy(u => u.Username)
                 .Skip((page - 1) * pageSize).Take(pageSize)
-                .Select(u => new
-                {
-                    u.Id,
-                    u.Username,
-                    u.Disabled,
-                    u.IsAdmin,
-                    DeviceCount = db.Devices.Count(d => d.OwnerUserId == u.Id),
-                    u.CreatedAt,
-                })
+                .Select(u => new UserView(
+                    u.Id, u.Username, u.Disabled, u.IsAdmin,
+                    db.Devices.Count(d => d.OwnerUserId == u.Id), u.CreatedAt))
                 .ToListAsync(ctx.RequestAborted);
             await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok",
-                new { items, total, page, pageSize });
+                new UserListView(items, total, page, pageSize));
         });
 
         app.MapPost("/api/users/{id}/disable", async ctx =>
@@ -96,7 +90,7 @@ public sealed class AdminUsersApi(
             await db.SaveChangesAsync(ctx.RequestAborted);
             await audit.WriteAsync("user_password_reset", userId: user.Id,
                 detail: new { user.Username }, ct: ctx.RequestAborted); // 明文只出现在本次响应
-            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new { tempPassword });
+            await WriteAsync(ctx, StatusCodes.Status200OK, 0, "ok", new TempPasswordResult(tempPassword));
         });
     }
 
