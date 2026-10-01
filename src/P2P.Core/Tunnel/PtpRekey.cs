@@ -201,8 +201,10 @@ public sealed class PtpReceiveKeyRing : IDisposable
 
 /// <summary>
 /// 发送侧每 channel 信用账本（05 §2.3：每 channel 独立窗口默认 64KiB，按消费回报——对端 WINDOW(0x0A) 帧
-/// 回报已消费字节，信用耗尽暂停读本地 socket，回报到达恢复）。Actor 单线程使用（05 §0），不加锁；
-/// TunnelSession 集成于 M2-21。
+/// 回报已消费字节，信用耗尽暂停读本地 socket，回报到达恢复）。**跨线程原子账本（M2_38 根因修复）**：
+/// M2-21 集成后 TryConsume（splice 发送循环）与 Grant（会话接收循环）分属两线程——原普通 int 非原子
+/// 读-改-写在交错时覆盖丢失 Grant 更新（压力实证 ~1% 丢失率），发送侧永久挂起差 k×chunk 字节且零日志；
+/// 两个变更点均以 Interlocked.CompareExchange CAS 循环原子化（05 §0 白名单外的共享状态同步豁免点）。
 /// </summary>
 public sealed class CreditWindow
 {
@@ -218,22 +220,30 @@ public sealed class CreditWindow
     }
 
     public int Capacity { get; }
-    public int Available => _available;
-    public bool Exhausted => _available == 0;
+    public int Available => Volatile.Read(ref _available);
+    public bool Exhausted => Volatile.Read(ref _available) == 0;
 
     /// <summary>预扣信用：足够则扣减返回 true；不足返回 false 且**不部分扣**（调用方暂停读、待回报）。</summary>
     public bool TryConsume(int bytes)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(bytes, 1);
-        if (_available < bytes) return false;
-        _available -= bytes;
-        return true;
+        while (true)
+        {
+            var cur = Volatile.Read(ref _available);
+            if (cur < bytes) return false;
+            if (Interlocked.CompareExchange(ref _available, cur - bytes, cur) == cur) return true;
+        }
     }
 
-    /// <summary>对端消费回报累加，封顶 capacity（迟到/重复回报不放大窗口）。</summary>
+    /// <summary>对端消费回报累加，封顶 capacity（迟到/重复回报不放大窗口）。long 中转防极值加法回绕。</summary>
     public void Grant(int bytes)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(bytes, 1);
-        _available = Math.Min(Capacity, _available + bytes);
+        while (true)
+        {
+            var cur = Volatile.Read(ref _available);
+            var next = (int)Math.Min((long)Capacity, (long)cur + bytes);
+            if (Interlocked.CompareExchange(ref _available, next, cur) == cur) return;
+        }
     }
 }

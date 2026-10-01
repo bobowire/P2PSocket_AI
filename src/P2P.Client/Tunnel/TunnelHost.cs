@@ -31,6 +31,10 @@ public sealed class TunnelHost : IAsyncDisposable
     /// 映射状态机据此刻画 relay 态翻转（如对端回切直连时本端映射 relay→direct）。</summary>
     public event Action<TunnelSession>? SessionAttached;
 
+    /// <summary>会话内部日志转发（接收异常/REKEY/断链原因等，M2_38 排查补齐的诊断缺口）：
+    /// 携会话对象——排水期新旧会话并存时须按会话区分。</summary>
+    public event Action<TunnelSession, string>? SessionLog;
+
     /// <summary>当前活跃会话（诊断/隧道复用检查，02 §4.5）。</summary>
     public IReadOnlyCollection<TunnelSession> Sessions => (IReadOnlyCollection<TunnelSession>)_sessions.Values;
 
@@ -49,6 +53,7 @@ public sealed class TunnelHost : IAsyncDisposable
             else _ = DrainAndCloseAsync(old);
         }
         session.Disconnected += OnSessionDisconnected;
+        session.Log += m => SessionLog?.Invoke(session, m); // 闭包捕获会话上下文（Log 为 Action<string>；会话 Dispose 后不再触发，无须解绑）
         _sessions[session.PeerDeviceId] = session;
         try { SessionAttached?.Invoke(session); }
         catch (Exception) { /* 订阅方异常不阻断挂入 */ }

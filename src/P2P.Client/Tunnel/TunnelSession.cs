@@ -309,9 +309,15 @@ public sealed class TunnelSession : IAsyncDisposable
             var counter = ++_sendCounter; // 严格递增，从 1 起（0 保留给握手帧）
             wire = PtpFrameCodec.Seal(type, channelId, counter, payload.Span, _sendKey); // _sendKey 交换同在闸内（REKEY）
             SentFrames++;
+            // 写传输同在闸内（M2_38 根因修复）：counter 序=线上序——写若在闸外，多发送方（8 并发 splice
+            // DATA/接收侧 WINDOW/keepalive）释放闸后的线程调度/写阻塞可倒置到达顺序，倒置深度超
+            // ReplayWindow 容差 64 时反重放判"回退"丢弃整帧 DATA（静默缺段+该帧信用永不回报=永久停滞，
+            // 中继满载间歇复现）。闸内写顺带根治 TCP 承载并发 WriteAsync 帧交错；背压阻塞语义不变
+            //（socket 缓冲满时闸外写同样阻塞）。接收循环自身无阻塞发送（PONG/响应方 REKEY 均
+            // fire-and-forget，发起方环内仅换钥不写传输），闸持有者不会被接收侧反噬死锁。
+            await _transport.SendAsync(wire, ct);
         }
         finally { _sendGate.Release(); }
-        await _transport.SendAsync(wire, ct);
     }
 
     // ── 接收循环 ─────────────────────────────────────────────────────

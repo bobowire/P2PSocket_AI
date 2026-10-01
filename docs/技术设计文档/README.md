@@ -1,6 +1,6 @@
 # P2P 内网穿透产品 · 技术设计文档
 
-> 版本：v1.40　创建日期：2026-08-19　状态：待评审
+> 版本：v1.44　创建日期：2026-08-19　状态：待评审
 > 依据：[产品需求文档 PRD v0.6](../prd/README.md)（决策 D1~D21，D3 经 v0.4 修订；开放问题 OQ-1~OQ-19 已全部决议）
 > 定位：开发阶段的**施工图纸**——所有实现以本文档为准；与 PRD 冲突时以 PRD 为准并提出修订。
 
@@ -118,3 +118,4 @@
 | 2026-09-30 | v1.41 | M3-07 落地同步：05 §6 图修正+新增 §6.2 限速执行体实现注记（**勘误** §6 图早期"令牌桶 per-session + 全局"——TD-23 v1.40 定案仅全局单桶；RelayRateLimiter 独立单例规避 RelayService↔SignalingCoordinator 构造环、债务模型[桶非负即过/扣减可入负/容量=速率 1s 突发]、存量不中断仅降速=AcquireAsync 欠账异步等待不丢帧[丢帧复现 M2-38 停滞家族]、PUT config 部分更新+进程内直调 UpdateRate 即时生效、会话快照 ListSessions[sid 字符串化/承载 tcp 优先表达/会话级 BytesForwarded]）；04 §3.2 relay 行补 GET /api/relay/config 编制补充小口径（管理页表单回显）——TD-23 决议语义 v1.40 已定不变 |
 | 2026-09-30 | v1.42 | M3-08 落地同步（04 §3.2 三行补落地编制补充，语义主体 TD-22 v1.40 已定不变）：mappings 行——归属/对端设备名与远程码子查询 join、?deviceId=/?status= 过滤、disabled 仍投影（明细口径 vs 仪表盘 enabled 聚合口径）、投影核与仪表盘共用 AdminDashboardApi.LatestStatusByMappingAsync；system/config 行——白名单键集实装为 ConfigDefaults 全集（原"含端口覆盖键"表述按 08 §5.1 分工修正：listen.* 进程级在 appsettings）+restartRequired 逐键标注+PUT 全量校验先行整单拒绝+relay_rate_limit 进程内直调 UpdateRate 与 M3-07 同执行链；audit-logs 行——newest-first/event 精确过滤/分页 clamp 1~100/detail 文本透传 |
 | 2026-10-01 | v1.43 | M3-09 落地同步（06 §3/§5 注记）：§3 补 server-app 落地注记——守卫判据双通道（store 记忆+sessionStorage 刷新标记的响应式镜像 ref，直接读非响应源会被 computed 短路缓存吞标记翻转致登出回跳死循环）、401 全局拦截**豁免认证端点**（改密旧密码错=HTTP 401{2001} 属凭据错误≠会话失效，04 §3.1）、首登提示+改密弹窗成功继续、折线纯 SVG+数据变换纯函数；§5 补 ExportTs 服务端域生成物（api-server-paths.ts/api-server.d.ts 分文件防常量冲突、DTO 源=ServerViews.cs 具名化[JSON 形状逐字段等价]、envelope 字段名 message 与客户端 msg 并存、DTO 渐进入列、server-generated.test.ts 契约测试同 M2-27 纪律）；ui-shared useApi 的 ApiError 附加可选 url 字段（调用方可按端点分流 401 语义，向后兼容） |
+| 2026-10-01 | v1.44 | M2_38 根因修复落地同步（02 §4.2/05 §2.3 实现注记）："中继满载间歇停滞"双根因收口——①CreditWindow 跨线程原子化（M2-21 集成后 TryConsume/Grant 分属 splice 发送与接收两线程，原 Actor 单线程假设不成立，非原子 RMW 交错丢失 Grant=发送侧差 k×chunk 永久挂起，压力实证 ~1% 丢失率；改 Interlocked CAS，05 §0 纪律 1 白名单外豁免点）；②SendChannelFrameAsync 闸内写传输（counter 序=线上序——闸外写倒置超 ReplayWindow 容差 64 即整帧丢弃=静默缺段+信用不回报；顺带根治 TCP 承载并发写交错）；诊断补缺：PunchScheduler.Log/TunnelHost.SessionLog 接线。回归双测试（CreditWindowRaceTests/TunnelSendOrderingTests）红绿 A/B 实证。README 版本头 v1.40→v1.44（此前三版漏更一并修正） |

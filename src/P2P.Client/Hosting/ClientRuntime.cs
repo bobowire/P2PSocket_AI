@@ -135,8 +135,10 @@ public sealed class ClientRuntime : IAsyncDisposable
         _nic = _options.NicOverride ?? CreateNic();
         _nic.Degraded += m => Log?.Invoke($"[nic] 降级告警：{m}");
         _host = new TunnelHost();
+        _host.SessionLog += (s, m) => Log?.Invoke($"[tunnel {s.PeerDeviceId.ToString()[..8]}{(s.ViaRelay ? "/relay" : "")}] {m}");
         _puncher = new LazyPuncher();
         _scheduler = new PunchScheduler(_puncher);
+        _scheduler.Log += m => Log?.Invoke($"[punch] {m}"); // 打洞完成四型日志——M2_38 排查曾因未接线被误导为"调度未返回"
         var bindIp = IPAddress.TryParse(_state.State.VirtualIp, out var vip) ? vip : IPAddress.Loopback;
         _engine = new MappingEngine(_host, _scheduler, bindIp,
             enabledCidrsProvider: _lanSegments.EnabledCidrs); // 监听绑虚拟 IP（01 §3.2）+ L3 白名单（M2-11）
