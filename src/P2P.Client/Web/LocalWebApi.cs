@@ -6,6 +6,7 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
 using P2P.Client.Control;
+using P2P.Client.Diagnostics;
 using P2P.Client.Mapping;
 using P2P.Client.Nic;
 using P2P.Client.Punch;
@@ -28,13 +29,14 @@ public sealed class LocalApiServices : IAsyncDisposable
     public LanSegmentsStore LanSegments { get; }
     public string LogsDir { get; }
     public SubnetConflictDetector? SubnetConflicts { get; }
+    public StunTester? StunTester { get; }
     public LocalApiContext Context { get; }
     public StatusHub Hub { get; }
 
     public LocalApiServices(ControlClient control, StateStore state, SettingsStore settings,
         PeersStore peers, ClientRegistrationService wizard, MappingSyncService mappings,
         PunchScheduler scheduler, LanSegmentsStore? lanSegments = null, string? logsDir = null,
-        SubnetConflictDetector? subnetConflicts = null)
+        SubnetConflictDetector? subnetConflicts = null, StunTester? stunTester = null)
     {
         Control = control;
         State = state;
@@ -46,6 +48,7 @@ public sealed class LocalApiServices : IAsyncDisposable
         LanSegments = lanSegments ?? new LanSegmentsStore(ClientPaths.DefaultBaseDir);
         LogsDir = logsDir ?? Path.Combine(ClientPaths.DefaultBaseDir, "logs");
         SubnetConflicts = subnetConflicts;
+        StunTester = stunTester;
         Context = new LocalApiContext();
         Hub = new StatusHub(mappings.Traffic); // mapping_stats 1s 采样源（04 §2.8）
 
@@ -97,7 +100,7 @@ public static class LocalWebApi
         app.MapGroupsApi(services.Control, services.Hub); // M2-27 分组全套（04 §2.4，0x42/0x50~0x57）
         app.MapLanSegmentsApi(services.Control, services.LanSegments, services.Hub); // M2-27 白名单（0x63）
         app.MapLogsApi(services.LogsDir); // M2-27 日志查询/导出（NFR-51）
-        app.MapDiagnosticsApi(services.Scheduler);
+        app.MapDiagnosticsApi(services.Scheduler, services.StunTester); // M3-15 加 stun-test 判型
         app.Map("/ws/status", services.Hub.HandleAsync); // 04 §2.8 实时通道
         return app;
     }

@@ -14,6 +14,10 @@ namespace P2P.Server.Services;
 /// （UDP 不回应即无回显放大；TCP 直接断连）。风暴防护四道闸（TD-18/FR-S-603）
 /// 由 <see cref="Guard"/> 承载：④ 全局熔断 → ① 单 IP（UDP 令牌桶/TCP 并发）→
 /// ②（本服务查表）→ ③ 每设备 QPS，逐层先于 HMAC。
+/// M3-15 RFC5780 判型子集（05 §7.2）：alt 端点配置时增辅监听（UDP+TCP 同端口），
+/// 全部响应携带 RESPONSE-ORIGIN（实际回包源）与 OTHER-ADDRESS（另一端点，相对语义）；
+/// CHANGE-REQUEST 请求从辅 socket 回包（TCP 连接导向忽略该属性）。未配置 alt 时
+/// 输出与 M1 形状逐字节一致（零属性零回归）。
 /// </summary>
 public sealed class StunService : IAsyncDisposable
 {
@@ -30,21 +34,36 @@ public sealed class StunService : IAsyncDisposable
     private readonly System.Threading.Lock _nonceGate = new();
     private readonly Dictionary<string, long> _nonces = []; // nonce(b64) → 过期时刻 ticks
     private readonly Task _sweeper;
+    private readonly IPEndPoint? _alt; // 配置的辅端点（地址=通告 IP；端口 0=UDP 随机 TCP 跟随）
+    private readonly IPAddress? _advertisedIp; // 主侧通告 IP：public_addr（M2-36 同语义）优先，空=按对端路由派生
     private UdpClient _udp = null!;
     private TcpListener _tcpListener = null!;
+    private UdpClient? _altUdp;
+    private TcpListener? _altTcpListener;
     private Task _loop = Task.CompletedTask;
     private Task _tcpLoop = Task.CompletedTask;
+    private Task _altLoop = Task.CompletedTask;
+    private Task _altTcpLoop = Task.CompletedTask;
     private int _port;
     private int _tcpPort;
     private int _disposed; // 宿主 StopAsync 与容器释放各调一次（幂等）
 
     public StunService(IDbContextFactory<AppDbContext> dbFactory, bool requireAuth = true,
-        TimeProvider? time = null, StunGuardOptions? guard = null)
+        TimeProvider? time = null, StunGuardOptions? guard = null, IPEndPoint? alt = null)
     {
         _dbFactory = dbFactory;
         _requireAuth = requireAuth;
         _time = time ?? TimeProvider.System;
         _guard = new StunGuard(guard, _time);
+        _alt = alt;
+        if (alt is not null)
+        {
+            // 主侧通告 IP：public_addr 是 IP 时直接采用（云 NAT 部署派生会得内网地址，M2-36 同问题域）；
+            // 域名形式不适配 STUN 地址属性语义（属性承载 IP），走派生兜底。
+            using var db = _dbFactory.CreateDbContext();
+            if (IPAddress.TryParse(new ServerConfigStore(db).Get("public_addr"), out var advertised))
+                _advertisedIp = advertised;
+        }
         _sweeper = SweepAsync(_cts.Token);
     }
 
@@ -53,6 +72,9 @@ public sealed class StunService : IAsyncDisposable
 
     /// <summary>TCP 实际绑定端口（同上）。</summary>
     public int TcpPort => _tcpPort;
+
+    /// <summary>辅端点通告值（未配置 alt=null）：地址取配置 IP，端口=辅 UDP 实际端口（TCP 同口跟随，单一通告值）。</summary>
+    public IPEndPoint? AltEndpoint { get; private set; }
 
     /// <summary>四道闸（丢弃计数经 <see cref="StunGuard.Snapshot"/> 读取，测试与仪表盘消费）。</summary>
     public StunGuard Guard => _guard;
@@ -67,8 +89,21 @@ public sealed class StunService : IAsyncDisposable
         _tcpListener = new TcpListener(IPAddress.Any, tcpPort);
         _tcpListener.Start(64);
         _tcpPort = ((IPEndPoint)_tcpListener.LocalEndpoint!).Port;
+        if (_alt is not null)
+        {
+            // 辅端点（M3-15）：UDP 先绑（配置端口或 0 随机）→ TCP 跟随 UDP 实际端口（单一通告值）
+            _altUdp = new UdpClient(AddressFamily.InterNetwork);
+            _altUdp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            _altUdp.Client.Bind(new IPEndPoint(IPAddress.Any, _alt.Port));
+            var altPort = ((IPEndPoint)_altUdp.Client.LocalEndPoint!).Port;
+            _altTcpListener = new TcpListener(IPAddress.Any, altPort);
+            _altTcpListener.Start(64);
+            AltEndpoint = new IPEndPoint(_alt.Address, altPort);
+            _altLoop = AltReceiveLoopAsync(_cts.Token);
+            _altTcpLoop = TcpAcceptLoopAsync(_altTcpListener, fromAlt: true, _cts.Token);
+        }
         _loop = ReceiveLoopAsync(_cts.Token);
-        _tcpLoop = TcpAcceptLoopAsync(_cts.Token);
+        _tcpLoop = TcpAcceptLoopAsync(_tcpListener, fromAlt: false, _cts.Token);
         return Task.CompletedTask;
     }
 
@@ -80,6 +115,21 @@ public sealed class StunService : IAsyncDisposable
             {
                 var datagram = await _udp.ReceiveAsync(ct).ConfigureAwait(false);
                 await HandleAsync(datagram).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) { /* 停机 */ }
+        catch (ObjectDisposedException) { /* 停机 */ }
+        catch (SocketException) { /* 停机 */ }
+    }
+
+    private async Task AltReceiveLoopAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var datagram = await _altUdp!.ReceiveAsync(ct).ConfigureAwait(false);
+                await HandleAltAsync(datagram).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) { /* 停机 */ }
@@ -100,27 +150,80 @@ public sealed class StunService : IAsyncDisposable
         if (_requireAuth && !TryAuthorize(wire, out auth)) return; // 闸② + DEVICE-AUTH（失败计 reason=auth）
         if (auth is not null && !_guard.TryAcquireDevice(auth.DeviceId)) return; // 闸③ 每设备 QPS
 
-        var response = StunCodec.BuildBindingResponse(
-            wire.AsSpan(8, StunCodec.TransactionIdLen),
-            datagram.RemoteEndPoint.Address,
-            (ushort)datagram.RemoteEndPoint.Port);
-        try { await _udp.SendAsync(response, datagram.RemoteEndPoint).ConfigureAwait(false); }
+        // CHANGE-REQUEST（M3-15）：任一 flag 置位 → 从辅 socket 回包（RFC5780 filtering 测试）；
+        // 未配置 alt 时忽略该属性（单 IP 降级，客户端据 OTHER-ADDRESS 缺席判降级）
+        var fromAlt = _altUdp is not null && StunCodec.ParseChangeRequest(wire) != 0;
+        var response = BuildResponse(
+            wire.AsSpan(8, StunCodec.TransactionIdLen), datagram.RemoteEndPoint, fromAlt);
+        try
+        {
+            var sender = fromAlt ? _altUdp! : _udp;
+            await sender.SendAsync(response, datagram.RemoteEndPoint).ConfigureAwait(false);
+        }
         catch (SocketException) { /* 对端口已换：丢弃 */ }
+    }
+
+    /// <summary>辅监听请求处理（M3-15）：闸+认证与主监听共用（nonce 缓存亦共用），
+    /// 正常从辅回包——OTHER-ADDRESS 相对语义=通告主端点（RFC5780：辅 socket 即"另一端点"视角）。</summary>
+    private async Task HandleAltAsync(UdpReceiveResult datagram)
+    {
+        var wire = datagram.Buffer;
+        if (wire.Length < StunCodec.HeaderLen) return;
+
+        if (!_guard.AdmitArrival()) return;
+        if (!_guard.TryAcquireUdp(datagram.RemoteEndPoint.Address)) return;
+
+        StunCodec.DeviceAuth? auth = null;
+        if (_requireAuth && !TryAuthorize(wire, out auth)) return;
+        if (auth is not null && !_guard.TryAcquireDevice(auth.DeviceId)) return;
+
+        var response = BuildResponse(
+            wire.AsSpan(8, StunCodec.TransactionIdLen), datagram.RemoteEndPoint, fromAlt: true);
+        try { await _altUdp!.SendAsync(response, datagram.RemoteEndPoint).ConfigureAwait(false); }
+        catch (SocketException) { /* 对端口已换：丢弃 */ }
+    }
+
+    /// <summary>Binding 响应组包（M3-15）：alt 未配置=M1 形状（仅 XOR-MAPPED）；
+    /// 配置后携带 RESPONSE-ORIGIN（实际回包源）与 OTHER-ADDRESS（另一端点，相对语义）。</summary>
+    private byte[] BuildResponse(ReadOnlySpan<byte> transactionId, IPEndPoint remote, bool fromAlt)
+    {
+        if (AltEndpoint is null)
+            return StunCodec.BuildBindingResponse(transactionId, remote.Address, (ushort)remote.Port);
+        var primary = AdvertisedPrimary(remote);
+        return StunCodec.BuildBindingResponse(transactionId, remote.Address, (ushort)remote.Port,
+            otherAddress: fromAlt ? primary : AltEndpoint,
+            responseOrigin: fromAlt ? AltEndpoint : primary);
+    }
+
+    /// <summary>主侧通告端点：public_addr（启动期读取）优先；未配置时按对端地址探路由源 IP
+    /// （临时 UDP connect 仅借路由表选源不发包，多网卡/公网直连场景取真实出口地址）。</summary>
+    private IPEndPoint AdvertisedPrimary(IPEndPoint remote)
+        => new(_advertisedIp ?? PickSourceAddress(remote.Address), _port);
+
+    private static IPAddress PickSourceAddress(IPAddress destination)
+    {
+        try
+        {
+            using var probe = new UdpClient(AddressFamily.InterNetwork);
+            probe.Client.Connect(destination, 9); // discard 端口：只选路由不发包
+            return ((IPEndPoint)probe.Client.LocalEndPoint!).Address;
+        }
+        catch (SocketException) { return IPAddress.Any; } // 无路由极端场景：通告值退化（客户端比对自然失败）
     }
 
     // ── STUN over TCP（FR-S-602）：短事务 ─────────────────────────────
 
-    private async Task TcpAcceptLoopAsync(CancellationToken ct)
+    private async Task TcpAcceptLoopAsync(TcpListener listener, bool fromAlt, CancellationToken ct)
     {
         try
         {
             while (!ct.IsCancellationRequested)
             {
                 Socket conn;
-                try { conn = await _tcpListener.AcceptSocketAsync(ct).ConfigureAwait(false); }
+                try { conn = await listener.AcceptSocketAsync(ct).ConfigureAwait(false); }
                 catch (Exception ex) when (ex is SocketException or ObjectDisposedException or OperationCanceledException) { break; }
 
-                _ = Task.Run(() => ServeTcpAsync(conn, ct), ct);
+                _ = Task.Run(() => ServeTcpAsync(conn, fromAlt, ct), ct);
             }
         }
         catch (OperationCanceledException) { /* 停机 */ }
@@ -128,8 +231,9 @@ public sealed class StunService : IAsyncDisposable
 
     /// <summary>单连接短事务：闸④ → 闸① 并发 → 读一事务（3s 超时防慢速连接占坑）→
     /// 闸②+DEVICE-AUTH → 闸③ → 回 Binding Response 即关（02 §3.3）。
-    /// 协议错/对端中断直接断连不回应（无回显放大，02 §3.2 精神）。</summary>
-    private async Task ServeTcpAsync(Socket conn, CancellationToken ct)
+    /// 协议错/对端中断直接断连不回应（无回显放大，02 §3.2 精神）。
+    /// M3-15：连接导向，从哪条 listener 接入就从哪回（忽略 CHANGE-REQUEST），响应携带两属性。</summary>
+    private async Task ServeTcpAsync(Socket conn, bool fromAlt, CancellationToken ct)
     {
         var remote = (IPEndPoint)conn.RemoteEndPoint!;
         if (!_guard.AdmitArrival()) { conn.Dispose(); return; }
@@ -146,8 +250,8 @@ public sealed class StunService : IAsyncDisposable
             if (_requireAuth && !TryAuthorize(wire, out auth)) return;
             if (auth is not null && !_guard.TryAcquireDevice(auth.DeviceId)) return;
 
-            var response = StunCodec.BuildBindingResponse(
-                wire.AsSpan(8, StunCodec.TransactionIdLen), remote.Address, (ushort)remote.Port);
+            var response = BuildResponse(
+                wire.AsSpan(8, StunCodec.TransactionIdLen), remote, fromAlt);
             await StunTcpFraming.WriteAsync(stream, response, txn.Token).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is InvalidDataException or IOException or SocketException
@@ -229,10 +333,15 @@ public sealed class StunService : IAsyncDisposable
         await _cts.CancelAsync().ConfigureAwait(false);
         _udp?.Close();
         if (_tcpListener is not null) _tcpListener.Stop();
+        _altUdp?.Close();
+        if (_altTcpListener is not null) _altTcpListener.Stop();
         try { await _loop.ConfigureAwait(false); } catch { }
         try { await _tcpLoop.ConfigureAwait(false); } catch { }
+        try { await _altLoop.ConfigureAwait(false); } catch { }
+        try { await _altTcpLoop.ConfigureAwait(false); } catch { }
         try { await _sweeper.ConfigureAwait(false); } catch { }
         _udp?.Dispose();
+        _altUdp?.Dispose();
         _cts.Dispose();
     }
 }

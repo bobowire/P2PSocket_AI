@@ -20,6 +20,15 @@ public static class StunCodec
     public const ushort AttrXorMappedAddress = 0x0020;
     public const ushort AttrDeviceAuth = 0x8020;
 
+    // RFC5780 NAT 行为发现属性（M3-15，05 §7.2；值按 RFC 5780 定值回填 02 §3）
+    public const ushort AttrChangeRequest = 0x0003;   // 请求属性：4B flags（服务端从另一端点回包的载体）
+    public const ushort AttrResponseOrigin = 0x802B;  // 响应属性：实际回包源（明文地址 8B）
+    public const ushort AttrOtherAddress = 0x802C;    // 响应属性：另一端点（明文地址 8B，RFC3489 CHANGED-ADDRESS 同义）
+
+    /// <summary>CHANGE-REQUEST flags：changeIP / changePort（任一置位 → 服务端从辅端点回包）。</summary>
+    public const ushort ChangeIpFlag = 0x04;
+    public const ushort ChangePortFlag = 0x02;
+
     public const int DeviceAuthValueLen = 16 + 16 + 8 + Mac.HashLen; // deviceId|nonce|ts|hmac = 72B
     private const int MacHashLen = Mac.HashLen;
 
@@ -28,9 +37,10 @@ public static class StunCodec
 
     // ── 组包 ─────────────────────────────────────────────────────────────
 
-    /// <summary>组 Binding Request，携带 DEVICE-AUTH（02 §3.2：HMAC(deviceSecret, deviceId|nonce|ts|transactionId)）。</summary>
+    /// <summary>组 Binding Request，携带 DEVICE-AUTH（02 §3.2：HMAC(deviceSecret, deviceId|nonce|ts|transactionId)）。
+    /// changeFlags 非 null 时追加 CHANGE-REQUEST 属性（M3-15 RFC5780 filtering 测试；HMAC 输入不含属性区，认证不受影响）。</summary>
     public static byte[] BuildBindingRequest(ReadOnlySpan<byte> transactionId, Guid deviceId,
-        ReadOnlySpan<byte> deviceSecret, ulong tsMs, ReadOnlySpan<byte> nonce16)
+        ReadOnlySpan<byte> deviceSecret, ulong tsMs, ReadOnlySpan<byte> nonce16, ushort? changeFlags = null)
     {
         if (transactionId.Length != TransactionIdLen) throw new ArgumentException("事务 ID 须 12B");
         if (nonce16.Length != 16) throw new ArgumentException("nonce 须 16B");
@@ -46,29 +56,56 @@ public static class StunCodec
         transactionId.CopyTo(macInput.AsSpan(40));
         Mac.HmacSha256(deviceSecret, macInput).CopyTo(auth.AsSpan(40));
 
-        var wire = new byte[HeaderLen + 4 + Pad4(DeviceAuthValueLen)];
-        WriteHeader(wire, BindingRequest, transactionId, attrLen: 4 + DeviceAuthValueLen);
+        var changeLen = changeFlags is null ? 0 : 4 + 4; // 属性头 4B + flags 4B（定长无补位）
+        var wire = new byte[HeaderLen + 4 + Pad4(DeviceAuthValueLen) + changeLen];
+        WriteHeader(wire, BindingRequest, transactionId, attrLen: 4 + DeviceAuthValueLen + changeLen);
         WriteAttrHeader(wire.AsSpan(HeaderLen), AttrDeviceAuth, DeviceAuthValueLen);
         auth.CopyTo(wire.AsSpan(HeaderLen + 4));
+        if (changeFlags is not null)
+        {
+            var offset = HeaderLen + 4 + Pad4(DeviceAuthValueLen);
+            WriteAttrHeader(wire.AsSpan(offset), AttrChangeRequest, 4);
+            BinaryPrimitives.WriteUInt32BigEndian(wire.AsSpan(offset + 4, 4), changeFlags.Value);
+        }
         return wire;
     }
 
-    /// <summary>组 Binding Success Response：仅含 XOR-MAPPED-ADDRESS。</summary>
-    public static byte[] BuildBindingResponse(ReadOnlySpan<byte> transactionId, IPAddress mapped, ushort port)
+    /// <summary>组 Binding Success Response：XOR-MAPPED-ADDRESS + 可选 RFC5780 属性（M3-15）——
+    /// otherAddress=OTHER-ADDRESS（另一端点）、responseOrigin=RESPONSE-ORIGIN（本包实际回包源）；均缺省时输出与 M1 形状逐字节一致。</summary>
+    public static byte[] BuildBindingResponse(ReadOnlySpan<byte> transactionId, IPAddress mapped, ushort port,
+        IPEndPoint? otherAddress = null, IPEndPoint? responseOrigin = null)
     {
         var value = EncodeXorMappedAddress(mapped, port);
-        var wire = new byte[HeaderLen + 4 + Pad4(value.Length)];
-        WriteHeader(wire, BindingSuccess, transactionId, attrLen: 4 + value.Length);
-        WriteAttrHeader(wire.AsSpan(HeaderLen), AttrXorMappedAddress, (ushort)value.Length);
-        value.CopyTo(wire.AsSpan(HeaderLen + 4));
+        var other = otherAddress is null ? null : EncodePlainAddress(otherAddress.Address, (ushort)otherAddress.Port);
+        var origin = responseOrigin is null ? null : EncodePlainAddress(responseOrigin.Address, (ushort)responseOrigin.Port);
+        var attrLen = 4 + value.Length + (other is null ? 0 : 4 + other.Length) + (origin is null ? 0 : 4 + origin.Length);
+        var wire = new byte[HeaderLen + attrLen];
+        WriteHeader(wire, BindingSuccess, transactionId, attrLen);
+        var offset = HeaderLen;
+        WriteAttrHeader(wire.AsSpan(offset), AttrXorMappedAddress, (ushort)value.Length);
+        value.CopyTo(wire.AsSpan(offset + 4));
+        offset += 4 + value.Length;
+        if (other is not null)
+        {
+            WriteAttrHeader(wire.AsSpan(offset), AttrOtherAddress, (ushort)other.Length);
+            other.CopyTo(wire.AsSpan(offset + 4));
+            offset += 4 + other.Length;
+        }
+        if (origin is not null)
+        {
+            WriteAttrHeader(wire.AsSpan(offset), AttrResponseOrigin, (ushort)origin.Length);
+            origin.CopyTo(wire.AsSpan(offset + 4));
+        }
         return wire;
     }
 
     // ── 解包 ─────────────────────────────────────────────────────────────
 
-    public sealed record BindingResponse(byte[] TransactionId, IPEndPoint Mapped);
+    public sealed record BindingResponse(byte[] TransactionId, IPEndPoint Mapped,
+        IPEndPoint? OtherAddress = null, IPEndPoint? ResponseOrigin = null);
 
-    /// <summary>解析 Success Response（客户端侧）：校验 magic/type，取首个 XOR-MAPPED-ADDRESS。</summary>
+    /// <summary>解析 Success Response（客户端侧）：校验 magic/type，取首个 XOR-MAPPED-ADDRESS 与可选 RFC5780 属性
+    /// （OTHER-ADDRESS/RESPONSE-ORIGIN——缺失/畸形属性容忍为 null，不影响主字段）。</summary>
     public static bool TryParseBindingResponse(ReadOnlySpan<byte> wire, out BindingResponse? response)
     {
         response = null;
@@ -83,8 +120,22 @@ public static class StunCodec
         var addr = new byte[4]; // 逐字节与 cookie 异或后按网络序构造（IPAddress(uint) 是小端语义，不可用）
         for (var i = 0; i < 4; i++)
             addr[i] = (byte)(value[4 + i] ^ ((MagicCookie >> (24 - 8 * i)) & 0xFF));
-        response = new BindingResponse(transactionId, new IPEndPoint(new IPAddress(addr), port));
+        IPEndPoint? other = null, origin = null;
+        if (TryGetAttribute(wire, AttrOtherAddress, out var oa) && TryDecodePlainAddress(oa, out var oep))
+            other = oep;
+        if (TryGetAttribute(wire, AttrResponseOrigin, out var ro) && TryDecodePlainAddress(ro, out var rep))
+            origin = rep;
+        response = new BindingResponse(transactionId, new IPEndPoint(new IPAddress(addr), port), other, origin);
         return true;
+    }
+
+    /// <summary>提取 CHANGE-REQUEST flags（服务端侧，M3-15）：缺属性/畸形=0（按普通 Binding 处理）。
+    /// 任一 flag 置位即要求从另一端点回包（RFC5780；单"另一端点"实现不区分 IP/Port 方向）。</summary>
+    public static ushort ParseChangeRequest(ReadOnlySpan<byte> wire)
+    {
+        return TryGetAttribute(wire, AttrChangeRequest, out var value) && value.Length == 4
+            ? (ushort)BinaryPrimitives.ReadUInt32BigEndian(value)
+            : (ushort)0;
     }
 
     public sealed record DeviceAuth(Guid DeviceId, byte[] Nonce, ulong TsMs, byte[] Hmac, byte[] TransactionId);
@@ -135,6 +186,29 @@ public static class StunCodec
         for (var i = 0; i < 4; i++)
             value[4 + i] = (byte)(addrBytes[i] ^ ((MagicCookie >> (24 - 8 * i)) & 0xFF));
         return value;
+    }
+
+    /// <summary>明文地址编码（RFC5780 RESPONSE-ORIGIN/OTHER-ADDRESS，MAPPED-ADDRESS 同构）：[0]=0 保留 + [1]=family 0x01 + port 2B 大端 + addr 4B。</summary>
+    private static byte[] EncodePlainAddress(IPAddress address, ushort port)
+    {
+        var addrBytes = address.GetAddressBytes();
+        if (addrBytes.Length != 4) throw new ArgumentException("M1 仅支持 IPv4");
+        var value = new byte[8];
+        value[1] = 0x01;
+        BinaryPrimitives.WriteUInt16BigEndian(value.AsSpan(2, 2), port);
+        addrBytes.CopyTo(value.AsSpan(4, 4));
+        return value;
+    }
+
+    /// <summary>明文地址解码（仅 IPv4；畸形返回 false 且 out null——容忍解析）。</summary>
+    private static bool TryDecodePlainAddress(ReadOnlySpan<byte> value, out IPEndPoint? endpoint)
+    {
+        endpoint = null;
+        if (value.Length != 8 || value[0] != 0 || value[1] != 0x01)
+            return false;
+        var port = BinaryPrimitives.ReadUInt16BigEndian(value.Slice(2, 2));
+        endpoint = new IPEndPoint(new IPAddress(value.Slice(4, 4).ToArray()), port);
+        return true;
     }
 
     private static byte[] BuildAuthMacInput(ReadOnlySpan<byte> authValue72, ReadOnlySpan<byte> transactionId)

@@ -4,6 +4,7 @@
 // M2-27 同步：分组全套（0x42 聚合形态+审批闭环）、lan-segments、logs（过滤/分页/导出）、
 // change-password；一并补齐 M2-15/23/26 漂移端点（reset-remote-code/peers/upgrade）。
 import { http, HttpResponse } from "msw";
+import type { StunTestView } from "@p2p/ui-shared";
 
 export interface MockMapping {
   mappingId: string;
@@ -76,6 +77,7 @@ export interface MockState {
     keepaliveSec: number;
     reconnect: { minSec: number; maxSec: number };
   };
+  stunTestView: StunTestView; // M3-15：stun-test 判型结果（POST 即回固定态；走查用例注入降级形态）
 }
 
 export function createDefaultState(): MockState {
@@ -194,6 +196,16 @@ export function createDefaultState(): MockState {
       punchConcurrency: 3,
       keepaliveSec: 20,
       reconnect: { minSec: 1, maxSec: 30 },
+    },
+    stunTestView: {
+      publicEndpoint: "203.0.113.10:51234",
+      udpMapping: "adm_or_apdm",
+      udpFiltering: "adf_or_apdf",
+      tcpSequential: true,
+      tcpPortDependent: null,
+      downgraded: false,
+      notes: ["TCP 依赖判定未执行：响应未通告辅端点（演示态注记）"],
+      durationMs: 4321,
     },
   };
 }
@@ -438,6 +450,8 @@ export function createHandlers(state: MockState = createDefaultState()) {
     // ── 2.6 诊断 ─────────────────────────────────────────────
     http.get("*/api/diagnostics", () =>
       ok({ punchQueueDepth: 0, currentPunchPeer: null })),
+    // M3-15 stun-test 判型（05 §7.2）：mock 固定回演示态（真实实现为多次 Binding 实测）
+    http.post("*/api/diagnostics/stun-test", () => ok(state.stunTestView)),
 
     // ── M2-15 远程码重置（04 §2.1）───────────────────────────
     http.post("*/api/device/reset-remote-code", () => {

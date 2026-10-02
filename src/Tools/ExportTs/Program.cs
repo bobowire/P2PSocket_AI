@@ -156,6 +156,7 @@ internal static partial class TsGen // 生成逻辑集中（顶层语句宿主�
         typeof(StatsSummaryView),
         typeof(P2P.Client.Nic.SubnetConflictItem), // M3-13 网段冲突（04 §2.1 /api/system/state.conflict，FR-C-204）
         typeof(P2P.Client.Nic.SubnetConflictState),
+        typeof(P2P.Client.Diagnostics.StunTestView), // M3-15 stun-test 判型（04 §2.6 /api/diagnostics/stun-test，05 §7.2）
     ];
 
     internal static string EmitPathsTs(List<(string Pattern, string Methods)> endpoints,

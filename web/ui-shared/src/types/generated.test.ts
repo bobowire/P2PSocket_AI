@@ -46,6 +46,7 @@ const DOCUMENTED: ReadonlyArray<{ path: string; methods: readonly string[] }> = 
   { path: "/api/upgrade/info", methods: ["GET"] },
   { path: "/api/settings", methods: ["GET", "PUT"] },
   { path: "/api/diagnostics", methods: ["GET"] },
+  { path: "/api/diagnostics/stun-test", methods: ["POST"] }, // M3-15（05 §7.2）
   { path: "/ws/status", methods: ["WS"] },
 ];
 
@@ -102,6 +103,7 @@ describe("export-ts 生成物", () => {
       "interface SubnetConflictState", // M3-13
       "interface SubnetConflictItem",
       "SubnetConflictEvent",
+      "interface StunTestView", // M3-15
     ])
       expect(dts).toContain(snippet);
   });

@@ -96,4 +96,87 @@ public class StunCodecTests
         Assert.Equal("203.0.113.9", parsed!.Mapped.Address.ToString());
         Assert.Equal(40001, parsed.Mapped.Port);
     }
+
+    // ── M3-15 RFC5780 属性（CHANGE-REQUEST/RESPONSE-ORIGIN/OTHER-ADDRESS，05 §7.2）──
+
+    [Fact]
+    public void ChangeRequest_EncodeAndParse_RoundTrip()
+    {
+        var wire = StunCodec.BuildBindingRequest(StunCodec.NewTransactionId(), DeviceId,
+            RandomGenerator.Bytes(32), 100, RandomGenerator.Bytes(16),
+            changeFlags: StunCodec.ChangeIpFlag | StunCodec.ChangePortFlag);
+
+        // 属性出现在 DEVICE-AUTH 之后：HeaderLen + 4 + Pad4(72) = 96 处，TLV 头 00 03 00 04 + flags 大端
+        Assert.Equal(0x00, wire[96]);
+        Assert.Equal(0x03, wire[97]);
+        Assert.Equal(StunCodec.ChangeIpFlag | StunCodec.ChangePortFlag, StunCodec.ParseChangeRequest(wire));
+    }
+
+    [Fact]
+    public void ChangeRequest_Absent_ParsesAsZero()
+    {
+        var wire = StunCodec.BuildBindingRequest(StunCodec.NewTransactionId(), DeviceId,
+            RandomGenerator.Bytes(32), 100, RandomGenerator.Bytes(16));
+        Assert.Equal((ushort)0, StunCodec.ParseChangeRequest(wire));
+    }
+
+    [Fact]
+    public void BindingRequest_WithChange_AuthUnchanged()
+    {
+        // HMAC 输入=deviceId|nonce|ts|transactionId（02 §3.2），不含属性区——追加 CHANGE-REQUEST 不破坏认证
+        var secret = RandomGenerator.Bytes(32);
+        var wire = StunCodec.BuildBindingRequest(StunCodec.NewTransactionId(), DeviceId, secret, 100,
+            RandomGenerator.Bytes(16), changeFlags: StunCodec.ChangePortFlag);
+
+        Assert.True(StunCodec.TryParseDeviceAuth(wire, id => id == DeviceId ? secret : null));
+        Assert.Equal(StunCodec.ChangePortFlag, StunCodec.ParseChangeRequest(wire));
+    }
+
+    [Fact]
+    public void Response_WithRfc5780Attributes_RoundTrip()
+    {
+        var txn = StunCodec.NewTransactionId();
+        var other = new IPEndPoint(IPAddress.Parse("198.51.100.7"), 3479);
+        var origin = new IPEndPoint(IPAddress.Parse("198.51.100.6"), 3478);
+        var wire = StunCodec.BuildBindingResponse(txn, IPAddress.Parse("203.0.113.9"), 40001,
+            otherAddress: other, responseOrigin: origin);
+
+        Assert.True(StunCodec.TryParseBindingResponse(wire, out var parsed));
+        Assert.Equal(other, parsed!.OtherAddress);
+        Assert.Equal(origin, parsed.ResponseOrigin);
+        Assert.Equal(40001, parsed.Mapped.Port); // 主字段不受新属性影响
+    }
+
+    [Fact]
+    public void Response_WithoutAttributes_NullFields_ByteIdentical()
+    {
+        // 默认参数=零属性：输出与 M1 形状逐字节一致（向后兼容，单地址世界零回归）
+        var txn = StunCodec.NewTransactionId();
+        var legacy = StunCodec.BuildBindingResponse(txn, IPAddress.Parse("203.0.113.9"), 40001);
+        var @default = StunCodec.BuildBindingResponse(txn, IPAddress.Parse("203.0.113.9"), 40001,
+            otherAddress: null, responseOrigin: null);
+
+        Assert.Equal(legacy, @default);
+        Assert.Equal(32, legacy.Length); // 20 头 + 4 属性头 + 8 XOR-MAPPED
+        Assert.True(StunCodec.TryParseBindingResponse(legacy, out var parsed));
+        Assert.Null(parsed!.OtherAddress);
+        Assert.Null(parsed.ResponseOrigin);
+    }
+
+    [Fact]
+    public void Response_MalformedPlainAttribute_ToleratedAsNull()
+    {
+        // 畸形 OTHER-ADDRESS（长度 4 非 8）：容忍为 null，不影响 XOR-MAPPED 解析
+        var txn = StunCodec.NewTransactionId();
+        var wire = StunCodec.BuildBindingResponse(txn, IPAddress.Parse("203.0.113.9"), 40001);
+        var extended = new byte[wire.Length + 4 + 4]; // 追加 TLV：type=OTHER len=4 value=垃圾
+        wire.CopyTo(extended, 0);
+        extended[3] = (byte)(extended[3] + 8); // msgLen 12+8=20（大端低位字节）
+        extended[32] = 0x80; extended[33] = 0x2C; extended[34] = 0x00; extended[35] = 0x04;
+        extended[36] = 0x00; extended[37] = 0x01; extended[38] = 0xFF; extended[39] = 0xFF;
+
+        Assert.True(StunCodec.TryParseBindingResponse(extended, out var parsed));
+        Assert.Null(parsed!.OtherAddress);
+        Assert.Equal(40001, parsed.Mapped.Port);
+    }
 }

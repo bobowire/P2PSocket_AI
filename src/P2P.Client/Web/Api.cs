@@ -3,6 +3,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using P2P.Client.Control;
+using P2P.Client.Diagnostics;
 using P2P.Client.Mapping;
 using P2P.Core.Protocol;
 
@@ -32,6 +33,7 @@ internal static class Api
         code = e switch
         {
             ApiException ae => ae.Code,
+            StunTestException se => se.Code, // stun-test 判型（M3-15：未注册 1002/探测失败 1001）
             MappingException me => me.Code,
             ControlErrorException ce => ce.Code,
             PassiveModeException => ErrorCode.ForbiddenPassive,

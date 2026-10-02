@@ -9,6 +9,7 @@ using System.Net.Sockets;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using P2P.Client.Control;
+using P2P.Client.Diagnostics;
 using P2P.Client.Mapping;
 using P2P.Client.Nic;
 using P2P.Client.Punch;
@@ -82,6 +83,7 @@ public sealed class ClientRuntime : IAsyncDisposable
     private MappingSyncService _sync = null!;
     private ClientRegistrationService _wizard = null!;
     private SubnetConflictDetector _subnetConflicts = null!;
+    private StunTester _stunTester = null!;
     private LocalApiServices _api = null!;
     private WebApplication _app = null!;
     private NicHealthMonitor? _nicMonitor;
@@ -159,8 +161,16 @@ public sealed class ClientRuntime : IAsyncDisposable
         // 网段冲突检测（M3-13，FR-C-204）：枚举源=平台快照（测试缝可注入替身）
         _subnetConflicts = new SubnetConflictDetector(_options.SubnetSurveyOverride ?? P2P.Nic.SubnetSurvey.Snapshot);
         _subnetConflicts.Log += m => Log?.Invoke(m);
+        // stun-test 判型（M3-15，05 §7.2）：端点=TD-07 派生（UDP/TCP 同宿主同端口 3478），凭据/端点
+        // 委托惰性取——装配时设备可能未注册（调用期 state 已就绪）；ClockSync 未校准 offset=0 可用（OQ-12 ±120s 窗）
+        _stunTester = new StunTester(
+            () => ResolveStunEndpoint(_control.ServerAddrs.FirstOrDefault()),
+            () => ResolveStunEndpoint(_control.ServerAddrs.FirstOrDefault()),
+            () => _state.State.DeviceId is { } id && _state.State.DeviceSecret is { } secret
+                ? new StunCredentials(id, secret, _control.Clock)
+                : null);
         _api = new LocalApiServices(_control, _state, _settings, _peers, _wizard, _sync, _scheduler,
-            _lanSegments, Path.Combine(_options.BaseDir, "logs"), _subnetConflicts); // M2-27：白名单镜像 + 日志目录同源
+            _lanSegments, Path.Combine(_options.BaseDir, "logs"), _subnetConflicts, _stunTester); // M2-27：白名单镜像 + 日志目录同源
         _control.ServerPush += OnServerPush; // 0x71 PunchInvite → 被邀请方打洞（02 §5.1③）
 
         // ③ 本地 Web（两种分支都启：向导也经它完成注册）

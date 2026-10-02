@@ -1,5 +1,6 @@
 // M1-19 服务端宿主（08 §5.1/§6、01 §3.1、NFR-35）：
 // Generic Host 单进程多服务装配 + 启动配置校验 + --console/--reset-admin + Serilog（控制台+滚动文件）。
+using System.Net;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
@@ -147,7 +148,9 @@ builder.Services.AddSingleton(sp => new ControlServer(
     sp.GetRequiredService<DeviceRegistry>(),
     sp.GetRequiredService<ControlMessageRouter>().DispatchAsync));
 // stun_auth 与三速率键是库开关（03 §2.8）：首次解析发生在 ServerHostService.StartAsync 步骤③
-// （晚于数据库初始化，键必然存在；stun_rate_per_ip/per_device/circuit_pps 为四道闸 TD-18 参数）
+// （晚于数据库初始化，键必然存在；stun_rate_per_ip/per_device/circuit_pps 为四道闸 TD-18 参数）；
+// stun_alt_addr（M3-15）：STUN 辅端点（RFC5780 判型，空=单 IP 降级）——StunService ctor 内
+// 兼读 public_addr 作主侧通告 IP（M2-36 同语义）
 builder.Services.AddSingleton(sp =>
 {
     var factory = sp.GetRequiredService<IDbContextFactory<AppDbContext>>();
@@ -158,7 +161,7 @@ builder.Services.AddSingleton(sp =>
         PerIpPps = cfg.GetInt("stun_rate_per_ip"),
         PerDeviceQps = cfg.GetInt("stun_rate_per_device"),
         CircuitPps = cfg.GetInt("stun_circuit_pps"),
-    });
+    }, alt: ParseAltEndpoint(cfg.Get("stun_alt_addr")));
 });
 builder.Services.AddHostedService<ServerHostService>();
 // M3-01/02 服务端 Web 后台（04 §3、D11 仅本机监听）：注册于 ServerHostService 之后 ⇒
@@ -228,4 +231,16 @@ static async Task<int> AdminOperationAsync(ServerOptions options, string op, str
     }
     Console.WriteLine($"已执行 {op} {arg}（运行中服务器的踢线/降级将在 ~30s 心跳窗口内生效，读侧拒绝即时生效）。");
     return 0;
+}
+
+/// <summary>stun_alt_addr 解析（M3-15，05 §7.2）：空=null（单 IP 降级）；IP:PORT（端口 0=UDP 随机分配）。
+/// 域名不支持——STUN 地址属性承载 IP，通告须确定地址（与 public_addr 域名容忍口径不同，启动即拒防静默错配）。</summary>
+static IPEndPoint? ParseAltEndpoint(string? value)
+{
+    if (string.IsNullOrWhiteSpace(value)) return null;
+    var idx = value.LastIndexOf(':');
+    if (idx <= 0 || !IPAddress.TryParse(value[..idx], out var ip)
+        || !int.TryParse(value[(idx + 1)..], out var port) || port is < 0 or > 65535)
+        throw new InvalidOperationException($"stun_alt_addr 非法：\"{value}\"（须为空或 IP:PORT，NFR-35 启动校验）");
+    return new IPEndPoint(ip, port);
 }

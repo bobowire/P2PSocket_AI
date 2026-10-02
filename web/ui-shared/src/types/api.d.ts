@@ -1,5 +1,5 @@
 // 本文件由 export-ts 反射生成（06 §5、08 §2③），禁止手改。
-// 源：P2P.Client 展示 DTO + WsEventNames 常量（src/Tools/ExportTs @ 2026-10-02T00:07:08Z）。
+// 源：P2P.Client 展示 DTO + WsEventNames 常量（src/Tools/ExportTs @ 2026-10-02T07:28:41Z）。
 
 /** 响应包裹（04 §0：code=0 成功；!=0 见错误码表 04 §5）。 */
 export interface ApiEnvelope<T> {
@@ -157,6 +157,18 @@ export interface SubnetConflictItem {
 export interface SubnetConflictState {
   subnet: string;
   items: SubnetConflictItem[];
+}
+
+
+export interface StunTestView {
+  publicEndpoint: string;
+  udpMapping: string | null;
+  udpFiltering: string | null;
+  tcpSequential: boolean | null;
+  tcpPortDependent: boolean | null;
+  downgraded: boolean;
+  notes: string[];
+  durationMs: number;
 }
 
 

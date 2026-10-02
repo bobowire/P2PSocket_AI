@@ -27,6 +27,14 @@ public static class StunTcpProber
     public static async Task<IPEndPoint> ProbeAsync(
         Socket socket, IPEndPoint stunServer, Guid deviceId, ReadOnlyMemory<byte> deviceSecret,
         ClockSync clock, TimeProvider? time = null, TimeSpan? timeout = null, CancellationToken ct = default)
+        => (await ProbeFullAsync(socket, stunServer, deviceId, deviceSecret, clock, time, timeout, ct)
+            .ConfigureAwait(false)).Mapped;
+
+    /// <summary>完整响应版（M3-15 stun-test）：返回含 RFC5780 属性（OTHER-ADDRESS/RESPONSE-ORIGIN）
+    /// 的整包解析——判型器数据源；打洞路径继续用 <see cref="ProbeAsync"/>（仅取映射端点）。</summary>
+    public static async Task<StunCodec.BindingResponse> ProbeFullAsync(
+        Socket socket, IPEndPoint stunServer, Guid deviceId, ReadOnlyMemory<byte> deviceSecret,
+        ClockSync clock, TimeProvider? time = null, TimeSpan? timeout = null, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(socket);
         ArgumentNullException.ThrowIfNull(stunServer);
@@ -52,7 +60,7 @@ public static class StunTcpProber
             if (!StunCodec.TryParseBindingResponse(wire, out var response)
                 || !response!.TransactionId.AsSpan().SequenceEqual(tid))
                 throw new IOException($"STUN-TCP 响应无效：{stunServer}");
-            return response.Mapped;
+            return response;
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {

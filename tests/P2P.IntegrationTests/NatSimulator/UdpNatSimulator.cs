@@ -40,6 +40,16 @@ public sealed class UdpNatOptions
     /// 控制服务与本模拟器同宿主时须置 3478 才能被真实派生逻辑命中（M1-35 A-3）。</summary>
     public int StunPort { get; init; }
 
+    /// <summary>M3-15 双地址世界：辅上游（真实 StunService 的 alt 端点）。null=单地址世界——
+    /// 响应不带 RFC5780 属性、无辅监听，行为与既往逐字节一致。</summary>
+    public IPEndPoint? AltUpstream { get; init; }
+
+    /// <summary>辅监听公网地址（须与主地址不同 IP——回环别名构造异 IP 世界，EIF/ADF 才可细分）。</summary>
+    public IPAddress AltPublicAddress { get; init; } = IPAddress.Parse("127.0.0.2");
+
+    /// <summary>辅 STUN 监听端口（0=随机）。</summary>
+    public int AltStunPort { get; init; }
+
     /// <summary>模拟公网端口段下界（08 §4：该段需从 OS 临时端口排除）。</summary>
     public int ExternalPortBase { get; init; } = 20000;
 
@@ -79,11 +89,15 @@ public sealed class UdpNatSimulator : IAsyncDisposable
     private readonly List<Task> _loops = [];
     private readonly object _lock = new();
     private UdpClient _stunListener = null!;
+    private UdpClient? _altStunListener;
     private CancellationTokenSource _cts = null!;
     private int _nextPort;
 
     /// <summary>STUN 监听地址（客户端配置的"STUN 服务器"，测试注入）。</summary>
     public IPEndPoint StunEndpoint { get; private set; } = null!;
+
+    /// <summary>辅 STUN 监听地址（M3-15 双地址世界；AltUpstream 未配置=null）。</summary>
+    public IPEndPoint? AltStunEndpoint { get; private set; }
 
     public UdpNatSimulator(UdpNatOptions? options = null)
     {
@@ -102,13 +116,20 @@ public sealed class UdpNatSimulator : IAsyncDisposable
         }
     }
 
-    /// <summary>绑定 STUN 监听（客户端在此之后方可探测）。</summary>
+    /// <summary>绑定 STUN 监听（客户端在此之后方可探测）；双地址世界同时绑辅监听。</summary>
     public Task StartAsync()
     {
         _cts = new CancellationTokenSource();
         _stunListener = new UdpClient(new IPEndPoint(_options.PublicAddress, _options.StunPort));
         StunEndpoint = (IPEndPoint)_stunListener.Client.LocalEndPoint!;
-        _loops.Add(Task.Run(() => StunLoopAsync(_cts.Token)));
+        if (_options.AltUpstream is not null)
+        {
+            _altStunListener = new UdpClient(new IPEndPoint(_options.AltPublicAddress, _options.AltStunPort));
+            AltStunEndpoint = (IPEndPoint)_altStunListener.Client.LocalEndPoint!;
+        }
+        _loops.Add(Task.Run(() => StunLoopAsync(_stunListener, StunEndpoint, _options.Upstream, _cts.Token)));
+        if (_altStunListener is not null)
+            _loops.Add(Task.Run(() => StunLoopAsync(_altStunListener, AltStunEndpoint!, _options.AltUpstream!, _cts.Token)));
         return Task.CompletedTask;
     }
 
@@ -137,13 +158,14 @@ public sealed class UdpNatSimulator : IAsyncDisposable
 
     // ── 主循环 ─────────────────────────────────────────────────────────
 
-    /// <summary>STUN 监听循环：注册客户端的请求经其映射公网套接字转发上游，并挂起事务等改写回程。</summary>
-    private async Task StunLoopAsync(CancellationToken ct)
+    /// <summary>STUN 监听循环（主/辅共用）：注册客户端的请求经其映射公网套接字转发对应上游，
+    /// 并挂起事务等改写回程（localEp=该监听端点——映射目的地与 contacted 标记据此区分主辅）。</summary>
+    private async Task StunLoopAsync(UdpClient listener, IPEndPoint localEp, IPEndPoint upstream, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
             UdpReceiveResult r;
-            try { r = await _stunListener.ReceiveAsync(ct); }
+            try { r = await listener.ReceiveAsync(ct); }
             catch (Exception ex) when (ex is SocketException or ObjectDisposedException or OperationCanceledException) { break; }
 
             Mapping mapping;
@@ -152,21 +174,22 @@ public sealed class UdpNatSimulator : IAsyncDisposable
                 if (!_clients.TryGetValue(r.RemoteEndPoint.Address, out var nat)) continue; // 未注册来源不代理
                 if (nat.Mode == UdpNatMode.UdpBlocked) // 丢弃 UDP 出站：不建映射、不转发（M2-30）
                 {
-                    _blocked.Add(new BlockedRecord(nat.Name, StunEndpoint));
+                    _blocked.Add(new BlockedRecord(nat.Name, localEp));
                     continue;
                 }
-                mapping = UseMapping(nat, r.RemoteEndPoint, StunEndpoint);
+                mapping = UseMapping(nat, r.RemoteEndPoint, localEp);
                 if (TryGetHeaderTransactionId(r.Buffer, out var tid))
                 {
                     PurgeExpiredPendingNoLock();
                     _pending[Convert.ToHexString(tid)] = new PendingStun(r.RemoteEndPoint, mapping.Public);
                 }
             }
-            mapping.Socket.Send(r.Buffer, r.Buffer.Length, _options.Upstream);
+            mapping.Socket.Send(r.Buffer, r.Buffer.Length, upstream);
         }
     }
 
-    /// <summary>公网套接字循环：①上游 STUN 响应按 tid 改写回程；②注册/外部来源入站按接收方模式过滤后投递。</summary>
+    /// <summary>公网套接字循环：①上游 STUN 响应按 tid 改写回程（M3-15 双地址：过接收方 NAT 入站
+    /// 过滤+RFC5780 属性改写+回程监听切换）；②注册/外部来源入站按接收方模式过滤后投递。</summary>
     private async Task PublicLoopAsync(Mapping m, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
@@ -179,14 +202,29 @@ public sealed class UdpNatSimulator : IAsyncDisposable
             UdpClient deliverFrom;
             lock (_lock)
             {
-                // ① 上游 STUN 响应：改写 XOR-MAPPED-ADDRESS 为分配的公网身份后经 STUN 监听回客户端
-                //    （客户端请求发往 StunEndpoint，回程源须一致；tid 匹配使 PTP 帧/杂包不可能误中）
+                // ① 上游 STUN 响应：改写 XOR-MAPPED-ADDRESS 为分配的公网身份后回客户端。
+                //    回程源=该事务请求所发往的模拟端点（fromAlt 按上游响应来源判定）；
+                //    tid 匹配使 PTP 帧/杂包不可能误中。
+                //    M3-15 回程过滤：正常回包（源=事务目的地）全模式放行（向后兼容——单地址世界
+                //    行为不变）；change 回包（源=sim 辅，RFC5780 filtering 测试）按接收方模式矩阵
+                //    判（FullCone 收 → EIF、Restricted 族丢 → ADF·APDF、symmetric 恒丢）。
                 if (StunCodec.TryParseBindingResponse(r.Buffer, out var resp) &&
                     _pending.Remove(Convert.ToHexString(resp!.TransactionId), out var pend))
                 {
+                    var fromAlt = AltStunEndpoint is not null && r.RemoteEndPoint.Equals(_options.AltUpstream);
+                    var simSource = fromAlt ? AltStunEndpoint! : StunEndpoint;
+                    if (!IsInboundAllowed(m, simSource))
+                    {
+                        _filtered.Add(new FilterRecord(m.Owner.Name, fromAlt ? "stun-alt" : "stun", simSource, m.Public));
+                        continue;
+                    }
+                    // RFC5780 属性（相对语义）：主回包通告辅端点 / 辅回包通告主端点；单地址世界不带属性
+                    var other = fromAlt ? StunEndpoint : AltStunEndpoint;
                     var rewritten = StunCodec.BuildBindingResponse(
-                        resp.TransactionId, pend.Public.Address, (ushort)pend.Public.Port);
-                    _stunListener.Send(rewritten, rewritten.Length, pend.ClientInternal);
+                        resp.TransactionId, pend.Public.Address, (ushort)pend.Public.Port,
+                        otherAddress: other, responseOrigin: other is null ? null : simSource);
+                    var replyListener = fromAlt ? _altStunListener! : _stunListener;
+                    replyListener.Send(rewritten, rewritten.Length, pend.ClientInternal);
                     continue;
                 }
 
@@ -303,6 +341,7 @@ public sealed class UdpNatSimulator : IAsyncDisposable
         if (_cts is null) return; // StartAsync 未调用
         _cts.Cancel();
         _stunListener.Dispose();
+        _altStunListener?.Dispose();
         lock (_lock)
             foreach (var m in _clients.Values.SelectMany(c => c.Mappings))
                 m.Socket.Dispose();

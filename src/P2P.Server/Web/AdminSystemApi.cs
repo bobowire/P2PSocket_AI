@@ -28,6 +28,7 @@ public sealed class AdminSystemApi(
             "须为 0~2147483647（字节/秒，0=不限）"),
         ["public_addr"] = (IsValidHost, "须为空（本地侧派生）或 IP/域名"),
         ["stun_auth"] = (v => v is "0" or "1", "须为 0|1"),
+        ["stun_alt_addr"] = (IsValidAltAddr, "须为空（单 IP 降级）或 IP:PORT（端口 0~65535，0=随机分配）"),
         ["virtual_subnet"] = (v => LanSegmentService.NormalizeCidr(v) is not null,
             "须为合法 CIDR（如 100.64.0.0/24）"),
         ["audit_retention_days"] = (v => int.TryParse(v, out var n) && n is >= 1 and <= 3650, "须为 1~3650（天）"),
@@ -49,10 +50,10 @@ public sealed class AdminSystemApi(
     };
 
     /// <summary>启动期一次性读取的键（restartRequired=true）：public_addr/stun_* 在服务构造时读
-    /// （M2-36/M2-06），log_level 在 Serilog 装配时读——改动须重启方生效；其余键运行期现读即时生效
+    /// （M2-36/M2-06/M3-15），log_level 在 Serilog 装配时读——改动须重启方生效；其余键运行期现读即时生效
     /// （registration_open/max_devices/default_join_policy/update_*/保留天数每轮现读）。</summary>
     private static readonly HashSet<string> RestartKeys =
-        ["public_addr", "stun_auth", "stun_rate_per_ip", "stun_rate_per_device", "stun_circuit_pps", "log_level"];
+        ["public_addr", "stun_auth", "stun_alt_addr", "stun_rate_per_ip", "stun_rate_per_device", "stun_circuit_pps", "log_level"];
 
     public void Map(WebApplication app)
     {
@@ -145,4 +146,14 @@ public sealed class AdminSystemApi(
         => value.Length == 0
            || IPAddress.TryParse(value, out _)
            || (value.Length <= 253 && value.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-'));
+
+    /// <summary>STUN 辅端点合法性（M3-15）：空（=单 IP 降级）｜IP:PORT（仅 IPv4；与启动期
+    /// ParseAltEndpoint 同口径，域名不支持——STUN 地址属性承载 IP）。</summary>
+    private static bool IsValidAltAddr(string value)
+    {
+        if (value.Length == 0) return true;
+        var idx = value.LastIndexOf(':');
+        return idx > 0 && IPAddress.TryParse(value[..idx], out _)
+            && int.TryParse(value[(idx + 1)..], out var port) && port is >= 0 and <= 65535;
+    }
     }

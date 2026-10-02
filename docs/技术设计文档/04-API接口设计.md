@@ -81,7 +81,7 @@
 |---|---|---|
 | GET | `/api/logs?level=&page=` | 结构化日志查询（NFR-51） |
 | GET | `/api/logs/export` | 下载导出文件 |
-| POST | `/api/diagnostics/stun-test` | 触发 STUN UDP/TCP 探测，返回公网端点与 NAT 行为初判（**RFC5780 子集判型：mapping/filtering 分级，服务端双地址监听与 OTHER-ADDRESS/RESPONSE-ORIGIN 属性按 05 §7.2 预留，M3 实现**） |
+| POST | `/api/diagnostics/stun-test` | 触发 STUN UDP/TCP 探测，返回 `StunTestView{publicEndpoint, udpMapping, udpFiltering, tcpSequential, tcpPortDependent, downgraded, notes[], durationMs}`（M3-15 已落地：RFC5780 子集两桶族判型 `eim/adm_or_apdm`×`eif/adf_or_apdf`，编排与降级语义见 05 §7.2 实现注记；未注册 1002、探测失败 1001；服务端双地址由 `stun_alt_addr` 配置驱动） |
 | POST | `/api/diagnostics/ping-device` | `{ remoteCode }` 隧道 PING 测 RTT（PTP 0x06） |
 
 ### 2.7 升级页（FR-C-904）

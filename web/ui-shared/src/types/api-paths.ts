@@ -1,5 +1,5 @@
 // 本文件由 export-ts 反射生成（06 §5、08 §2③），禁止手改；
-// 源：LocalWebApi 真实路由表（src/Tools/ExportTs @ 2026-10-02T00:07:08Z）。前端禁止手写 API 字符串路径。
+// 源：LocalWebApi 真实路由表（src/Tools/ExportTs @ 2026-10-02T07:28:41Z）。前端禁止手写 API 字符串路径。
 
 export const ApiPaths = {
   AuthChangePassword: "/api/auth/change-password",
@@ -11,6 +11,7 @@ export const ApiPaths = {
   DeviceResetRemoteCode: "/api/device/reset-remote-code",
   Devices: "/api/devices",
   Diagnostics: "/api/diagnostics",
+  DiagnosticsStunTest: "/api/diagnostics/stun-test",
   GroupRequestsByIdApprove: "/api/group-requests/{id}/approve",
   GroupRequestsByIdReject: "/api/group-requests/{id}/reject",
   Groups: "/api/groups",
@@ -55,6 +56,7 @@ export const ApiEndpoints = [
   { path: "/api/device/reset-remote-code", methods: ["POST"] },
   { path: "/api/devices", methods: ["GET"] },
   { path: "/api/diagnostics", methods: ["GET"] },
+  { path: "/api/diagnostics/stun-test", methods: ["POST"] },
   { path: "/api/group-requests/{id}/approve", methods: ["POST"] },
   { path: "/api/group-requests/{id}/reject", methods: ["POST"] },
   { path: "/api/groups", methods: ["GET"] },

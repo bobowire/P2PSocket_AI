@@ -860,4 +860,44 @@ describe("Settings 走查", () => {
     }
     expect(wrapper.find('[data-testid="settings-save"]').attributes("disabled")).toBeDefined();
   });
+
+  it("M3-15 stun-test 判型卡：两桶族标签+TCP 分配规律+注记渲染", async () => {
+    const { wrapper } = await mountPage(Settings, undefined, "/settings");
+
+    await wrapper.find('[data-testid="stun-run"]').trigger("click");
+    await flushPromises();
+
+    const card = wrapper.find('[data-testid="stun-result"]');
+    expect(card.exists()).toBe(true);
+    expect(card.text()).toContain("203.0.113.10:51234");
+    expect(card.text()).toContain("对称（ADM/APDM）");
+    expect(card.text()).toContain("受限（ADF/APDF）");
+    expect(card.text()).toContain("顺序递增（端口预测适用）");
+    expect(card.text()).toContain("4321 ms");
+    expect(wrapper.find('[data-testid="stun-downgraded"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="stun-notes"]').text()).toContain("辅端点");
+  });
+
+  it("M3-15 stun-test 降级形态：downgraded 提示+UDP 两维不可判", async () => {
+    const state = createDefaultState();
+    state.stunTestView = {
+      publicEndpoint: "203.0.113.10:51234",
+      udpMapping: null,
+      udpFiltering: null,
+      tcpSequential: true,
+      tcpPortDependent: null,
+      downgraded: true,
+      notes: ["服务端未通告辅端点（stun_alt_addr 未配置）：UDP mapping/filtering 不可判（05 §7.2 单公网 IP 降级）"],
+      durationMs: 800,
+    };
+    const { wrapper } = await mountPage(Settings, state, "/settings");
+
+    await wrapper.find('[data-testid="stun-run"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="stun-downgraded"]').exists()).toBe(true);
+    const card = wrapper.find('[data-testid="stun-result"]');
+    expect(card.text()).toContain("不可判");
+    expect(card.text()).not.toContain("对称（ADM/APDM）");
+  });
 });
