@@ -4,10 +4,12 @@
 // PUT 部分修改；localWebPort 变更 → restartRequired 提示重启生效（04 §2.1）。
 // M3-15 网络诊断卡（05 §7.2）：POST /api/diagnostics/stun-test 触发 RFC5780 子集判型，
 // 结果卡渲染两桶族标签 + 降级提示 + 注记（FR-C-808 诊断面）。
+// M3-16 ping-device（04 §2.6）：远程码→活隧道 PTP PING×4 测 RTT（min/avg/max）；
+// 无活隧道 1002"须先启用一条到该设备的映射"如实透出。
 import { computed, onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { ApiPaths, ApiError } from "@p2p/ui-shared";
-import type { StunTestView } from "@p2p/ui-shared";
+import type { StunTestView, PingDeviceView } from "@p2p/ui-shared";
 import { api } from "../api";
 import { useSettingsStore } from "../stores/settings";
 
@@ -105,6 +107,27 @@ async function runStunTest() {
     ElMessage.error(e instanceof ApiError ? e.message : "检测失败");
   } finally {
     stunBusy.value = false;
+  }
+}
+
+// ── 设备连通性（M3-16 ping-device，04 §2.6）────────────────────────
+
+const pingCode = ref("");
+const pingBusy = ref(false);
+const pingResult = ref<PingDeviceView | null>(null);
+
+async function runPingDevice() {
+  pingBusy.value = true;
+  try {
+    // 4 次 PING 各 2s 预算 + 列表解析往返，10s 默认预算可覆盖；超时样本计入丢失不出错
+    pingResult.value = await api.post<PingDeviceView>(ApiPaths.DiagnosticsPingDevice, {
+      remoteCode: pingCode.value.trim(),
+    }, { timeout: 30_000 });
+  } catch (e) {
+    pingResult.value = null;
+    ElMessage.error(e instanceof ApiError ? e.message : "检测失败");
+  } finally {
+    pingBusy.value = false;
   }
 }
 </script>
@@ -305,6 +328,60 @@ async function runStunTest() {
         </ul>
       </template>
     </div>
+
+    <!-- 设备连通性（M3-16，FR-C-808）：远程码 → 活隧道 PING×4 测 RTT -->
+    <div class="stun-section">
+      <h3>设备连通性（隧道 PING）</h3>
+      <div class="stun-toolbar">
+        <el-input
+          v-model="pingCode"
+          placeholder="目标设备远程码（6 位）"
+          class="ping-code"
+          data-testid="ping-code"
+          :maxlength="8"
+        />
+        <el-button
+          type="primary"
+          plain
+          :loading="pingBusy"
+          :disabled="pingCode.trim() === ''"
+          data-testid="ping-run"
+          @click="runPingDevice"
+        >
+          {{ pingBusy ? "测速中…" : "开始 PING" }}
+        </el-button>
+        <span class="hint">
+          在到目标设备的活动隧道上发 4 次 PING 测往返延迟；无活动隧道时请先启用一条到该设备的映射
+        </span>
+      </div>
+
+      <el-descriptions
+        v-if="pingResult"
+        :column="3"
+        border
+        class="stun-result"
+        data-testid="ping-result"
+      >
+        <el-descriptions-item label="目标设备">
+          {{ pingResult.targetDevice }}（{{ pingResult.targetRemoteCode }}）
+        </el-descriptions-item>
+        <el-descriptions-item label="承载路径">
+          {{ pingResult.viaRelay ? "中继" : "直连" }}
+        </el-descriptions-item>
+        <el-descriptions-item label="收到/发送">
+          {{ pingResult.received }} / {{ pingResult.sent }}
+        </el-descriptions-item>
+        <el-descriptions-item label="最小 RTT">
+          {{ pingResult.minMs === null ? "不可用" : `${pingResult.minMs} ms` }}
+        </el-descriptions-item>
+        <el-descriptions-item label="平均 RTT">
+          {{ pingResult.avgMs === null ? "不可用" : `${pingResult.avgMs} ms` }}
+        </el-descriptions-item>
+        <el-descriptions-item label="最大 RTT">
+          {{ pingResult.maxMs === null ? "不可用" : `${pingResult.maxMs} ms` }}
+        </el-descriptions-item>
+      </el-descriptions>
+    </div>
   </section>
 </template>
 
@@ -321,4 +398,5 @@ async function runStunTest() {
 .stun-toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
 .stun-result { margin-top: 8px; }
 .stun-notes { margin-top: 8px; padding-left: 20px; }
+.ping-code { width: 200px; }
 </style>

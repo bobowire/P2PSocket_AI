@@ -84,6 +84,7 @@ public sealed class ClientRuntime : IAsyncDisposable
     private ClientRegistrationService _wizard = null!;
     private SubnetConflictDetector _subnetConflicts = null!;
     private StunTester _stunTester = null!;
+    private DevicePinger _devicePinger = null!;
     private LocalApiServices _api = null!;
     private WebApplication _app = null!;
     private NicHealthMonitor? _nicMonitor;
@@ -169,8 +170,16 @@ public sealed class ClientRuntime : IAsyncDisposable
             () => _state.State.DeviceId is { } id && _state.State.DeviceSecret is { } secret
                 ? new StunCredentials(id, secret, _control.Clock)
                 : null);
+        // ping-device（M3-16，04 §2.6）：设备列表=0x40 可见列表分页拉全量（同 /api/devices 口径），
+        // 隧道=TunnelHost 设备对现查（02 §4.5 隧道是设备对级资源——IsClosed 兜底防已亡会话误判可用）
+        _devicePinger = new DevicePinger(
+            FetchVisibleDevicesAsync,
+            peerId => _host.Get(peerId) is { IsClosed: false } session
+                ? new DeviceTunnel(session.ViaRelay, session.PingAsync)
+                : null);
         _api = new LocalApiServices(_control, _state, _settings, _peers, _wizard, _sync, _scheduler,
-            _lanSegments, Path.Combine(_options.BaseDir, "logs"), _subnetConflicts, _stunTester); // M2-27：白名单镜像 + 日志目录同源
+            _lanSegments, Path.Combine(_options.BaseDir, "logs"), _subnetConflicts, _stunTester,
+            _devicePinger); // M2-27：白名单镜像 + 日志目录同源
         _control.ServerPush += OnServerPush; // 0x71 PunchInvite → 被邀请方打洞（02 §5.1③）
 
         // ③ 本地 Web（两种分支都启：向导也经它完成注册）
@@ -543,6 +552,22 @@ public sealed class ClientRuntime : IAsyncDisposable
     }
 
     /// <summary>STUN 端点派生：控制地址主机 + 3478（STUN 与控制同宿主，01 §5 TD-07）。</summary>
+    /// <summary>0x40 可见设备列表分页拉全量（OQ-16，DeviceApi 同口径）——ping-device 远程码解析用。</summary>
+    private async Task<IReadOnlyList<DeviceListItem>> FetchVisibleDevicesAsync(CancellationToken ct)
+    {
+        var items = new List<DeviceListItem>();
+        uint offset = 0;
+        while (true)
+        {
+            var resp = await _control.SendRequestAsync<DeviceListResponse>(new DeviceListRequest(
+                _control.NextSeq(), _control.TimestampMs(), MsgType.DeviceList, offset, 100), ct);
+            items.AddRange(resp.Items);
+            if (!resp.HasMore) break;
+            offset += (uint)resp.Items.Length;
+        }
+        return items;
+    }
+
     private static IPEndPoint? ResolveStunEndpoint(string? hostPort)
     {
         if (string.IsNullOrEmpty(hostPort)) return null;

@@ -900,4 +900,51 @@ describe("Settings 走查", () => {
     expect(card.text()).toContain("不可判");
     expect(card.text()).not.toContain("对称（ADM/APDM）");
   });
+
+  it("M3-16 ping-device：表单+结果卡渲染（目标/承载/收发/三统计）", async () => {
+    const { wrapper } = await mountPage(Settings, undefined, "/settings");
+
+    await wrapper.find('[data-testid="ping-code"]').setValue("d4e5f6");
+    await wrapper.find('[data-testid="ping-run"]').trigger("click");
+    await flushPromises();
+
+    const card = wrapper.find('[data-testid="ping-result"]');
+    expect(card.exists()).toBe(true);
+    expect(card.text()).toContain("办公室 NAS");
+    expect(card.text()).toContain("d4e5f6");
+    expect(card.text()).toContain("直连");
+    expect(card.text()).toContain("4 / 4");
+    expect(card.text()).toContain("12 ms");
+    expect(card.text()).toContain("13.5 ms");
+    expect(card.text()).toContain("16 ms");
+  });
+
+  it("M3-16 ping-device 全丢形态：统计不可用+空码禁用按钮", async () => {
+    const state = createDefaultState();
+    state.pingDeviceView = {
+      targetDevice: "家里 NAS",
+      targetRemoteCode: "0a1b2c",
+      sent: 4,
+      received: 0,
+      minMs: null,
+      avgMs: null,
+      maxMs: null,
+      viaRelay: true,
+      durationMs: 8123,
+    };
+    const { wrapper } = await mountPage(Settings, state, "/settings");
+
+    // 空码时按钮禁用（前置防 1001 往返）
+    expect(wrapper.find('[data-testid="ping-run"]').attributes("disabled")).toBeDefined();
+
+    await wrapper.find('[data-testid="ping-code"]').setValue("0a1b2c");
+    await wrapper.find('[data-testid="ping-run"]').trigger("click");
+    await flushPromises();
+
+    const card = wrapper.find('[data-testid="ping-result"]');
+    expect(card.exists()).toBe(true);
+    expect(card.text()).toContain("0 / 4");
+    expect(card.text()).toContain("不可用");
+    expect(card.text()).toContain("中继");
+  });
 });

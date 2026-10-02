@@ -1,5 +1,5 @@
 // 本文件由 export-ts 反射生成（06 §5、08 §2③），禁止手改。
-// 源：P2P.Client 展示 DTO + WsEventNames 常量（src/Tools/ExportTs @ 2026-10-02T07:28:41Z）。
+// 源：P2P.Client 展示 DTO + WsEventNames 常量（src/Tools/ExportTs @ 2026-10-02T08:00:10Z）。
 
 /** 响应包裹（04 §0：code=0 成功；!=0 见错误码表 04 §5）。 */
 export interface ApiEnvelope<T> {
@@ -168,6 +168,19 @@ export interface StunTestView {
   tcpPortDependent: boolean | null;
   downgraded: boolean;
   notes: string[];
+  durationMs: number;
+}
+
+
+export interface PingDeviceView {
+  targetDevice: string;
+  targetRemoteCode: string;
+  sent: number;
+  received: number;
+  minMs: number | null;
+  avgMs: number | null;
+  maxMs: number | null;
+  viaRelay: boolean;
   durationMs: number;
 }
 

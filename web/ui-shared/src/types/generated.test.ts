@@ -47,6 +47,7 @@ const DOCUMENTED: ReadonlyArray<{ path: string; methods: readonly string[] }> = 
   { path: "/api/settings", methods: ["GET", "PUT"] },
   { path: "/api/diagnostics", methods: ["GET"] },
   { path: "/api/diagnostics/stun-test", methods: ["POST"] }, // M3-15（05 §7.2）
+  { path: "/api/diagnostics/ping-device", methods: ["POST"] }, // M3-16（04 §2.6）
   { path: "/ws/status", methods: ["WS"] },
 ];
 
@@ -104,6 +105,7 @@ describe("export-ts 生成物", () => {
       "interface SubnetConflictItem",
       "SubnetConflictEvent",
       "interface StunTestView", // M3-15
+      "interface PingDeviceView", // M3-16
     ])
       expect(dts).toContain(snippet);
   });

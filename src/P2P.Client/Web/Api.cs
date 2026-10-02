@@ -33,7 +33,7 @@ internal static class Api
         code = e switch
         {
             ApiException ae => ae.Code,
-            StunTestException se => se.Code, // stun-test 判型（M3-15：未注册 1002/探测失败 1001）
+            DiagnosticsException de => de.Code, // 诊断族（M3-16 基类臂：stun-test 判型 1001/1002、ping-device 1001/1002/4003）
             MappingException me => me.Code,
             ControlErrorException ce => ce.Code,
             PassiveModeException => ErrorCode.ForbiddenPassive,

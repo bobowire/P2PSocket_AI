@@ -82,7 +82,7 @@
 | GET | `/api/logs?level=&page=` | 结构化日志查询（NFR-51） |
 | GET | `/api/logs/export` | 下载导出文件 |
 | POST | `/api/diagnostics/stun-test` | 触发 STUN UDP/TCP 探测，返回 `StunTestView{publicEndpoint, udpMapping, udpFiltering, tcpSequential, tcpPortDependent, downgraded, notes[], durationMs}`（M3-15 已落地：RFC5780 子集两桶族判型 `eim/adm_or_apdm`×`eif/adf_or_apdf`，编排与降级语义见 05 §7.2 实现注记；未注册 1002、探测失败 1001；服务端双地址由 `stun_alt_addr` 配置驱动） |
-| POST | `/api/diagnostics/ping-device` | `{ remoteCode }` 隧道 PING 测 RTT（PTP 0x06） |
+| POST | `/api/diagnostics/ping-device` | `{ remoteCode }` 隧道 PING 测 RTT（PTP 0x06）。M3-16 已落地：返回 `PingDeviceView{targetDevice, targetRemoteCode, sent, received, minMs, avgMs, maxMs, viaRelay, durationMs}`（4 次 PING 各 2s 预算、丢失容忍只统计收到的样本）；错误通道：空码 1001/远程码不在可见列表 4003（同映射解析口径）/无活隧道 1002"须先启用一条到该设备的映射"；列表解析走 0x40 主动类 → passive 下本地拒发（须 normal），编排详见 05 §7.3 |
 
 ### 2.7 升级页（FR-C-904）
 

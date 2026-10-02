@@ -4,7 +4,7 @@
 // M2-27 同步：分组全套（0x42 聚合形态+审批闭环）、lan-segments、logs（过滤/分页/导出）、
 // change-password；一并补齐 M2-15/23/26 漂移端点（reset-remote-code/peers/upgrade）。
 import { http, HttpResponse } from "msw";
-import type { StunTestView } from "@p2p/ui-shared";
+import type { StunTestView, PingDeviceView } from "@p2p/ui-shared";
 
 export interface MockMapping {
   mappingId: string;
@@ -78,6 +78,7 @@ export interface MockState {
     reconnect: { minSec: number; maxSec: number };
   };
   stunTestView: StunTestView; // M3-15：stun-test 判型结果（POST 即回固定态；走查用例注入降级形态）
+  pingDeviceView: PingDeviceView; // M3-16：ping-device RTT 结果（POST 即回固定态）
 }
 
 export function createDefaultState(): MockState {
@@ -207,11 +208,27 @@ export function createDefaultState(): MockState {
       notes: ["TCP 依赖判定未执行：响应未通告辅端点（演示态注记）"],
       durationMs: 4321,
     },
+    pingDeviceView: {
+      targetDevice: "办公室 NAS",
+      targetRemoteCode: "483921",
+      sent: 4,
+      received: 4,
+      minMs: 12,
+      avgMs: 13.5,
+      maxMs: 16,
+      viaRelay: false,
+      durationMs: 78,
+    },
   };
 }
 
 function ok<T>(data: T) {
   return HttpResponse.json({ code: 0, msg: "ok", data });
+}
+
+/** 错误通道须真回 HTTP 400 携 envelope（M3-11 教训：HttpResponse.json 默认 200 会令错误走成功拦截器）。 */
+function badRequest(code: number, message: string) {
+  return HttpResponse.json({ code, msg: message, data: null }, { status: 400 });
 }
 
 /** M3-12 汇总派生（生产 MappingSyncService.BuildSummary 同口径：映射行名+Id 序、
@@ -452,6 +469,15 @@ export function createHandlers(state: MockState = createDefaultState()) {
       ok({ punchQueueDepth: 0, currentPunchPeer: null })),
     // M3-15 stun-test 判型（05 §7.2）：mock 固定回演示态（真实实现为多次 Binding 实测）
     http.post("*/api/diagnostics/stun-test", () => ok(state.stunTestView)),
+    // M3-16 ping-device（04 §2.6）：回固定演示态；码不匹配设备行→4003（走查错误通道用）
+    http.post("*/api/diagnostics/ping-device", async ({ request }) => {
+      const body = (await request.json()) as { remoteCode?: string };
+      const code = (body.remoteCode ?? "").trim();
+      if (code === "") return badRequest(1001, "远程码不能为空");
+      const known = state.devices.some((d) => d.remoteCode.toLowerCase() === code.toLowerCase());
+      if (!known) return badRequest(4003, "远程码不存在或已被重置（不在可见列表）");
+      return ok({ ...state.pingDeviceView, targetRemoteCode: code });
+    }),
 
     // ── M2-15 远程码重置（04 §2.1）───────────────────────────
     http.post("*/api/device/reset-remote-code", () => {

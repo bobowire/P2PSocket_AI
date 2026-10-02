@@ -1510,6 +1510,52 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         Assert.False(clear.GetProperty("hasConflict").GetBoolean());
     }
 
+    [Fact]
+    public async Task M3_16_ping设备_活隧道RTT统计_无隧道1002_未知码4003()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone));
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("m3-16-a", IPAddress.Parse("127.0.0.4"), group);
+        var b = await SeedClientAsync("m3-16-b", IPAddress.Parse("127.0.0.5"), group);
+        var httpA = await StartRuntimeAsync(a);
+        await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+
+        // ① 无活隧道：设备可见（0x40 列表可解析）但隧道未建立 → 1002 明确指引
+        var noTunnel = await PostAsync(httpA, "/api/diagnostics/ping-device",
+            new { remoteCode = b.RemoteCode });
+        Assert.Equal(1002, noTunnel.GetProperty("code").GetInt32());
+        Assert.Contains("须先启用一条到该设备的映射", noTunnel.GetProperty("msg").GetString());
+
+        // ② 未知远程码 → 4003（REMOTE_CODE_INVALID，与 0x60 映射解析同口径）；空码 1001
+        var unknown = await PostAsync(httpA, "/api/diagnostics/ping-device", new { remoteCode = "zzzz99" });
+        Assert.Equal(4003, unknown.GetProperty("code").GetInt32());
+        var blank = await PostAsync(httpA, "/api/diagnostics/ping-device", new { remoteCode = "  " });
+        Assert.Equal(1001, blank.GetProperty("code").GetInt32());
+
+        // ③ 建立活隧道（enable→direct）后 PING：RTT 统计完整、直连承载
+        var echoPort = FreePort();
+        await CreateAndEnableMappingAsync(httpA, (ushort)FreePort(), b.RemoteCode, (ushort)echoPort);
+        await WaitMappingStateAsync(httpA, "direct");
+
+        var data = (await PostAsync(httpA, "/api/diagnostics/ping-device",
+            new { remoteCode = b.RemoteCode.ToUpperInvariant() })).GetProperty("data");
+        Assert.Equal("m3-16-b", data.GetProperty("targetDevice").GetString());
+        Assert.Equal(b.RemoteCode, data.GetProperty("targetRemoteCode").GetString());
+        Assert.Equal(4, data.GetProperty("sent").GetInt32());
+        var received = data.GetProperty("received").GetInt32();
+        Assert.True(received > 0, $"回环直连隧道 PING 不应全丢（received={received}）");
+        var minMs = data.GetProperty("minMs").GetInt64();
+        var maxMs = data.GetProperty("maxMs").GetInt64();
+        Assert.True(minMs >= 0, "MinMs 不应为负");
+        Assert.True(minMs <= data.GetProperty("avgMs").GetDouble() && data.GetProperty("avgMs").GetDouble() <= maxMs,
+            "min ≤ avg ≤ max 恒成立（回环 RTT 常亚毫秒取整为 0，received>0 已证真实往返）");
+        Assert.False(data.GetProperty("viaRelay").GetBoolean());
+        Assert.True(data.GetProperty("durationMs").GetInt64() > 0);
+    }
+
     // ── WS 收件箱（事件收件箱；InvalidationFlow/LocalWebApi 集成同法副本）────
 
     private sealed class WsTap : IAsyncDisposable

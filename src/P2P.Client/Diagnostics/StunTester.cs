@@ -34,11 +34,9 @@ public sealed record StunTestView(
     string[] Notes,
     long DurationMs);
 
-/// <summary>stun-test 判型失败（04 §5 码表：未注册 1002/探测失败 1001）。</summary>
-public sealed class StunTestException(int code, string message) : Exception(message)
-{
-    public int Code { get; } = code;
-}
+/// <summary>stun-test 判型失败（04 §5 码表：未注册 1002/探测失败 1001）——
+/// M3-16 起派生自 DiagnosticsException 基类（诊断族共用错误通道，语义不变）。</summary>
+public sealed class StunTestException(int code, string message) : DiagnosticsException(code, message);
 
 /// <summary>STUN 探测凭据三件套（运行时 state.json 惰性快照；ClockSync 未校准 offset=0 亦可用——
 /// ts 窗口 ±120s 系统时钟常态在窗内，OQ-12）。</summary>

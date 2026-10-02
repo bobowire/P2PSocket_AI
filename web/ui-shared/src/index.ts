@@ -33,6 +33,7 @@ export type {
   DeviceListEvent,
   WsEvent,
   StunTestView,
+  PingDeviceView,
 } from "./types/api";
 // M3-09 服务端 Web 生成物（编制定案③：server-app 消费；与客户端分文件防常量名冲突）
 export { ServerApiPaths, ServerApiEndpoints } from "./types/api-server-paths";
