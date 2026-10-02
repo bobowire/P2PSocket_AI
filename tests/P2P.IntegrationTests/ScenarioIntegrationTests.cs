@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -57,6 +58,7 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
     private int _port;
     private ServerWebHostService? _web; // M3-06 仪表盘集成：Web 宿主与场景服务端同进程（按需拉起）
     private HttpClient? _webHttp;
+    private int _webPort; // M3-17 A-12：服务端 Web 实际监听端口（webBind 默认 127.0.0.1）
 
     public ScenarioIntegrationTests(ITestOutputHelper output) => _output = output;
 
@@ -621,6 +623,7 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
             WebRootOverride = Path.Combine(Path.GetTempPath(), $"p2p-no-webroot-{Guid.NewGuid():N}"),
         };
         await _web.StartAsync(CancellationToken.None);
+        _webPort = options.Listen.Web;
         _webHttp = new HttpClient(new HttpClientHandler { CookieContainer = new CookieContainer() })
         {
             BaseAddress = new Uri($"http://127.0.0.1:{options.Listen.Web}/"),
@@ -1613,6 +1616,47 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         // ④ 打洞队列深度展示化（M1-29 既有 /api/diagnostics 字段）
         var diag = (await GetAsync(httpA, "/api/diagnostics")).GetProperty("data");
         Assert.True(diag.GetProperty("punchQueueDepth").GetInt32() >= 0);
+    }
+
+    // ── M3-17 A-12 可自动化部分（09 §2）：经隧道访问 Web 的 in-proc 模拟 ──
+    //    实机语义="服务端机器部署客户端→管理员经 F7 映射接入 7500"；in-proc 等价：
+    //    服务端 Web 与"服务端机器"设备 S 同进程同 loopback（webBind 默认 127.0.0.1=仅本机，
+    //    "公网扫描不可达"的绑定语义由 ServerWebHostTests.绑定地址为webBind_仅该地址可达 断言）。
+
+    [Fact]
+    public async Task M3_17_A12_经隧道访问Web_inproc模拟_认证门不放宽_全功能可迂回()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone));
+        var group = await CreateGroupAsync();
+        var m = await SeedClientAsync("m3-17-m", IPAddress.Parse("127.0.0.4"), group); // 管理员设备（访问方）
+        var s = await SeedClientAsync("m3-17-s", IPAddress.Parse("127.0.0.5"), group); // 服务端机器设备
+        var webHttp = await StartWebAsync(); // 同进程服务端 Web（webBind=127.0.0.1，D11）
+        var httpM = await StartRuntimeAsync(m);
+        await StartRuntimeAsync(s);
+        await WaitPhaseAsync(httpM, "running");
+
+        // 映射：M 侧 localPort → 经隧道 → S 自机 127.0.0.1:webPort（服务端 Web 监听位，targetAddr="self"）
+        var localPort = (ushort)FreePort();
+        await CreateAndEnableMappingAsync(httpM, localPort, s.RemoteCode, (ushort)_webPort);
+        await WaitMappingStateAsync(httpM, "direct");
+
+        // ① 未认证经映射仍 401{2001}——认证门不因迂回路径放宽（04 §3.1）
+        using var viaTunnel = new HttpClient(new HttpClientHandler { CookieContainer = new CookieContainer() })
+        {
+            BaseAddress = new Uri($"http://{m.Ip}:{localPort}/"),
+        };
+        var denied = await viaTunnel.GetAsync("/api/dashboard");
+        Assert.Equal(HttpStatusCode.Unauthorized, denied.StatusCode);
+        Assert.Equal(2001, (await denied.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetInt32());
+
+        // ② admin/admin 首登（OQ-3）→ 会话 Cookie → 仪表盘经映射可用（双客户端在线可见）
+        var login = await PostAsync(viaTunnel, "/api/auth/login", new { username = "admin", password = "admin" });
+        Assert.Equal(0, login.GetProperty("code").GetInt32());
+        var dashboard = (await GetAsync(viaTunnel, "/api/dashboard")).GetProperty("data");
+        Assert.True(dashboard.GetProperty("onlineDevices").GetInt32() >= 2,
+            $"经映射访问仪表盘应见双客户端在线（实际 {dashboard.GetProperty("onlineDevices").GetInt32()}）");
     }
 
     // ── WS 收件箱（事件收件箱；InvalidationFlow/LocalWebApi 集成同法副本）────
