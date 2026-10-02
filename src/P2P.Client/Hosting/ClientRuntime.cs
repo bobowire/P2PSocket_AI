@@ -57,6 +57,10 @@ public sealed record ClientRuntimeOptions
     /// <summary>Hello 协议版本覆盖缝（M2-26）：生产 null=当前协议版本；集成测注入越界值
     /// 驱动服务端 5004 拒答，验证升级引导数据链（FR-C-904）。</summary>
     public ushort? ControlProtocolVersionOverride { get; init; }
+
+    /// <summary>网络面枚举源覆盖缝（M3-13，FR-C-204）：生产 null=SubnetSurvey.Snapshot
+    ///（真实地址/路由表）；集成测注入可变替身驱动冲突命中→API/WS 可见→解除消失全链。</summary>
+    public SubnetConflictDetector.SurveySource? SubnetSurveyOverride { get; init; }
 }
 
 /// <summary>客户端全组件生命周期（单一属主；启动序=01 §4.1，停机序为其逆序）。</summary>
@@ -77,6 +81,7 @@ public sealed class ClientRuntime : IAsyncDisposable
     private ClientReporter _reporter = null!;
     private MappingSyncService _sync = null!;
     private ClientRegistrationService _wizard = null!;
+    private SubnetConflictDetector _subnetConflicts = null!;
     private LocalApiServices _api = null!;
     private WebApplication _app = null!;
     private NicHealthMonitor? _nicMonitor;
@@ -151,8 +156,11 @@ public sealed class ClientRuntime : IAsyncDisposable
         _reporter.Log += m => Log?.Invoke($"[report] {m}");
         _sync = new MappingSyncService(_control, _engine, _state);
         _wizard = new ClientRegistrationService(_control, _state, _nic);
+        // 网段冲突检测（M3-13，FR-C-204）：枚举源=平台快照（测试缝可注入替身）
+        _subnetConflicts = new SubnetConflictDetector(_options.SubnetSurveyOverride ?? P2P.Nic.SubnetSurvey.Snapshot);
+        _subnetConflicts.Log += m => Log?.Invoke(m);
         _api = new LocalApiServices(_control, _state, _settings, _peers, _wizard, _sync, _scheduler,
-            _lanSegments, Path.Combine(_options.BaseDir, "logs")); // M2-27：白名单镜像 + 日志目录同源
+            _lanSegments, Path.Combine(_options.BaseDir, "logs"), _subnetConflicts); // M2-27：白名单镜像 + 日志目录同源
         _control.ServerPush += OnServerPush; // 0x71 PunchInvite → 被邀请方打洞（02 §5.1③）
 
         // ③ 本地 Web（两种分支都启：向导也经它完成注册）
@@ -221,8 +229,16 @@ public sealed class ClientRuntime : IAsyncDisposable
                 // 兜底——不切换则注册后映射监听落 127.0.0.1，与本地同端口服务相撞（A-4 场景）。
                 // 先于 Nic 应用：网卡降级不回退绑定（虚拟 IP 已落盘即为本机监听地址）。
                 _engine.UpdateVirtualIp(vip);
-                try { await _nic.EnsureAsync(vip, CancellationToken.None); }
-                catch (Exception e) { Log?.Invoke($"[nic] 虚拟网卡降级运行：{e.Message}（本地 Web 告警展示）"); }
+                try { _subnetConflicts.OnNicApplied((await _nic.EnsureAsync(vip, CancellationToken.None)).AdapterName); }
+                catch (Exception e)
+                {
+                    _subnetConflicts.OnNicApplied(null); // 未应用：不排除任何接口（枚举中通常亦无自身地址）
+                    Log?.Invoke($"[nic] 虚拟网卡降级运行：{e.Message}（本地 Web 告警展示）");
+                }
+
+                // 冲突检测首查（M3-13，05 §1.4/FR-C-204）：Ensure 后主动跑一次（驱动日志+WS 提示）；
+                // 后续外部变化/解除由 /api/system/state 每请求现场重算反映（无本机事件可听）
+                _subnetConflicts.Check(_state.State.VirtualIp);
 
                 // 网卡自愈循环（M2-24，FR-C-202/05 §1.2）：30s 探测存在性与 IP 一致性，异常重建恢复。
                 // 启动 Ensure 失败同样纳入（首探测即重建尝试）；恢复沿立即重试 listen_failed 映射
@@ -231,6 +247,7 @@ public sealed class ClientRuntime : IAsyncDisposable
                 _nicMonitor.Log += m => Log?.Invoke(m);
                 _nicMonitor.Restored += () => _ = Task.Run(async () =>
                 {
+                    _subnetConflicts.Check(_state.State.VirtualIp); // 重建=地址/路由重新应用，重查冲突
                     try { await _engine.RetryListenFailedAsync(); }
                     catch (Exception e) when (e is ObjectDisposedException or OperationCanceledException)
                     { /* 停机竞态：引擎已释放 */ }

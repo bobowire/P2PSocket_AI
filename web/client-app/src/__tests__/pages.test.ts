@@ -7,6 +7,7 @@ import { createPinia, type Pinia } from "pinia";
 import { createRouter, createWebHashHistory, type Router } from "vue-router";
 import ElementPlus from "element-plus";
 import Dashboard from "../pages/Dashboard.vue";
+import SubnetConflictBanner from "../components/SubnetConflictBanner.vue";
 import Devices from "../pages/Devices.vue";
 import Groups from "../pages/Groups.vue";
 import Login from "../pages/Login.vue";
@@ -777,6 +778,43 @@ describe("Login 修改密码（M2-29，0x23）", () => {
     await flushPromises();
     expect(wrapper.find('[data-testid="login-profile"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="login-username"]').text()).toContain("demo");
+  });
+});
+
+// ── 网段冲突告警条（M3-13，FR-C-204）──────────────────────────────
+
+describe("网段冲突告警条（M3-13）", () => {
+  it("conflict 有值 → 渲染网段+明细+调整指引；解除（null）→ 消失", async () => {
+    const { wrapper, pinia } = await mountPage(SubnetConflictBanner);
+    const system = useSystemStore(pinia);
+
+    // 等价 /api/system/state 返回 conflict（App 链：subnet_conflict 事件 → refetch 写 store）
+    system.state = {
+      phase: "running",
+      serverReachable: true,
+      protocolVersion: 1,
+      conflict: {
+        subnet: "100.64.0.0/24",
+        items: [
+          { kind: "address", value: "100.64.0.50", interface: "eth0" },
+          { kind: "route", value: "100.64.0.0/24", interface: "corp0" },
+        ],
+      },
+    };
+    await flushPromises();
+
+    const banner = wrapper.find('[data-testid="conflict-banner"]');
+    expect(banner.exists()).toBe(true);
+    expect(banner.text()).toContain("100.64.0.0/24");
+    expect(banner.text()).toContain("地址 100.64.0.50（eth0）");
+    expect(banner.text()).toContain("路由 100.64.0.0/24（corp0）");
+    expect(banner.text()).toContain("建议管理员在服务端调整网段");
+    expect(banner.text()).toContain("自动消失");
+
+    // 解除（服务端调整 virtual_subnet / 本机网络变化后现场重算返回 null）→ 告警条消失
+    system.state = { ...system.state!, conflict: null };
+    await flushPromises();
+    expect(wrapper.find('[data-testid="conflict-banner"]').exists()).toBe(false);
   });
 });
 

@@ -4,6 +4,7 @@
 // useWs 分级：stats→store 直写；状态类→refetch（100ms debounce）；断连→顶栏"服务不可达"。
 // M2-28：设备 10s 轮询移除（device_list 事件驱动 + onOpen/visibility resync 兜底，TD-16）；
 // mapping_state invalid 旁路 → 全局失效提示（0x75 链，列表置灰由 refetch 完成）。
+// M3-13：顶部网段冲突持续告警条（FR-C-204：subnet_conflict 事件 → system refetch 驱动显隐）。
 import { onMounted, onUnmounted, computed, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
@@ -12,6 +13,7 @@ import { useSystemStore } from "./stores/system";
 import { useAuthStore } from "./stores/auth";
 import { useMappingStore } from "./stores/mappings";
 import { useDeviceStore } from "./stores/devices";
+import SubnetConflictBanner from "./components/SubnetConflictBanner.vue";
 
 const MENU = [
   { path: "/", label: "仪表盘" },
@@ -88,6 +90,7 @@ onUnmounted(() => {
     <template #header>
       <span class="auth-state">{{ headerText }}</span>
     </template>
+    <SubnetConflictBanner />
     <RouterView />
   </AdminLayout>
 </template>

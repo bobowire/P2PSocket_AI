@@ -2,10 +2,13 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using P2P.Client.Hosting;
+using P2P.Client.Nic;
 using P2P.Client.Storage;
+using P2P.Nic;
 using P2P.Core.Crypto;
 using P2P.Core.Stun;
 using P2P.IntegrationTests.NatSimulator;
@@ -190,9 +193,10 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
 
     /// <summary>启动客户端运行时（网卡替身 + 打洞 socket 绑内网别名缝；诊断日志进测试产物；
     /// relayRetryInterval：M2-19 回切 60s 周期的缩短缝——周期机制本身驱动回切，间接验证触发；
-    /// statsInterval：M2-22 0x64 30s 上报周期的缩短缝——周期落库与停机补报验证）。</summary>
+    /// statsInterval：M2-22 0x64 30s 上报周期的缩短缝——周期落库与停机补报验证；
+    /// subnetSurvey：M3-13 网段冲突检测的枚举源替身缝——注入可变数据驱动命中/解除全链）。</summary>
     private async Task<HttpClient> StartRuntimeAsync(SeededClient c, TimeSpan? relayRetryInterval = null,
-        TimeSpan? statsInterval = null)
+        TimeSpan? statsInterval = null, SubnetConflictDetector.SurveySource? subnetSurvey = null)
     {
         // 每运行时独立网卡替身：共享单例时后启动客户端的 Ensure 覆盖共享 BoundIp，先启动者健康探测
         // 即 IpMismatch → 双端 30s 周期互相重建乒乓（Restored 沿重绑映射监听，杀死在途传输——
@@ -204,6 +208,7 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
             PunchBindOverride = c.Ip,
             RelayRetryIntervalOverride = relayRetryInterval,
             StatsIntervalOverride = statsInterval,
+            SubnetSurveyOverride = subnetSurvey,
         });
         runtime.Log += m => _output.WriteLine($"[{c.Ip}] {m}");
         await runtime.StartAsync();
@@ -1462,5 +1467,111 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         // 非 csv 格式值拒绝（400 域内业务码 1001，envelope HTTP 200）
         var bad = await GetAsync(httpA, "/api/stats/export?format=json");
         Assert.NotEqual(0, bad.GetProperty("code").GetInt32());
+    }
+
+    [Fact]
+    public async Task M3_13_网段冲突注入_API与WS可见_解除后消失()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone));
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("m3-13-a", IPAddress.Parse("127.0.0.4"), group);
+        // 可变枚举源替身（M3-13 测试缝）：初始空=无冲突；虚拟 IP 127.0.0.4 → 推导段 127.0.0.0/24
+        var addresses = new List<SurveyAddress>();
+        var routes = new List<SurveyRoute>();
+        var httpA = await StartRuntimeAsync(a, subnetSurvey: () => (addresses, routes));
+        await WaitPhaseAsync(httpA, "running");
+
+        // WS 收件箱先建（后续每次 GET /api/system/state 现场重算驱动值变化→广播 subnet_conflict）
+        await using var tap = await WsTap.ConnectAsync($"ws://127.0.0.1:{httpA.BaseAddress!.Port}/ws/status");
+
+        // ① 无冲突静默：conflict=null
+        var state = (await GetAsync(httpA, "/api/system/state")).GetProperty("data");
+        Assert.Equal(JsonValueKind.Null, state.GetProperty("conflict").ValueKind);
+
+        // ② 注入冲突：外部接口地址落段内 → API 可见 + WS hasConflict=true
+        addresses.Add(new SurveyAddress("eth9", IPAddress.Parse("127.0.0.99")));
+        state = (await GetAsync(httpA, "/api/system/state")).GetProperty("data");
+        var conflict = state.GetProperty("conflict");
+        Assert.Equal("127.0.0.0/24", conflict.GetProperty("subnet").GetString());
+        var item = conflict.GetProperty("items").EnumerateArray().Single();
+        Assert.Equal("address", item.GetProperty("kind").GetString());
+        Assert.Equal("127.0.0.99", item.GetProperty("value").GetString());
+        Assert.Equal("eth9", item.GetProperty("interface").GetString());
+        var ev = await tap.NextAsync("subnet_conflict");
+        Assert.True(ev.GetProperty("hasConflict").GetBoolean());
+
+        // ③ 解除：枚举源清空 → conflict=null + WS hasConflict=false（告警条消失条件）
+        addresses.Clear();
+        state = (await GetAsync(httpA, "/api/system/state")).GetProperty("data");
+        Assert.Equal(JsonValueKind.Null, state.GetProperty("conflict").ValueKind);
+        var clear = await tap.NextAsync("subnet_conflict");
+        Assert.False(clear.GetProperty("hasConflict").GetBoolean());
+    }
+
+    // ── WS 收件箱（事件收件箱；InvalidationFlow/LocalWebApi 集成同法副本）────
+
+    private sealed class WsTap : IAsyncDisposable
+    {
+        private readonly System.Net.WebSockets.ClientWebSocket _ws = new();
+        private readonly Channel<JsonElement> _events = Channel.CreateUnbounded<JsonElement>();
+        private Task _loop = Task.CompletedTask;
+
+        public static async Task<WsTap> ConnectAsync(string url)
+        {
+            var tap = new WsTap();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await tap._ws.ConnectAsync(new Uri(url), cts.Token);
+            tap._loop = tap.ReceiveLoopAsync();
+            return tap;
+        }
+
+        private async Task ReceiveLoopAsync()
+        {
+            var buffer = new byte[16 * 1024];
+            using var ms = new MemoryStream();
+            try
+            {
+                while (_ws.State == System.Net.WebSockets.WebSocketState.Open)
+                {
+                    System.Net.WebSockets.WebSocketReceiveResult r;
+                    do
+                    {
+                        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                        r = await _ws.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
+                        ms.Write(buffer, 0, r.Count);
+                    } while (!r.EndOfMessage);
+                    _events.Writer.TryWrite(JsonDocument.Parse(ms.ToArray()).RootElement.Clone());
+                    ms.SetLength(0);
+                }
+            }
+            catch { /* 连接关闭 */ }
+            finally { _events.Writer.TryComplete(); }
+        }
+
+        /// <summary>等待指定事件（跳过其它事件；超时抛 TimeoutException）。</summary>
+        public async Task<JsonElement> NextAsync(string ev, TimeSpan? timeout = null)
+        {
+            using var cts = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(10));
+            while (true)
+            {
+                var evt = await _events.Reader.ReadAsync(cts.Token);
+                if (evt.TryGetProperty("ev", out var name) && name.GetString() == ev) return evt;
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            _events.Writer.TryComplete();
+            if (_ws.State == System.Net.WebSockets.WebSocketState.Open)
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                try { await _ws.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "done", cts.Token); }
+                catch { /* 服务端可能已停 */ }
+            }
+            _ws.Dispose();
+            try { await _loop; } catch { /* 收环随连接终止 */ }
+        }
     }
 }

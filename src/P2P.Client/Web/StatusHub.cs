@@ -28,6 +28,9 @@ public static class WsEventNames
 
     /// <summary>版本拒答/升级信息到达（M2-26，FR-C-904：状态类→前端 refetch /api/upgrade/info）。</summary>
     public const string UpgradeRequired = "upgrade_required";
+
+    /// <summary>虚拟网段冲突出现/解除（M3-13，FR-C-204：状态类→前端 refetch /api/system/state）。</summary>
+    public const string SubnetConflict = "subnet_conflict";
 }
 
 /// <summary>WS 事件广播中枢（单例；宿主挂 /ws/status 端点转 <see cref="HandleAsync"/>）。</summary>

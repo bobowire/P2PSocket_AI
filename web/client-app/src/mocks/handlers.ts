@@ -66,6 +66,7 @@ export interface MockState {
   joinRequests: MockJoinRequest[]; // 待审批申请（所有者侧聚合）
   lanSegments: MockLanSegment[]; // M2-27：开放内网段白名单（04 §2.5）
   peers: Record<string, boolean>; // M2-23：deviceId → relayFallback
+  conflict: { subnet: string; items: { kind: string; value: string; interface: string }[] } | null; // M3-13：网段冲突（null=无）
   logs: { ts: string; level: string; message: string }[]; // M2-27：演示日志（04 §2.6）
   upgrade: { latestVersion: string; minProtocol: number; maxProtocol: number; upgradeUrl: string; notes: string };
   settings: {
@@ -81,6 +82,7 @@ export function createDefaultState(): MockState {
   return {
     phase: "running",
     serverReachable: true,
+    conflict: null, // M3-13：默认无冲突（走查用例按需注入）
     deviceId: "11111111-1111-4111-8111-111111111111",
     remoteCode: "a1b2c3",
     virtualIp: "100.64.0.2",
@@ -243,7 +245,8 @@ export function createHandlers(state: MockState = createDefaultState()) {
   return [
     // ── 2.1 系统 ──────────────────────────────────────────────
     http.get("*/api/system/state", () =>
-      ok({ phase: state.phase, serverReachable: state.serverReachable, protocolVersion: 1 })),
+      ok({ phase: state.phase, serverReachable: state.serverReachable, protocolVersion: 1,
+        conflict: state.conflict })),
     http.get("*/api/device", () =>
       ok({
         deviceId: state.deviceId,

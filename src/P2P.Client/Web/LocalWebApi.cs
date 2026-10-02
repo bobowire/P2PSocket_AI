@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
 using P2P.Client.Control;
 using P2P.Client.Mapping;
+using P2P.Client.Nic;
 using P2P.Client.Punch;
 using P2P.Client.Registration;
 using P2P.Client.Storage;
@@ -26,12 +27,14 @@ public sealed class LocalApiServices : IAsyncDisposable
     public PunchScheduler Scheduler { get; }
     public LanSegmentsStore LanSegments { get; }
     public string LogsDir { get; }
+    public SubnetConflictDetector? SubnetConflicts { get; }
     public LocalApiContext Context { get; }
     public StatusHub Hub { get; }
 
     public LocalApiServices(ControlClient control, StateStore state, SettingsStore settings,
         PeersStore peers, ClientRegistrationService wizard, MappingSyncService mappings,
-        PunchScheduler scheduler, LanSegmentsStore? lanSegments = null, string? logsDir = null)
+        PunchScheduler scheduler, LanSegmentsStore? lanSegments = null, string? logsDir = null,
+        SubnetConflictDetector? subnetConflicts = null)
     {
         Control = control;
         State = state;
@@ -42,6 +45,7 @@ public sealed class LocalApiServices : IAsyncDisposable
         Scheduler = scheduler;
         LanSegments = lanSegments ?? new LanSegmentsStore(ClientPaths.DefaultBaseDir);
         LogsDir = logsDir ?? Path.Combine(ClientPaths.DefaultBaseDir, "logs");
+        SubnetConflicts = subnetConflicts;
         Context = new LocalApiContext();
         Hub = new StatusHub(mappings.Traffic); // mapping_stats 1s 采样源（04 §2.8）
 
@@ -64,6 +68,13 @@ public sealed class LocalApiServices : IAsyncDisposable
             ev = WsEventNames.UpgradeRequired,
             latestVersion = info.LatestVersion,
         });
+        // 网段冲突出现/解除（M3-13，FR-C-204）：状态类提示→前端 refetch /api/system/state
+        if (subnetConflicts is not null)
+            subnetConflicts.ConflictsChanged += s => Hub.Publish(new
+            {
+                ev = WsEventNames.SubnetConflict,
+                hasConflict = s?.Items.Length > 0,
+            });
     }
 
     public async ValueTask DisposeAsync() => await Hub.DisposeAsync();
@@ -74,7 +85,7 @@ public static class LocalWebApi
     /// <summary>挂载本地 API 全部端点（04 §2.1/2.2/2.3/2.4/2.5/2.6/2.8）。宿主须先 UseWebSockets。</summary>
     public static IEndpointRouteBuilder MapLocalApi(this IEndpointRouteBuilder app, LocalApiServices services)
     {
-        app.MapSystemApi(services.Control, services.State, services.Context);
+        app.MapSystemApi(services.Control, services.State, services.Context, services.SubnetConflicts);
         app.MapSettingsApi(services.Control, services.Settings);
         app.MapAuthApi(services.Control, services.Wizard, services.Context);
         app.MapWizardApi(services.Control, services.Wizard, services.State, services.Settings, services.Context);

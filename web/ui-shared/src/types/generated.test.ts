@@ -88,6 +88,7 @@ describe("export-ts 生成物", () => {
       'DeviceList = "device_list"',
       'LoginState = "login_state"',
       'UpgradeRequired = "upgrade_required"',
+      'SubnetConflict = "subnet_conflict"', // M3-13
       "interface MappingView",
       "interface ClientSettings",
       "interface UpgradeInfoView", // M2-26
@@ -98,6 +99,9 @@ describe("export-ts 生成物", () => {
       "interface StatsSummaryView", // M3-12
       "interface MappingStatsView",
       "interface DeviceStatsView",
+      "interface SubnetConflictState", // M3-13
+      "interface SubnetConflictItem",
+      "SubnetConflictEvent",
     ])
       expect(dts).toContain(snippet);
   });

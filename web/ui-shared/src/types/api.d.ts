@@ -1,5 +1,5 @@
 // 本文件由 export-ts 反射生成（06 §5、08 §2③），禁止手改。
-// 源：P2P.Client 展示 DTO + WsEventNames 常量（src/Tools/ExportTs @ 2026-10-01T12:05:16Z）。
+// 源：P2P.Client 展示 DTO + WsEventNames 常量（src/Tools/ExportTs @ 2026-10-02T00:07:08Z）。
 
 /** 响应包裹（04 §0：code=0 成功；!=0 见错误码表 04 §5）。 */
 export interface ApiEnvelope<T> {
@@ -147,6 +147,19 @@ export interface StatsSummaryView {
 }
 
 
+export interface SubnetConflictItem {
+  kind: string;
+  value: string;
+  interface: string;
+}
+
+
+export interface SubnetConflictState {
+  subnet: string;
+  items: SubnetConflictItem[];
+}
+
+
 /** 映射状态机（02 §4.5：disabled→punching→direct/failed；relay/invalid 为 M2 预留）。 */
 export type MappingState = "disabled" | "punching" | "direct" | "relay" | "failed" | "invalid";
 
@@ -162,6 +175,7 @@ export type CapabilityMode = "normal" | "passive";
 // DeviceList = "device_list"
 // LoginState = "login_state"
 // UpgradeRequired = "upgrade_required"
+// SubnetConflict = "subnet_conflict"
 
 /** 高频数值类：直写 store（下秒覆盖，丢失无害，TD-16）。 */
 export interface MappingStatsEvent {
@@ -196,4 +210,10 @@ export interface UpgradeRequiredEvent {
   latestVersion: string;
 }
 
-export type WsEvent = MappingStatsEvent | MappingStateEvent | LoginStateEvent | DeviceListEvent | UpgradeRequiredEvent;
+/** 网段冲突提示（M3-13，FR-C-204：出现/解除→refetch /api/system/state）。 */
+export interface SubnetConflictEvent {
+  ev: "subnet_conflict";
+  hasConflict: boolean;
+}
+
+export type WsEvent = MappingStatsEvent | MappingStateEvent | LoginStateEvent | DeviceListEvent | UpgradeRequiredEvent | SubnetConflictEvent;

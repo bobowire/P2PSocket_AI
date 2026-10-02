@@ -2,7 +2,7 @@
 // WS onOpen/visibilitychange 全量 resync 的主目标（TD-16：REST 是真相）。
 import { ref } from "vue";
 import { defineStore } from "pinia";
-import type { CapabilityMode, SystemPhase } from "@p2p/ui-shared";
+import type { CapabilityMode, SubnetConflictState, SystemPhase } from "@p2p/ui-shared";
 import { ApiPaths } from "@p2p/ui-shared";
 import { api } from "../api";
 
@@ -10,6 +10,7 @@ export interface SystemStateView {
   phase: SystemPhase;
   serverReachable: boolean;
   protocolVersion: number;
+  conflict: SubnetConflictState | null; // M3-13：虚拟网段冲突（FR-C-204；null=无）
 }
 
 export interface DeviceView {

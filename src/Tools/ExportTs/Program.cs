@@ -154,6 +154,8 @@ internal static partial class TsGen // 生成逻辑集中（顶层语句宿主�
         typeof(MappingStatsView), // M3-12 流量汇总（04 §2.5 /api/stats/summary，FR-C-1002）
         typeof(DeviceStatsView),
         typeof(StatsSummaryView),
+        typeof(P2P.Client.Nic.SubnetConflictItem), // M3-13 网段冲突（04 §2.1 /api/system/state.conflict，FR-C-204）
+        typeof(P2P.Client.Nic.SubnetConflictState),
     ];
 
     internal static string EmitPathsTs(List<(string Pattern, string Methods)> endpoints,
@@ -300,7 +302,13 @@ internal static partial class TsGen // 生成逻辑集中（顶层语句宿主�
         sb.AppendLine("  latestVersion: string;");
         sb.AppendLine("}");
         sb.AppendLine();
-        sb.AppendLine("export type WsEvent = MappingStatsEvent | MappingStateEvent | LoginStateEvent | DeviceListEvent | UpgradeRequiredEvent;");
+        sb.AppendLine("/** 网段冲突提示（M3-13，FR-C-204：出现/解除→refetch /api/system/state）。 */");
+        sb.AppendLine("export interface SubnetConflictEvent {");
+        sb.AppendLine("  ev: \"subnet_conflict\";");
+        sb.AppendLine("  hasConflict: boolean;");
+        sb.AppendLine("}");
+        sb.AppendLine();
+        sb.AppendLine("export type WsEvent = MappingStatsEvent | MappingStateEvent | LoginStateEvent | DeviceListEvent | UpgradeRequiredEvent | SubnetConflictEvent;");
         return sb.ToString();
     }
 

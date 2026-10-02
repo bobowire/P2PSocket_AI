@@ -1,6 +1,6 @@
 # P2P 内网穿透产品 · 技术设计文档
 
-> 版本：v1.47　创建日期：2026-08-19　状态：待评审
+> 版本：v1.48　创建日期：2026-08-19　状态：待评审
 > 依据：[产品需求文档 PRD v0.6](../prd/README.md)（决策 D1~D21，D3 经 v0.4 修订；开放问题 OQ-1~OQ-19 已全部决议）
 > 定位：开发阶段的**施工图纸**——所有实现以本文档为准；与 PRD 冲突时以 PRD 为准并提出修订。
 
@@ -122,3 +122,4 @@
 | 2026-10-01 | v1.45 | M3-10 落地同步（06 §3/§5 注记）：四管理页（/users /devices /groups /mappings）+服务端 DTO 具名化扩全（AdminUsers/Devices/Groups/Mappings/System 五 API 匿名对象→ServerViews 17 record，ExportTs 反射入 api-server.d.ts，与客户端域同名 record typeof 全限定消歧）；§3 关键注记——注册开关 ElSwitch 对 null modelValue 挂载即自纠偏 emit("change",false) 会误触 PUT registration_open=0 静默关闭注册（store 定值前不渲染开关根治）、ElMessageBox 关闭后 overlay v-show 残留 DOM（二次弹窗断言须按 display 过滤取可见框）、临时密码/新远程码 alert 一次性出口、admin 行 :disabled 前置 400{1003} |
 | 2026-10-01 | v1.46 | M3-11 落地同步（06 §3/§5 注记）：§3 补运维页注记——/relay 开关 confirm 区分开/关语义（关闭=拒新 5002 存量不受杀，TD-23）与取消回读防漂移、/system KEY_META 行级保存（控件映射与服务端 Validators 同键集，值校验仍在服务端）与审计 detail 截断透传；**ui-shared useApi 错误拦截补服务端 envelope 形态**（M1-31 缺口收口：HTTP 非 200 携 envelope{code,message} 时按响应体 code 抛 ApiError 且服务端 message 优先——原统一替换"本地服务响应异常"致校验错误丢定位；客户端 msg 字段仍走码表优先零回归；401{2001} 与 -401 双兜底）；server-app 构建产物口径（vite outDir 直写宿主 wwwroot+build.sh M1-03 已接线+.gitignore 不入库）；§5 DTO 入列 M3-11=Relay 族+AuditLogs |
 | 2026-10-01 | v1.47 | M3-12 落地同步（06 §2 注记）：仪表盘流量汇总卡+CSV 导出（FR-C-1002 收口）——本地引擎累计口径（state.json 全量映射×引擎 TrafficSnapshots 含 RelayBytes join，聚合纯函数 BuildSummary 供单测；与 0x64 服务端落库持久累计两视角）、CSV 两段式（映射明细+设备汇总+total）text/csv 附件带 UTF-8 BOM（Excel 中文识别；集成测按字节断言 EF BB BF——ReadAsStringAsync 会剥 BOM）+RFC 4180 字段转义、导出同源 window.open（/logs 同模式）；api.d.ts 入列 MappingStatsView/DeviceStatsView/StatsSummaryView、api-paths +stats 两端点（45 HTTP） |
+| 2026-10-02 | v1.48 | M3-13 落地同步（05 §1.4/06 §2 注记）：虚拟网段冲突检测（FR-C-204）——数据源 P2P.Nic/SubnetSurvey 两维快照（地址维 NetworkInterface 单播 IPv4 排除 loopback；路由维 Windows GetIpForwardTable P/Invoke+Linux /proc/net/route 小端解析，失败降级空）；网段=virtualIp 末字节清零 /24 推导（virtual_subnet 变更随下发 IP 跟随，无独立配置）；判定=地址落段内+路由前缀长度 ≥/24 且相交（更长/等长前缀抢流量；更宽路由不报——本段 on-link 恒胜出）+自身虚拟网卡 Ensure 句柄记名 OrdinalIgnoreCase 排除；检测时机=Ensure 完成与恢复沿主动 Check+/api/system/state **每请求现场重算**（冲突解除无本机事件可听，值变化经 WS subnet_conflict 提示 refetch，TD-16）；无冲突归一 null 防首查噪声；前端=App 顶部常驻 SubnetConflictBanner（纯展示）+api.d.ts 入列 SubnetConflictItem/State 与 SubnetConflictEvent（HTTP 端点数不变，复用 system/state） |
