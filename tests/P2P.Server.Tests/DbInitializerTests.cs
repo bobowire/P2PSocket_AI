@@ -92,6 +92,24 @@ public sealed class DbInitializerTests : IDisposable
     }
 
     [Fact]
+    public void Initialize_存量库缺新增键_补齐且既有值不动()
+    {
+        // M3-18 实机部署发现的升级路径（Program 启动序已改为容器构建前先行
+        // Initialize）：M2 旧库只有旧键集（无 M3-15 stun_alt_addr）——本测试钉住
+        // 该序依赖的幂等补齐不变量：缺键补默认值、既有键值原样保留
+        DbInitializer.Initialize(_db);
+        _db.ServerConfig.RemoveRange(_db.ServerConfig.Where(c => c.Key == "stun_alt_addr"));
+        _db.ServerConfig.Single(c => c.Key == "public_addr").Value = "139.155.70.54"; // 模拟生产已配置
+        _db.SaveChanges();
+
+        DbInitializer.Initialize(_db); // 升级后再跑
+
+        Assert.Equal(DbInitializer.ConfigDefaults.Length, _db.ServerConfig.Count());
+        Assert.Equal("", _db.ServerConfig.Single(c => c.Key == "stun_alt_addr").Value); // 新键=默认
+        Assert.Equal("139.155.70.54", _db.ServerConfig.Single(c => c.Key == "public_addr").Value); // 既有值不动
+    }
+
+    [Fact]
     public void RemoteCode_UniqueConstraint_Enforced()
     {
         DbInitializer.Initialize(_db);

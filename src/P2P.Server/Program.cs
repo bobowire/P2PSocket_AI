@@ -61,6 +61,26 @@ if (flags.Contains("--reset-admin"))
 if (adminOp is not null)
     return await AdminOperationAsync(options, adminOp, adminArg);
 
+// ── 数据库先行初始化（M3-18 实机部署发现）───────────────────────────────
+// Host.StartAsync 首次解析 IHostedService 时即构造全部托管服务实例——
+// ServerWebHostService ctor 尾参注入 StunService/RelayService 触发其 DI 工厂
+// 读 server_config，早于 ServerHostService.StartAsync 步骤① 的 Initialize；
+// 存量库缺新增键（M2→M3 stun_alt_addr）或全新库未建表都会在读点崩溃。
+// 故 Initialize（Migrate+幂等种子）必须先于容器构建——任何 server_config
+// 读取点（含 DI 单例工厂）从此必然晚于它。--reset-admin/--op 子流程自带
+// Seed 且须「库已存在」语义，故置于其早退之后。
+var earlyFactory = ServerDatabase.CreateFactory(options.Database.Path);
+try
+{
+    using var earlyDb = earlyFactory.CreateDbContext();
+    DbInitializer.Initialize(earlyDb);
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine($"数据库初始化失败，拒绝启动（NFR-35）：{ex.Message}");
+    return 1;
+}
+
 // ── Serilog（08 §6：控制台 + 滚动文件 logs/app-.log 10MB×保留期；结构化字段 M3）──
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Is(Enum.TryParse<LogEventLevel>(options.Logging.Level, ignoreCase: true, out var level)
