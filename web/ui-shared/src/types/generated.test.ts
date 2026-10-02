@@ -48,6 +48,9 @@ const DOCUMENTED: ReadonlyArray<{ path: string; methods: readonly string[] }> = 
   { path: "/api/diagnostics", methods: ["GET"] },
   { path: "/api/diagnostics/stun-test", methods: ["POST"] }, // M3-15（05 §7.2）
   { path: "/api/diagnostics/ping-device", methods: ["POST"] }, // M3-16（04 §2.6）
+  { path: "/api/diagnostics/server-test", methods: ["POST"] }, // M3-14（FR-C-808 诊断区）
+  { path: "/api/diagnostics/tunnels", methods: ["GET"] }, // M3-14
+  { path: "/api/diagnostics/rekey", methods: ["POST"] }, // M3-14（05 §2.3 收口）
   { path: "/ws/status", methods: ["WS"] },
 ];
 
@@ -106,6 +109,11 @@ describe("export-ts 生成物", () => {
       "SubnetConflictEvent",
       "interface StunTestView", // M3-15
       "interface PingDeviceView", // M3-16
+      "interface ServerTestView", // M3-14
+      "interface ServerTestResultView",
+      "interface TunnelView",
+      "interface TunnelListView",
+      "interface RekeyResultView",
     ])
       expect(dts).toContain(snippet);
   });

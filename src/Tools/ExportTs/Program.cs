@@ -158,6 +158,11 @@ internal static partial class TsGen // 生成逻辑集中（顶层语句宿主�
         typeof(P2P.Client.Nic.SubnetConflictState),
         typeof(P2P.Client.Diagnostics.StunTestView), // M3-15 stun-test 判型（04 §2.6 /api/diagnostics/stun-test，05 §7.2）
         typeof(P2P.Client.Diagnostics.PingDeviceView), // M3-16 ping-device RTT（04 §2.6 /api/diagnostics/ping-device）
+        typeof(P2P.Client.Web.ServerTestView), // M3-14 服务端连通性（04 §2.6 /api/diagnostics/server-test）
+        typeof(P2P.Client.Web.ServerTestResultView), // M3-14 单候选结果行
+        typeof(P2P.Client.Web.TunnelView), // M3-14 活隧道列表（04 §2.6 /api/diagnostics/tunnels）
+        typeof(P2P.Client.Web.TunnelListView), // M3-14
+        typeof(P2P.Client.Web.RekeyResultView), // M3-14 手动 REKEY（04 §2.6 /api/diagnostics/rekey）
     ];
 
     internal static string EmitPathsTs(List<(string Pattern, string Methods)> endpoints,

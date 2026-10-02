@@ -1556,6 +1556,65 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         Assert.True(data.GetProperty("durationMs").GetInt64() > 0);
     }
 
+    [Fact]
+    public async Task M3_14_诊断区_隧道列表与手动REKEY_服务端连通性_队列深度()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone));
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("m3-14-a", IPAddress.Parse("127.0.0.4"), group);
+        var b = await SeedClientAsync("m3-14-b", IPAddress.Parse("127.0.0.5"), group);
+        var httpA = await StartRuntimeAsync(a);
+        var httpB = await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+
+        // ① 建立活隧道（enable→direct）后：tunnels 快照字段完整（Label=本地映射反查远程码）
+        await CreateAndEnableMappingAsync(httpA, (ushort)FreePort(), b.RemoteCode, (ushort)FreePort());
+        await WaitMappingStateAsync(httpA, "direct");
+        JsonElement rowA = default;
+        using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                var items = (await GetAsync(httpA, "/api/diagnostics/tunnels")).GetProperty("data").GetProperty("items");
+                if (items.GetArrayLength() > 0) { rowA = items[0]; break; }
+                await Task.Delay(200, cts.Token);
+            }
+        }
+        Assert.Equal(b.DeviceId, rowA.GetProperty("peerDeviceId").GetGuid());
+        Assert.Equal(b.RemoteCode, rowA.GetProperty("label").GetString()); // 映射目标远程码（本地 join）
+        Assert.False(rowA.GetProperty("viaRelay").GetBoolean());
+        Assert.True(rowA.GetProperty("isInitiator").GetBoolean()); // A=访问方（发起侧）
+
+        // 对端视角：响应方角色 + 无本地映射指向（label=null，前端回退短码）
+        var rowB = (await GetAsync(httpB, "/api/diagnostics/tunnels")).GetProperty("data").GetProperty("items")[0];
+        Assert.Equal(a.DeviceId, rowB.GetProperty("peerDeviceId").GetGuid());
+        Assert.Equal(JsonValueKind.Null, rowB.GetProperty("label").ValueKind);
+        Assert.False(rowB.GetProperty("isInitiator").GetBoolean());
+
+        // ② 手动 REKEY：发起方 ok / 响应方 not_initiator / 未知设备对 1002（05 §2.3 三态）
+        var ok = (await PostAsync(httpA, "/api/diagnostics/rekey",
+            new { peerDeviceId = b.DeviceId })).GetProperty("data");
+        Assert.Equal("ok", ok.GetProperty("outcome").GetString());
+        var responder = (await PostAsync(httpB, "/api/diagnostics/rekey",
+            new { peerDeviceId = a.DeviceId })).GetProperty("data");
+        Assert.Equal("not_initiator", responder.GetProperty("outcome").GetString());
+        var unknown = await PostAsync(httpA, "/api/diagnostics/rekey", new { peerDeviceId = Guid.NewGuid() });
+        Assert.Equal(1002, unknown.GetProperty("code").GetInt32());
+
+        // ③ server-test：对真服务端 addr 逐候选 TCP 探测可达（不走控制通道，运行态入口）
+        var svtest = (await PostAsync(httpA, "/api/diagnostics/server-test", null)).GetProperty("data");
+        var candidates = svtest.GetProperty("items");
+        Assert.Equal(1, candidates.GetArrayLength());
+        Assert.Equal($"127.0.0.1:{_port}", candidates[0].GetProperty("addr").GetString());
+        Assert.True(candidates[0].GetProperty("ok").GetBoolean(), "in-proc 真服务端应可达");
+
+        // ④ 打洞队列深度展示化（M1-29 既有 /api/diagnostics 字段）
+        var diag = (await GetAsync(httpA, "/api/diagnostics")).GetProperty("data");
+        Assert.True(diag.GetProperty("punchQueueDepth").GetInt32() >= 0);
+    }
+
     // ── WS 收件箱（事件收件箱；InvalidationFlow/LocalWebApi 集成同法副本）────
 
     private sealed class WsTap : IAsyncDisposable

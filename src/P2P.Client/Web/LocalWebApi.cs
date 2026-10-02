@@ -31,6 +31,8 @@ public sealed class LocalApiServices : IAsyncDisposable
     public SubnetConflictDetector? SubnetConflicts { get; }
     public StunTester? StunTester { get; }
     public DevicePinger? DevicePinger { get; }
+    public Tunnel.TunnelHost? Tunnels { get; }
+    public Func<Guid, string?>? PeerLabelLookup { get; }
     public LocalApiContext Context { get; }
     public StatusHub Hub { get; }
 
@@ -38,7 +40,8 @@ public sealed class LocalApiServices : IAsyncDisposable
         PeersStore peers, ClientRegistrationService wizard, MappingSyncService mappings,
         PunchScheduler scheduler, LanSegmentsStore? lanSegments = null, string? logsDir = null,
         SubnetConflictDetector? subnetConflicts = null, StunTester? stunTester = null,
-        DevicePinger? devicePinger = null)
+        DevicePinger? devicePinger = null, Tunnel.TunnelHost? tunnels = null,
+        Func<Guid, string?>? peerLabelLookup = null)
     {
         Control = control;
         State = state;
@@ -52,6 +55,8 @@ public sealed class LocalApiServices : IAsyncDisposable
         SubnetConflicts = subnetConflicts;
         StunTester = stunTester;
         DevicePinger = devicePinger;
+        Tunnels = tunnels;
+        PeerLabelLookup = peerLabelLookup;
         Context = new LocalApiContext();
         Hub = new StatusHub(mappings.Traffic); // mapping_stats 1s 采样源（04 §2.8）
 
@@ -103,7 +108,8 @@ public static class LocalWebApi
         app.MapGroupsApi(services.Control, services.Hub); // M2-27 分组全套（04 §2.4，0x42/0x50~0x57）
         app.MapLanSegmentsApi(services.Control, services.LanSegments, services.Hub); // M2-27 白名单（0x63）
         app.MapLogsApi(services.LogsDir); // M2-27 日志查询/导出（NFR-51）
-        app.MapDiagnosticsApi(services.Scheduler, services.StunTester, services.DevicePinger); // M3-15 stun-test 判型 / M3-16 ping-device
+        app.MapDiagnosticsApi(services.Scheduler, services.StunTester, services.DevicePinger,
+            services.Tunnels, services.Settings, services.PeerLabelLookup); // M3-15/16 判型测速 + M3-14 诊断区（server-test/tunnels/rekey）
         app.Map("/ws/status", services.Hub.HandleAsync); // 04 §2.8 实时通道
         return app;
     }

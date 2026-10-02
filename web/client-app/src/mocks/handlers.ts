@@ -4,7 +4,7 @@
 // M2-27 同步：分组全套（0x42 聚合形态+审批闭环）、lan-segments、logs（过滤/分页/导出）、
 // change-password；一并补齐 M2-15/23/26 漂移端点（reset-remote-code/peers/upgrade）。
 import { http, HttpResponse } from "msw";
-import type { StunTestView, PingDeviceView } from "@p2p/ui-shared";
+import type { StunTestView, PingDeviceView, ServerTestView, TunnelView } from "@p2p/ui-shared";
 
 export interface MockMapping {
   mappingId: string;
@@ -79,6 +79,11 @@ export interface MockState {
   };
   stunTestView: StunTestView; // M3-15：stun-test 判型结果（POST 即回固定态；走查用例注入降级形态）
   pingDeviceView: PingDeviceView; // M3-16：ping-device RTT 结果（POST 即回固定态）
+  serverTestView: ServerTestView; // M3-14：服务端连通性候选结果（POST 即回固定态；走查注入混合形态）
+  diagnostics: { punchQueueDepth: number; currentPunchPeer: string | null }; // M3-14：M1-29 队列展示化
+  tunnels: TunnelView[]; // M3-14：活隧道列表（空集=无隧道空态）
+  rekeyOutcome: "ok" | "not_initiator" | "busy" | "failed"; // M3-14：POST rekey 固定回态
+  rekeyDetail: string | null; // M3-14：failed 形态携带原因
 }
 
 export function createDefaultState(): MockState {
@@ -219,6 +224,29 @@ export function createDefaultState(): MockState {
       viaRelay: false,
       durationMs: 78,
     },
+    serverTestView: {
+      items: [
+        { addr: "127.0.0.1:7101", ok: true, detail: "" },
+        { addr: "203.0.113.1:7000", ok: false, detail: "连接超时：203.0.113.1:7000（3s）" },
+      ],
+    },
+    diagnostics: { punchQueueDepth: 1, currentPunchPeer: "33333333-3333-4333-8333-333333333333" },
+    tunnels: [
+      {
+        peerDeviceId: "22222222-2222-4222-8222-222222222222",
+        label: "d4e5f6",
+        viaRelay: false,
+        isInitiator: true,
+      },
+      {
+        peerDeviceId: "33333333-3333-4333-8333-333333333333",
+        label: null,
+        viaRelay: true,
+        isInitiator: false,
+      },
+    ],
+    rekeyOutcome: "ok",
+    rekeyDetail: null,
   };
 }
 
@@ -466,7 +494,7 @@ export function createHandlers(state: MockState = createDefaultState()) {
 
     // ── 2.6 诊断 ─────────────────────────────────────────────
     http.get("*/api/diagnostics", () =>
-      ok({ punchQueueDepth: 0, currentPunchPeer: null })),
+      ok(state.diagnostics)), // M3-14：队列深度注入化（默认固定演示态）
     // M3-15 stun-test 判型（05 §7.2）：mock 固定回演示态（真实实现为多次 Binding 实测）
     http.post("*/api/diagnostics/stun-test", () => ok(state.stunTestView)),
     // M3-16 ping-device（04 §2.6）：回固定演示态；码不匹配设备行→4003（走查错误通道用）
@@ -477,6 +505,18 @@ export function createHandlers(state: MockState = createDefaultState()) {
       const known = state.devices.some((d) => d.remoteCode.toLowerCase() === code.toLowerCase());
       if (!known) return badRequest(4003, "远程码不存在或已被重置（不在可见列表）");
       return ok({ ...state.pingDeviceView, targetRemoteCode: code });
+    }),
+    // M3-14 服务端连通性（04 §2.6）：回固定演示态（混合可达/不可达行）
+    http.post("*/api/diagnostics/server-test", () => ok(state.serverTestView)),
+    // M3-14 活隧道列表（04 §2.6）：TunnelHost 本地表镜像
+    http.get("*/api/diagnostics/tunnels", () => ok({ items: state.tunnels })),
+    // M3-14 手动 REKEY（05 §2.3）：回注入 outcome；目标不在隧道表→1002（错误通道走查用）
+    http.post("*/api/diagnostics/rekey", async ({ request }) => {
+      const body = (await request.json()) as { peerDeviceId?: string };
+      if (!body.peerDeviceId) return badRequest(1001, "peerDeviceId 不能为空");
+      if (!state.tunnels.some((t) => t.peerDeviceId === body.peerDeviceId))
+        return badRequest(1002, "设备对无活动隧道");
+      return ok({ peerDeviceId: body.peerDeviceId, outcome: state.rekeyOutcome, detail: state.rekeyDetail });
     }),
 
     // ── M2-15 远程码重置（04 §2.1）───────────────────────────

@@ -1,5 +1,5 @@
 // 本文件由 export-ts 反射生成（06 §5、08 §2③），禁止手改；
-// 源：LocalWebApi 真实路由表（src/Tools/ExportTs @ 2026-10-02T08:00:10Z）。前端禁止手写 API 字符串路径。
+// 源：LocalWebApi 真实路由表（src/Tools/ExportTs @ 2026-10-02T08:27:26Z）。前端禁止手写 API 字符串路径。
 
 export const ApiPaths = {
   AuthChangePassword: "/api/auth/change-password",
@@ -12,7 +12,10 @@ export const ApiPaths = {
   Devices: "/api/devices",
   Diagnostics: "/api/diagnostics",
   DiagnosticsPingDevice: "/api/diagnostics/ping-device",
+  DiagnosticsRekey: "/api/diagnostics/rekey",
+  DiagnosticsServerTest: "/api/diagnostics/server-test",
   DiagnosticsStunTest: "/api/diagnostics/stun-test",
+  DiagnosticsTunnels: "/api/diagnostics/tunnels",
   GroupRequestsByIdApprove: "/api/group-requests/{id}/approve",
   GroupRequestsByIdReject: "/api/group-requests/{id}/reject",
   Groups: "/api/groups",
@@ -58,7 +61,10 @@ export const ApiEndpoints = [
   { path: "/api/devices", methods: ["GET"] },
   { path: "/api/diagnostics", methods: ["GET"] },
   { path: "/api/diagnostics/ping-device", methods: ["POST"] },
+  { path: "/api/diagnostics/rekey", methods: ["POST"] },
+  { path: "/api/diagnostics/server-test", methods: ["POST"] },
   { path: "/api/diagnostics/stun-test", methods: ["POST"] },
+  { path: "/api/diagnostics/tunnels", methods: ["GET"] },
   { path: "/api/group-requests/{id}/approve", methods: ["POST"] },
   { path: "/api/group-requests/{id}/reject", methods: ["POST"] },
   { path: "/api/groups", methods: ["GET"] },

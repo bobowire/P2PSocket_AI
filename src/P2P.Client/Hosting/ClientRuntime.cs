@@ -179,7 +179,7 @@ public sealed class ClientRuntime : IAsyncDisposable
                 : null);
         _api = new LocalApiServices(_control, _state, _settings, _peers, _wizard, _sync, _scheduler,
             _lanSegments, Path.Combine(_options.BaseDir, "logs"), _subnetConflicts, _stunTester,
-            _devicePinger); // M2-27：白名单镜像 + 日志目录同源
+            _devicePinger, _host, PeerLabelLookup); // M2-27：白名单镜像 + 日志目录同源；M3-14 诊断区（tunnels/rekey 走本地隧道表）
         _control.ServerPush += OnServerPush; // 0x71 PunchInvite → 被邀请方打洞（02 §5.1③）
 
         // ③ 本地 Web（两种分支都启：向导也经它完成注册）
@@ -551,7 +551,6 @@ public sealed class ClientRuntime : IAsyncDisposable
         catch (OperationCanceledException) { /* 停机 */ }
     }
 
-    /// <summary>STUN 端点派生：控制地址主机 + 3478（STUN 与控制同宿主，01 §5 TD-07）。</summary>
     /// <summary>0x40 可见设备列表分页拉全量（OQ-16，DeviceApi 同口径）——ping-device 远程码解析用。</summary>
     private async Task<IReadOnlyList<DeviceListItem>> FetchVisibleDevicesAsync(CancellationToken ct)
     {
@@ -568,6 +567,19 @@ public sealed class ClientRuntime : IAsyncDisposable
         return items;
     }
 
+    /// <summary>隧道列表显示名（M3-14 诊断区）：引擎运行时映射（PeerDeviceId）→ MappingId →
+    /// state.json 反查目标远程码——纯本地数据（passive 亦可达，不依赖 0x40）；无映射指向该
+    /// 设备对时 null（前端回退显示 peerId 短码）。</summary>
+    private string? PeerLabelLookup(Guid peerDeviceId)
+    {
+        var mappingId = _engine.Snapshots
+            .FirstOrDefault(m => m.Config.PeerDeviceId == peerDeviceId)?.Config.MappingId;
+        return mappingId is { } id
+            ? _state.State.Mappings.FirstOrDefault(x => x.MappingId == id)?.TargetRemoteCode
+            : null;
+    }
+
+    /// <summary>STUN 端点派生：控制地址主机 + 3478（STUN 与控制同宿主，01 §5 TD-07）。</summary>
     private static IPEndPoint? ResolveStunEndpoint(string? hostPort)
     {
         if (string.IsNullOrEmpty(hostPort)) return null;

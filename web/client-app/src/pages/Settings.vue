@@ -6,10 +6,13 @@
 // 结果卡渲染两桶族标签 + 降级提示 + 注记（FR-C-808 诊断面）。
 // M3-16 ping-device（04 §2.6）：远程码→活隧道 PTP PING×4 测 RTT（min/avg/max）；
 // 无活隧道 1002"须先启用一条到该设备的映射"如实透出。
+// M3-14 诊断工具区收口（FR-C-808 剩余）：服务端连通性（settings 全候选逐个 TCP 探测）+
+// 打洞队列（M1-29 punchQueueDepth/currentPunchPeer 展示化）+ 活隧道列表与手动 REKEY 触发
+//（05 §2.3 M2-21 预留收口：发起方 Ok/响应方 NotInitiator/未完 Busy/失败 Failed 三态反馈）。
 import { computed, onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { ApiPaths, ApiError } from "@p2p/ui-shared";
-import type { StunTestView, PingDeviceView } from "@p2p/ui-shared";
+import type { StunTestView, PingDeviceView, ServerTestView, TunnelView, TunnelListView, RekeyResultView } from "@p2p/ui-shared";
 import { api } from "../api";
 import { useSettingsStore } from "../stores/settings";
 
@@ -73,6 +76,8 @@ onMounted(async () => {
     punchConcurrency.value = s.punchConcurrency;
     localWebPort.value = s.localWebPort;
   }
+  void refreshPunchQueue(); // 诊断工具区初值（M3-14；失败静默，点刷新重试）
+  void refreshTunnels();
 });
 
 // ── 网络诊断（M3-15 stun-test，05 §7.2）────────────────────────────
@@ -128,6 +133,75 @@ async function runPingDevice() {
     ElMessage.error(e instanceof ApiError ? e.message : "检测失败");
   } finally {
     pingBusy.value = false;
+  }
+}
+
+// ── 诊断工具区（M3-14，FR-C-808 收口）────────────────────────────
+
+// 服务端连通性：对 settings 全部候选逐个 TCP 探测（wizard 预检同源逻辑的运行态入口）
+const svtestBusy = ref(false);
+const svtestResult = ref<ServerTestView | null>(null);
+
+async function runServerTest() {
+  svtestBusy.value = true;
+  try {
+    // 候选逐个探测：不可达候选 3s 超时串联，预算放宽（真实多候选全挂可达 9s+）
+    svtestResult.value = await api.post<ServerTestView>(ApiPaths.DiagnosticsServerTest, undefined, {
+      timeout: 30_000,
+    });
+  } catch (e) {
+    svtestResult.value = null;
+    ElMessage.error(e instanceof ApiError ? e.message : "检测失败");
+  } finally {
+    svtestBusy.value = false;
+  }
+}
+
+// 打洞队列深度（M1-29 /api/diagnostics 数据展示化）
+const punchDepth = ref<number | null>(null);
+const punchCurrent = ref<string | null>(null);
+
+async function refreshPunchQueue() {
+  try {
+    const d = await api.get<{ punchQueueDepth: number; currentPunchPeer: string | null }>(
+      ApiPaths.Diagnostics);
+    punchDepth.value = d.punchQueueDepth;
+    punchCurrent.value = d.currentPunchPeer;
+  } catch { /* 参考性数据：失败静默不弹错（onMounted 初拉/手动刷新共用） */ }
+}
+
+// 活隧道列表 + 手动 REKEY 触发（05 §2.3 M2-21 预留收口）
+const tunnels = ref<TunnelView[]>([]);
+const rekeyBusy = ref<string | null>(null); // peerDeviceId：同按钮防重入
+const REKEY_TEXT: Record<string, string> = {
+  ok: "轮换成功",
+  not_initiator: "本端为响应方：密钥由对端轮换",
+  busy: "上一轮轮换尚未完成，请稍后再试",
+  failed: "轮换失败",
+};
+
+async function refreshTunnels() {
+  try {
+    tunnels.value = (await api.get<TunnelListView>(ApiPaths.DiagnosticsTunnels)).items;
+  } catch {
+    tunnels.value = []; // 无隧道态（后端未装配等）：空表呈现
+  }
+}
+
+async function triggerRekey(t: TunnelView) {
+  rekeyBusy.value = t.peerDeviceId;
+  try {
+    const r = await api.post<RekeyResultView>(ApiPaths.DiagnosticsRekey, {
+      peerDeviceId: t.peerDeviceId,
+    }, { timeout: 30_000 });
+    const text = REKEY_TEXT[r.outcome] ?? r.outcome;
+    if (r.outcome === "ok") ElMessage.success(text);
+    else if (r.outcome === "failed") ElMessage.error(r.detail ? `${text}：${r.detail}` : text);
+    else ElMessage.info(text);
+  } catch (e) {
+    ElMessage.error(e instanceof ApiError ? e.message : "轮换失败");
+  } finally {
+    rekeyBusy.value = null;
   }
 }
 </script>
@@ -381,6 +455,168 @@ async function runPingDevice() {
           {{ pingResult.maxMs === null ? "不可用" : `${pingResult.maxMs} ms` }}
         </el-descriptions-item>
       </el-descriptions>
+    </div>
+
+    <!-- 服务端连通性（M3-14，FR-C-808）：settings 全候选逐个 TCP 探测 -->
+    <div class="stun-section">
+      <h3>服务端连通性</h3>
+      <div class="stun-toolbar">
+        <el-button
+          type="primary"
+          plain
+          :loading="svtestBusy"
+          data-testid="svtest-run"
+          @click="runServerTest"
+        >
+          {{ svtestBusy ? "探测中…" : "测试连通性" }}
+        </el-button>
+        <span class="hint">
+          对上方服务端地址全部候选逐个 TCP 探测（向导预检同源逻辑；不走控制通道，passive 亦可用）
+        </span>
+      </div>
+
+      <el-table
+        v-if="svtestResult"
+        :data="svtestResult.items"
+        size="small"
+        class="stun-result"
+        data-testid="svtest-result"
+      >
+        <el-table-column
+          label="地址"
+          prop="addr"
+          min-width="180"
+        />
+        <el-table-column
+          label="结果"
+          width="100"
+        >
+          <template #default="{ row }">
+            <el-tag
+              :type="row.ok ? 'success' : 'danger'"
+              size="small"
+            >
+              {{ row.ok ? "可达" : "不可达" }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column
+          label="详情"
+          prop="detail"
+          min-width="220"
+        />
+      </el-table>
+    </div>
+
+    <!-- 打洞队列（M3-14：M1-29 诊断数据展示化） -->
+    <div class="stun-section">
+      <h3>打洞队列</h3>
+      <div class="stun-toolbar">
+        <el-button
+          plain
+          data-testid="punch-refresh"
+          @click="refreshPunchQueue"
+        >
+          刷新
+        </el-button>
+        <span class="hint">
+          打洞调度器实时状态：待打洞设备对深度与当前正在打洞的目标（空闲时无当前目标）
+        </span>
+      </div>
+
+      <el-descriptions
+        v-if="punchDepth !== null"
+        :column="2"
+        border
+        class="stun-result"
+        data-testid="punch-result"
+      >
+        <el-descriptions-item label="队列深度">
+          {{ punchDepth }}
+        </el-descriptions-item>
+        <el-descriptions-item label="当前目标">
+          {{ punchCurrent === null ? "（空闲）" : punchCurrent }}
+        </el-descriptions-item>
+      </el-descriptions>
+    </div>
+
+    <!-- 隧道与密钥轮换（M3-14：手动 REKEY 触发，05 §2.3 M2-21 预留收口） -->
+    <div class="stun-section">
+      <h3>隧道与密钥轮换（REKEY）</h3>
+      <div class="stun-toolbar">
+        <el-button
+          plain
+          data-testid="tunnels-refresh"
+          @click="refreshTunnels"
+        >
+          刷新
+        </el-button>
+        <span class="hint">
+          活动隧道列表（TunnelHost 本地表）：发起方角色可手动触发一次密钥轮换；响应方密钥由对端轮换
+        </span>
+      </div>
+
+      <el-table
+        v-if="tunnels.length > 0"
+        :data="tunnels"
+        size="small"
+        class="stun-result"
+        data-testid="tunnels-table"
+      >
+        <el-table-column
+          label="目标设备"
+          min-width="200"
+        >
+          <template #default="{ row }">
+            {{ row.label ?? row.peerDeviceId.slice(0, 8) }}
+          </template>
+        </el-table-column>
+        <el-table-column
+          label="承载"
+          width="90"
+        >
+          <template #default="{ row }">
+            <el-tag
+              :type="row.viaRelay ? 'warning' : 'success'"
+              size="small"
+            >
+              {{ row.viaRelay ? "中继" : "直连" }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column
+          label="本端角色"
+          width="100"
+        >
+          <template #default="{ row }">
+            {{ row.isInitiator ? "发起方" : "响应方" }}
+          </template>
+        </el-table-column>
+        <el-table-column
+          label="操作"
+          width="120"
+        >
+          <template #default="{ row }">
+            <el-button
+              size="small"
+              type="primary"
+              plain
+              :loading="rekeyBusy === row.peerDeviceId"
+              :data-testid="`rekey-${row.peerDeviceId}`"
+              @click="triggerRekey(row)"
+            >
+              轮换密钥
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <el-empty
+        v-else
+        description="无活动隧道（启用一条映射建立隧道后，可在此手动轮换密钥）"
+        :image-size="48"
+        data-testid="tunnels-empty"
+      />
     </div>
   </section>
 </template>

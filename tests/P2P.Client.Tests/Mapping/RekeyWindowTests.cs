@@ -118,14 +118,16 @@ public sealed class RekeyWindowTests
             EngineB = new MappingEngine(HostB, SchedulerB, IPAddress.Loopback, options, cidrsB);
         }
 
-        public async Task<TunnelSession> EstablishTunnelAsync(TunnelSessionOptions? sessionOptions = null)
+        public async Task<TunnelSession> EstablishTunnelAsync(TunnelSessionOptions? sessionOptions = null,
+            Func<ITunnelTransport, ITunnelTransport>? wrapA = null)
         {
             var staticA = EcKeyPair.Generate();
             var staticB = EcKeyPair.Generate();
             var (ta, tb) = MemoryTransport.CreatePair();
             var idle = sessionOptions ?? new TunnelSessionOptions { KeepaliveInterval = TimeSpan.FromHours(1) };
+            var transportA = wrapA is not null ? wrapA(ta) : ta;
             var connectTask = TunnelSession.ConnectAsync(Guid.NewGuid(), PeerB, staticA,
-                staticB.ExportPublicKey(), ta, EngineA, idle);
+                staticB.ExportPublicKey(), transportA, EngineA, idle);
             var t1 = await tb.ReceiveAsync() ?? throw new IOException("无 THello1");
             var acceptTask = TunnelSession.AcceptAsync(PeerA, t1, staticB,
                 staticA.ExportPublicKey(), tb, EngineB, idle);
@@ -277,6 +279,112 @@ public sealed class RekeyWindowTests
         Assert.Equal(payload, recv); // 全量字节一致（往返校验：丢/乱/卡即不匹配）
         Assert.False(topo.SessionA!.IsClosed, "会话应存活");
         Assert.False(topo.SessionB!.IsClosed, "会话应存活");
+    }
+
+    // ── 手动 REKEY 触发（M3-14 诊断入口，05 §2.3 收口）──────────────────
+
+    [Fact]
+    public async Task 手动REKEY_发起方Ok响应方NotInitiator_双端代际同步()
+    {
+        // RekeyInterval=0 禁定时轮换，只观察手动触发路径
+        await using var topo = new Topology();
+        await topo.EstablishTunnelAsync(new TunnelSessionOptions
+        {
+            KeepaliveInterval = TimeSpan.FromHours(1),
+            RekeyInterval = TimeSpan.Zero,
+        });
+        var a = topo.SessionA!;
+        var b = topo.SessionB!;
+        Assert.True(a.IsInitiator, "ConnectAsync 侧为发起方");
+
+        var result = await a.TriggerRekeyAsync();
+        Assert.Equal(RekeyOutcome.Ok, result.Outcome);
+        var responder = await b.TriggerRekeyAsync();
+        Assert.Equal(RekeyOutcome.NotInitiator, responder.Outcome); // 响应方空操作（02 §4.4 TTL 仅发起方）
+
+        // 双端密钥代际同步推进（REKEY_ACK 内联切换：发起方 await 返回即已切换，响应方发 ACK 即切换）
+        await UntilAsync(() => a.RekeyGeneration >= 1 && b.RekeyGeneration >= 1, "双端代际推进");
+        Assert.False(a.IsClosed, "轮换不断链（SEC-14）");
+        Assert.False(b.IsClosed, "轮换不断链（SEC-14）");
+    }
+
+    [Fact]
+    public async Task 手动REKEY_上一轮未完_Busy()
+    {
+        // 闸住发起方发送：第一次触发挂起在发送（_pendingRekeyAck 已占）→ 第二次触发 CAS 撞 → Busy；
+        // 释放后第一次照常完成 Ok（手动+定时并发的跳过语义，02 §4.4）
+        GatedTransport? gate = null;
+        await using var topo = new Topology();
+        await topo.EstablishTunnelAsync(new TunnelSessionOptions
+        {
+            KeepaliveInterval = TimeSpan.FromHours(1),
+            RekeyInterval = TimeSpan.Zero,
+            RekeyAckTimeout = TimeSpan.FromSeconds(3),
+        }, t => gate = new GatedTransport(t));
+        var a = topo.SessionA!;
+
+        gate!.HoldSend();
+        var first = a.TriggerRekeyAsync(); // 同步段已占 _pendingRekeyAck，随后挂起在发送闸
+        await Task.Delay(100);             // 确保第一次已进入挂起态
+        var second = await a.TriggerRekeyAsync();
+        Assert.Equal(RekeyOutcome.Busy, second.Outcome);
+        Assert.False(string.IsNullOrEmpty(second.Detail), "Busy 携带原因");
+
+        gate.ReleaseSend();
+        var firstResult = await first.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(RekeyOutcome.Ok, firstResult.Outcome);
+    }
+
+    [Fact]
+    public async Task 手动REKEY_对端已断_Failed带原因()
+    {
+        // 对端传输关闭（B Dispose → A 的 outbox 完结）：发送即抛 → observe 转 Failed（定时路径则仅日志）
+        await using var topo = new Topology();
+        await topo.EstablishTunnelAsync(new TunnelSessionOptions
+        {
+            KeepaliveInterval = TimeSpan.FromHours(1),
+            RekeyInterval = TimeSpan.Zero,
+            RekeyAckTimeout = TimeSpan.FromSeconds(2),
+        });
+        await topo.SessionB!.DisposeAsync();
+
+        var result = await topo.SessionA!.TriggerRekeyAsync();
+        Assert.Equal(RekeyOutcome.Failed, result.Outcome);
+        Assert.False(string.IsNullOrEmpty(result.Detail), "Failed 携带原因");
+    }
+
+    /// <summary>发送闸传输（M3-14 Busy 用例）：HoldSend 后全部发送挂起，Release 恢复；
+    /// Dispose 先放行闸防挂起者死锁（随后 inner 关闭抛错由会话关闭路径吞）。</summary>
+    private sealed class GatedTransport(ITunnelTransport inner) : ITunnelTransport
+    {
+        private readonly SemaphoreSlim _sendGate = new(1, 1);
+        private int _held;
+
+        public void HoldSend()
+        {
+            _sendGate.Wait();
+            Volatile.Write(ref _held, 1);
+        }
+
+        public void ReleaseSend()
+        {
+            if (Interlocked.Exchange(ref _held, 0) == 1) _sendGate.Release();
+        }
+
+        public async ValueTask SendAsync(ReadOnlyMemory<byte> frame, CancellationToken ct = default)
+        {
+            await _sendGate.WaitAsync(ct);
+            try { await inner.SendAsync(frame, ct); }
+            finally { _sendGate.Release(); }
+        }
+
+        public ValueTask<byte[]?> ReceiveAsync(CancellationToken ct = default) => inner.ReceiveAsync(ct);
+
+        public async ValueTask DisposeAsync()
+        {
+            ReleaseSend();
+            await inner.DisposeAsync();
+        }
     }
 
     /// <summary>会话级桩：OnData 仅记账（模拟本地应用不消费），其余回调空操作。</summary>

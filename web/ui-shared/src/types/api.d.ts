@@ -1,5 +1,5 @@
 // 本文件由 export-ts 反射生成（06 §5、08 §2③），禁止手改。
-// 源：P2P.Client 展示 DTO + WsEventNames 常量（src/Tools/ExportTs @ 2026-10-02T08:00:10Z）。
+// 源：P2P.Client 展示 DTO + WsEventNames 常量（src/Tools/ExportTs @ 2026-10-02T08:27:26Z）。
 
 /** 响应包裹（04 §0：code=0 成功；!=0 见错误码表 04 §5）。 */
 export interface ApiEnvelope<T> {
@@ -182,6 +182,38 @@ export interface PingDeviceView {
   maxMs: number | null;
   viaRelay: boolean;
   durationMs: number;
+}
+
+
+export interface ServerTestView {
+  items: ServerTestResultView[];
+}
+
+
+export interface ServerTestResultView {
+  addr: string;
+  ok: boolean;
+  detail: string;
+}
+
+
+export interface TunnelView {
+  peerDeviceId: string;
+  label: string | null;
+  viaRelay: boolean;
+  isInitiator: boolean;
+}
+
+
+export interface TunnelListView {
+  items: TunnelView[];
+}
+
+
+export interface RekeyResultView {
+  peerDeviceId: string;
+  outcome: string;
+  detail: string | null;
 }
 
 

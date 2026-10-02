@@ -15,6 +15,19 @@ using P2P.Core.Tunnel;
 
 namespace P2P.Client.Tunnel;
 
+/// <summary>手动 REKEY 触发结果（M3-14 诊断入口，05 §2.3）：Ok=本轮完成；
+/// NotInitiator=本端为响应方（密钥由对端轮换）；Busy=上一轮未完；Failed=发送/等待 ACK 失败（携原因）。</summary>
+public enum RekeyOutcome
+{
+    Ok,
+    NotInitiator,
+    Busy,
+    Failed,
+}
+
+/// <summary>轮换结果：Outcome + 人读原因（Failed/Busy/NotInitiator 携带，Ok 为 null）。</summary>
+public sealed record RekeyResult(RekeyOutcome Outcome, string? Detail = null);
+
 /// <summary>可调参数（默认 20s/3 次；测试注入小间隔）。</summary>
 public sealed record TunnelSessionOptions
 {
@@ -547,8 +560,14 @@ public sealed class TunnelSession : IAsyncDisposable
 
     // ── REKEY 密钥轮换（M2-21，02 §4.4/SEC-14）──────────────────────
 
-    /// <summary>手动触发一次密钥轮换（TTL 之外的诊断入口，M3 设置页接线；响应方调用为空操作）。</summary>
-    public Task TriggerRekeyAsync() => IsInitiator ? PerformRekeyAsync(_cts.Token) : Task.CompletedTask;
+    /// <summary>手动触发一次密钥轮换（TTL 之外的诊断入口，M3-14 设置页接线；响应方=NotInitiator 空操作）。
+    /// 与定时轮换（吞异常仅日志）不同：结果可观测（Ok/Busy/Failed+原因）供 UI 反馈（05 §2.3）。</summary>
+    public async Task<RekeyResult> TriggerRekeyAsync()
+    {
+        if (!IsInitiator) return new RekeyResult(RekeyOutcome.NotInitiator, "本端为响应方：密钥由对端发起轮换");
+        try { return await PerformRekeyAsync(_cts.Token, observe: true); }
+        catch (OperationCanceledException) { return new RekeyResult(RekeyOutcome.Failed, "会话已关闭"); }
+    }
 
     private async Task RekeyLoopAsync(CancellationToken ct)
     {
@@ -562,24 +581,28 @@ public sealed class TunnelSession : IAsyncDisposable
     }
 
     /// <summary>一次轮换（发起方）：REKEY(0x08) → 等待接收循环内联完成（REKEY_ACK case 内
-    /// HandleAck+双钥切换，见上）→ 本任务仅观测结果。失败仅日志（下轮重试），不断链——
-    /// 会话健康由 KEEPALIVE 兜底。</summary>
-    private async Task PerformRekeyAsync(CancellationToken ct)
+    /// HandleAck+双钥切换，见上）→ 本任务仅观测结果。定时轮换（observe=false）失败仅日志
+    /// （下轮重试）不断链——会话健康由 KEEPALIVE 兜底；手动触发（observe=true）异常转为
+    /// Failed 结果；会话关闭（OCE）始终上抛由调用方定性。</summary>
+    private async Task<RekeyResult> PerformRekeyAsync(CancellationToken ct, bool observe = false)
     {
-        if (_staticKey is null || _peerStaticPub is null) return; // 密钥上下文缺失（构造时已保证，防御）
+        if (_staticKey is null || _peerStaticPub is null)
+            return new RekeyResult(RekeyOutcome.Failed, "密钥上下文缺失（构造时已保证，防御）");
         var ackTcs = new TaskCompletionSource<byte[]?>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (Interlocked.CompareExchange(ref _pendingRekeyAck, ackTcs, null) is not null)
-            return; // 上一轮未完（手动+定时并发）：跳过
+            return new RekeyResult(RekeyOutcome.Busy, "上一轮轮换尚未完成（已跳过）");
         using var initiator = PtpRekey.Start(SessionId, _staticKey, _peerStaticPub);
         Volatile.Write(ref _pendingRekeyInitiator, initiator);
         try
         {
             await SendChannelFrameAsync(PtpFrameType.Rekey, 0, initiator.RekeyPayload, ct).ConfigureAwait(false);
             await ackTcs.Task.WaitAsync(_options.RekeyAckTimeout, ct).ConfigureAwait(false); // 载荷/派生校验在接收循环内联抛出
+            return new RekeyResult(RekeyOutcome.Ok);
         }
         catch (Exception e) when (e is not OperationCanceledException)
         {
-            Log?.Invoke($"REKEY 失败（下轮重试）：{e.Message}");
+            if (!observe) Log?.Invoke($"REKEY 失败（下轮重试）：{e.Message}");
+            return new RekeyResult(RekeyOutcome.Failed, e.Message);
         }
         finally
         {

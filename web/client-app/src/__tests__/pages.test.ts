@@ -947,4 +947,103 @@ describe("Settings 走查", () => {
     expect(card.text()).toContain("不可用");
     expect(card.text()).toContain("中继");
   });
+
+  it("M3-14 服务端连通性：混合候选结果渲染（可达/不可达+详情）", async () => {
+    const { wrapper } = await mountPage(Settings, undefined, "/settings");
+
+    await wrapper.find('[data-testid="svtest-run"]').trigger("click");
+    await flushPromises();
+
+    const rows = wrapper.findAll('[data-testid="svtest-result"] .el-table__row');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.text()).toContain("127.0.0.1:7101");
+    expect(rows[0]!.text()).toContain("可达");
+    expect(rows[0]!.find(".el-tag--success").exists()).toBe(true);
+    expect(rows[1]!.text()).toContain("203.0.113.1:7000");
+    expect(rows[1]!.text()).toContain("不可达");
+    expect(rows[1]!.text()).toContain("连接超时");
+    expect(rows[1]!.find(".el-tag--danger").exists()).toBe(true);
+  });
+
+  it("M3-14 打洞队列：onMounted 拉取深度+当前目标；空闲态显示（空闲）", async () => {
+    const busy = await mountPage(Settings, undefined, "/settings");
+    const card = await vi.waitFor(() => {
+      const c = busy.wrapper.find('[data-testid="punch-result"]');
+      expect(c.exists()).toBe(true);
+      return c;
+    });
+    expect(card.text()).toContain("1"); // 队列深度
+    expect(card.text()).toContain("33333333-3333-4333-8333-333333333333");
+
+    // 空闲形态：深度 0 + 无当前目标
+    const idle = createDefaultState();
+    idle.diagnostics = { punchQueueDepth: 0, currentPunchPeer: null };
+    const idlePage = await mountPage(Settings, idle, "/settings");
+    const idleCard = await vi.waitFor(() => {
+      const c = idlePage.wrapper.find('[data-testid="punch-result"]');
+      expect(c.exists()).toBe(true);
+      return c;
+    });
+    expect(idleCard.text()).toContain("（空闲）");
+  });
+
+  it("M3-14 隧道与 REKEY：列表（标签/短码回退/承载/角色）+触发反馈+failed 详情+空态", async () => {
+    const state = createDefaultState();
+    const { wrapper } = await mountPage(Settings, state, "/settings");
+
+    const table = await vi.waitFor(() => {
+      const t = wrapper.find('[data-testid="tunnels-table"]');
+      expect(t.exists()).toBe(true);
+      return t;
+    });
+    const rows = table.findAll(".el-table__row");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.text()).toContain("d4e5f6"); // Label=映射目标远程码
+    expect(rows[0]!.text()).toContain("直连");
+    expect(rows[0]!.text()).toContain("发起方");
+    expect(rows[1]!.text()).toContain("33333333"); // 无映射指向：peerId 短码回退
+    expect(rows[1]!.text()).toContain("中继");
+    expect(rows[1]!.text()).toContain("响应方");
+
+    // 发起方触发 → ok 反馈
+    await wrapper.find('[data-testid="rekey-22222222-2222-4222-8222-222222222222"]').trigger("click");
+    await vi.waitFor(() => {
+      expect([...document.querySelectorAll(".el-message")]
+        .some((m) => m.textContent?.includes("轮换成功"))).toBe(true);
+    });
+
+    // 响应方触发 → not_initiator 信息提示（密钥由对端轮换）
+    state.rekeyOutcome = "not_initiator";
+    await wrapper.find('[data-testid="rekey-33333333-3333-4333-8333-333333333333"]').trigger("click");
+    await vi.waitFor(() => {
+      expect([...document.querySelectorAll(".el-message")]
+        .some((m) => m.textContent?.includes("本端为响应方"))).toBe(true);
+    });
+
+    // 空态：无活动隧道 → 空提示，无表格无按钮（清单"无隧道禁用"）
+    const empty = createDefaultState();
+    empty.tunnels = [];
+    const emptyPage = await mountPage(Settings, empty, "/settings");
+    await vi.waitFor(() => {
+      expect(emptyPage.wrapper.find('[data-testid="tunnels-empty"]').exists()).toBe(true);
+    });
+    expect(emptyPage.wrapper.find('[data-testid="tunnels-table"]').exists()).toBe(false);
+  });
+
+  it("M3-14 REKEY failed 形态：错误消息携带后端原因", async () => {
+    const state = createDefaultState();
+    state.rekeyOutcome = "failed";
+    state.rekeyDetail = "会话已关闭";
+    const { wrapper } = await mountPage(Settings, state, "/settings");
+
+    await vi.waitFor(() => {
+      expect(wrapper.find('[data-testid="rekey-22222222-2222-4222-8222-222222222222"]').exists())
+        .toBe(true);
+    });
+    await wrapper.find('[data-testid="rekey-22222222-2222-4222-8222-222222222222"]').trigger("click");
+    await vi.waitFor(() => {
+      expect([...document.querySelectorAll(".el-message")]
+        .some((m) => m.textContent?.includes("轮换失败：会话已关闭"))).toBe(true);
+    });
+  });
 });
