@@ -138,11 +138,25 @@ public sealed class LinuxTunNicManager : INicManager, IAsyncDisposable
         if (LinuxNative.ioctl(fd, LinuxNative.TunSetIf, ifr) != 0)
             ThrowErrno("TUNSETIFF");
 
-        // 同一 ifreq 复用取 if_index（rtnetlink 配址/拉起按索引定位接口）
-        Array.Clear(ifr, LinuxNative.IfFlagsOffset, sizeof(int));
-        if (LinuxNative.ioctl(fd, LinuxNative.SiocGifIndex, ifr) != 0)
+        // 取 if_index（rtnetlink 配址/拉起按索引定位接口）
+        _ifindex = QueryIfIndex(InterfaceName);
+    }
+
+    /// <summary>SIOCGIFINDEX 属 inet socket 层 ioctl——tun fd 是字符设备，其 ioctl 处理器
+    /// （drivers/net/tun.c tun_chr_ioctl）对未知命令返 EINVAL，在 tun fd 上调用必败
+    /// （2026-10-03 公网服务器实机首跑抓出：errno 22）。须经 AF_INET UDP socket 发出
+    /// （与 <see cref="CheckHealth"/> 同模式）。fd 生命周期由 ownsHandle 句柄 Dispose 唯一收口。</summary>
+    private static uint QueryIfIndex(string name)
+    {
+        var sock = LinuxNative.socket(LinuxNative.AfInet, LinuxNative.SockDgram, LinuxNative.IpProtoUdp);
+        if (sock < 0) ThrowErrno("socket(AF_INET)");
+        using var handle = new SafeFileHandle((IntPtr)sock, ownsHandle: true); // Dispose 即 close(fd)
+        var ifr = new byte[LinuxNative.IfReqSize];
+        Encoding.ASCII.GetBytes(name, ifr);
+        if (LinuxNative.ioctl(handle, LinuxNative.SiocGifIndex, ifr) != 0)
             ThrowErrno("SIOCGIFINDEX");
-        _ifindex = (uint)BinaryPrimitives.ReadInt32LittleEndian(ifr.AsSpan(LinuxNative.IfFlagsOffset));
+        var index = BinaryPrimitives.ReadInt32LittleEndian(ifr.AsSpan(LinuxNative.IfFlagsOffset));
+        return index <= 0 ? throw new NicException($"SIOCGIFINDEX 返回非法索引 {index}") : (uint)index;
     }
 
     // ── rtnetlink 配址与拉起（ip 命令降级）────────────────────────────
