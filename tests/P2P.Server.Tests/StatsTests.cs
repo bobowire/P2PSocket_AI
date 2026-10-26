@@ -89,10 +89,15 @@ public sealed class StatsTests : IAsyncLifetime
         Assert.NotNull(await client.ReceiveSkippingPushesAsync<HeartbeatAck>(skipPunchFire: true));
     }
 
-    /// <summary>跑完两段式信令（0x70→0x71→0x76→延后 Ack）返回 sessionId——会话落台账供 0x72 解析。</summary>
+    /// <summary>跑完两段式信令（0x70→0x71→0x76→延后 Ack）返回 sessionId——会话落台账供 0x72 解析。
+    /// 超时取证接线（2026-10-26 CI 实弹：PushWaitMs 30s 仍被并发满载击穿一次）：错误路径拒因帧
+    /// （0x7E/4001 l2_not_visible 等）落在发起方通道、表象即等待方静默——a/b 互为 DiagnosticPeer，
+    /// 超时消息直出双方现场（本端迟帧+对端在途帧，TestPcpClient 同款缝；绿灯零开销）。</summary>
     private async Task<Guid> PunchFlowAsync(TestPcpClient a, TestPcpClient b, Guid bId,
         string proto = "udp", byte? n = null)
     {
+        a.DiagnosticPeer = b;
+        b.DiagnosticPeer = a;
         await a.SendAsync(new PunchRequest(a.NextSeq(), a.Now(), MsgType.PunchRequest,
             bId, null, proto, UdpOnly("203.0.113.10", 50000), n));
         var invite = await b.ReceiveAsync<PunchInvite>(TestPcpClient.PushWaitMs) ?? throw new IOException("B 未收到 PunchInvite");

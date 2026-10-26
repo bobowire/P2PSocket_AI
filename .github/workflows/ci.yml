@@ -37,8 +37,19 @@ jobs:
           pnpm -C web install --frozen-lockfile
           pnpm -C web --filter @p2p/client-app --filter @p2p/server-app build
 
-      - name: dotnet test 全仓（08 §2）
-        run: dotnet test AI-P2P.sln -c Release --no-build --logger "trx;LogFileName=test-results.trx" --results-directory test-results
+      # 串行跑五套件（2026-10-26 实弹回流：单条 sln 命令=五测试进程并发挤占 2 核 runner，
+      # 信令推送调度长尾家族再现——StatsTests.PunchResult_Direct 0x71 静默 30s 击穿（302/303 过、
+      # 本地全绿，与 5b5a9c3 定性同族）；亦对齐任务清单留档口径「同机跑多轮测试套须串行——
+      # UdpNatSimulator/TcpStunStub 绑死 3478 跨进程必撞」。每套件独立 TRX：旧单名共享被
+      # 末个项目覆盖（当日 run 日志 3 次 Overwriting 实证，失败现场随覆盖丢失）；Integration
+      # 最长（~3.5min）殿后，总时长 ≈ 串行和 ≈ 4.5min 仍远低于 job 20min 预算。
+      - name: dotnet test 全仓（串行，08 §2）
+        run: |
+          for proj in Core Nic Client Server Integration; do
+            echo "== P2P.$proj.Tests =="
+            dotnet test "tests/P2P.$proj.Tests" -c Release --no-build \
+              --logger "trx;LogFileName=$proj.trx" --results-directory "test-results/$proj"
+          done
 
       # 失败自助排障（2026-10-24）：TRX 解析失败用例 → ::error 注解（注解经匿名 API 可读——
       # 当日连续多轮 CI 失败仅凭 job 日志排障需人工转贴，注解携带用例名+消息后免转贴）
@@ -48,7 +59,7 @@ jobs:
           python3 - <<'EOF'
           import glob, re, html
           seen = set()
-          for f in glob.glob('test-results/*.trx'):
+          for f in glob.glob('test-results/**/*.trx', recursive=True):
               t = open(f, encoding='utf-8').read()
               for m in re.finditer(r'<UnitTestResult[^>]*testName="([^"]+)"[^>]*outcome="Failed"[^>]*>(.*?)</UnitTestResult>', t, re.S):
                   name, body = m.group(1), m.group(2)
