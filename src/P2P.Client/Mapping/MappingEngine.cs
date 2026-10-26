@@ -2,8 +2,10 @@
 // - 每条启用映射一个 TcpListener.Bind(virtualIp:localPort)，accept → 分配 channelId →
 //   OPEN{proto, targetAddr, targetPort} → OPEN_OK 后双向 splice；
 // - 背压（M2-21，05 §2.3）：出站=每 channel 64KiB WINDOW 信用（TunnelSession.SendDataAsync 内挂起
-//   =暂停读本地 socket；对端 SpliceIn 消费后回 WINDOW 恢复）；入站写队列 256KiB 有界兜底
-//   （信用窗 64KiB < 队列容量，正常不触达满则断开路径）；
+//   =暂停读本地 socket；对端 SpliceIn 消费后回 WINDOW 恢复）；入站 256KiB 字节兜底（在队字节
+//   超限才断；信用窗按字节约束在途 ≤64KiB < 兜底上限，正常恒不可达。旧实现按条数折算容量
+//   （backlog/ChunkSize=191 条）与信用窗字节口径错位——小帧流量 64KiB 信用可兑换 >191 条，
+//   中继高 RTT 下消费停顿即误断好连接，已废止）；
 // - 状态机 disabled→punching→direct/relay/failed（M2-18：relay 态=打洞失败且回退开→中继承载；
 //   invalid=授权失效（M2-15：0x75 到达 MarkInvalid）；
 //   enable 前隧道复用检查：设备对隧道存活 → 直达 direct 不排队（02 §4.5 复用规则）；
@@ -431,14 +433,17 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         }
     }
 
-    /// <summary>隧道→本地：入站数据进有界写队列。</summary>
+    /// <summary>隧道→本地：入队 + 字节兜底（05 §2.3）。写入者=会话接收循环（每 channel 串行）。</summary>
     public void OnData(TunnelSession session, uint channelId, ReadOnlyMemory<byte> data)
     {
         if (!_channels.TryGetValue((session.SessionId, channelId), out var entry)) return; // 迟到容忍
-        if (!entry.Inbound.Writer.TryWrite(data.ToArray()))
+        var bytes = data.ToArray();
+        if (!entry.Inbound.Writer.TryWrite(bytes)) return; // 队列已 Complete=关闭中：迟到 DATA 容忍
+        // 字节兜底：正常恒不可达（对端信用窗约束未回报在途 ≤64KiB < BacklogLimit，M2-21）；
+        // 触达=混布旧对端（无信用灌流）或异常对端。写入串行，超限至多溢出一个帧。
+        if (Interlocked.Add(ref entry.QueuedBytes, bytes.Length) > entry.BacklogLimit)
         {
-            // 本地应用不消费且队列已满（256KiB）：断开该 channel（M1 入站侧简化，05 §2.3）
-            Log?.Invoke($"channel {channelId} 入站积压超限，断开");
+            Log?.Invoke($"channel {channelId} 入站积压超限（{entry.BacklogLimit}B），断开");
             _ = CloseEntryAsync(entry, notifyPeer: true);
         }
     }
@@ -816,11 +821,17 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         public Socket Socket { get; } = socket;
         public TunnelSession Session { get; } = session;
         public uint ChannelId { get; } = channelId;
-        /// <summary>隧道→本地 有界写队列。容量按字节上限折算为条数（单条 ≤ChunkSize，
-        /// backlog=256KiB → 191 条 ≈ 256KiB；M2-21 起对端发送受 64KiB 信用约束，
-        /// 队列为本地应用慢消费的兜底（正常不触达满则断开路径），05 §2.3）。</summary>
-        public Channel<byte[]> Inbound { get; } = Channel.CreateBounded<byte[]>(
-            new BoundedChannelOptions(Math.Max(1, backlog / ChunkSize)) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
+        /// <summary>隧道→本地 队列（无界计数；容量约束在字节维度 QueuedBytes/BacklogLimit）。
+        /// 对端信用窗按字节约束未回报在途 ≤64KiB（M2-21，05 §2.3），条数不设上界——64KiB 信用
+        /// 兑换的小帧条数可达数万，任何条数上限都会对小帧流量误断（旧 backlog/ChunkSize=191 条
+        /// 即此缺陷）；字节兜底对任意帧长分布恒与信用窗自洽（64KiB < 256KiB，正常不触达）。</summary>
+        public Channel<byte[]> Inbound { get; } =
+            Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
+        /// <summary>在队字节（已入队未消费）：写入者=会话接收循环（每 channel 串行）Interlocked.Add，
+        /// 消费方 SpliceInAsync 写本地 socket 后递减——跨线程共享，05 §0 白名单外的同步豁免点。</summary>
+        public long QueuedBytes;
+        /// <summary>入站字节兜底上限（构造入参 backlog）：触达=混布旧对端（无信用）或异常对端。</summary>
+        public int BacklogLimit { get; } = Math.Max(1, backlog);
         public CancellationTokenSource Cts { get; } = new();
         public Task? OutLoop { get; set; }
         public Task? InLoop { get; set; }
@@ -870,6 +881,7 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
             await foreach (var data in entry.Inbound.Reader.ReadAllAsync(ct))
             {
                 await entry.Socket.SendAsync(data, ct);
+                Interlocked.Add(ref entry.QueuedBytes, -data.Length); // 已落本地：字节兜底记账递减
                 // 消费回报（M2-21，05 §2.3）：本地应用已吸收 → 恢复对端发送信用；失败静默（会话将断链）
                 try { await entry.Session.SendWindowCreditAsync(entry.ChannelId, data.Length, ct); }
                 catch { /* 会话关闭中 */ }

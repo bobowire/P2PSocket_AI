@@ -6,6 +6,7 @@ using P2P.Client.Punch;
 using P2P.Client.Tunnel;
 using P2P.Core.Crypto;
 using P2P.Core.Protocol;
+using P2P.Core.Tunnel;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -82,7 +83,7 @@ public sealed class MappingEngineTests
                         {
                             using var s = client;
                             // 大读缓冲：单次读完成吸收多个分块，消费吞吐稳超内存隧道生产速率，
-                            // 避免 16MiB 突发打满引擎入站有界队列（191 条）触发设计内的"满则断 channel"
+                            // 避免突发打满引擎入站字节兜底触发设计内"超限断 channel"
                             var buf = new byte[256 * 1024];
                             var stream = s.GetStream();
                             try
@@ -190,14 +191,16 @@ public sealed class MappingEngineTests
 
         /// <summary>再建一条 A↔B 隧道（内存传输对 + 真实 PTP 握手，handler=两侧引擎）。
         /// attach=false 时不挂 TunnelHost 表——供打洞产物用例：挂表只走引擎 OnPunchCompleted 单一路径。
-        /// wrapA 包装 A 侧传输（GatedTransport 闸门注入）。</summary>
+        /// wrapA/wrapB 包装 A/B 侧传输（GatedTransport 闸门注入）。</summary>
         public async Task<TunnelSession> EstablishTunnelAsync(bool attach = true,
-            Func<ITunnelTransport, ITunnelTransport>? wrapA = null)
+            Func<ITunnelTransport, ITunnelTransport>? wrapA = null,
+            Func<ITunnelTransport, ITunnelTransport>? wrapB = null)
         {
             var staticA = EcKeyPair.Generate();
             var staticB = EcKeyPair.Generate();
-            var (taRaw, tb) = MemoryTransport.CreatePair();
+            var (taRaw, tbRaw) = MemoryTransport.CreatePair();
             var ta = wrapA is not null ? wrapA(taRaw) : taRaw;
+            var tb = wrapB is not null ? wrapB(tbRaw) : tbRaw;
             var idle = new TunnelSessionOptions { KeepaliveInterval = TimeSpan.FromHours(1) };
             var connectTask = TunnelSession.ConnectAsync(Guid.NewGuid(), PeerB, staticA,
                 staticB.ExportPublicKey(), ta, EngineA, idle);
@@ -418,8 +421,8 @@ public sealed class MappingEngineTests
     public async Task 出站背压_闸住隧道暂停读_解除后恢复()
     {
         await using var target = new LocalServer(echo: false); // 只计收不回写，隔离回程流量
-        // 内存隧道无网络节流：接收循环速率 2~3 倍于本地 socket 写出速率，默认 256KiB 入站队列
-        // 必然积满触发设计内"满则断 channel"（05 §2.3；生产由真实链路速率自然节流不触发）。
+        // 内存隧道无网络节流：接收循环速率 2~3 倍于本地 socket 写出速率，默认 256KiB 入站字节兜底
+        // 可能触顶触发设计内"超限断 channel"（05 §2.3；生产由真实链路速率自然节流不触发）。
         // 放大 backlog 至 32MiB 吸收整个 16MiB 突发——本用例只测"闸住→暂停读→解除→恢复"语义。
         await using var topo = new Topology(new MappingEngineOptions { BacklogBytes = 32 * 1024 * 1024 });
 
@@ -465,6 +468,66 @@ public sealed class MappingEngineTests
         await UntilAsync(() => target.Received >= total, "解除后目标侧收满", TimeSpan.FromSeconds(30));
 
         await topo.EngineA.DisableAsync(mappingId);
+    }
+
+    // ── 入站字节兜底（条数→字节口径修正回归；2026-10-26 实机中继链路小帧误断）──
+    // 旧实现：入站队列按条数封顶（backlog/ChunkSize=191 条），与对端 64KiB 信用窗的字节口径错位——
+    // 小帧流量（<343B/帧）64KiB 信用可兑换 >191 条，中继高 RTT/消费停顿下堆满条数即误断好连接。
+
+    /// <summary>闸停消费端：Block 后 B 侧 SpliceIn 消费一条即在 WINDOW 回报（B→A）上挂起，
+    /// 后续 DATA 持续入队不消费——复现"到达不停、消费停顿"的积压形态（生产=中继 RTT×发送闸）。</summary>
+    private static async Task<(TunnelSession SessionA, GatedTransport Gated, uint ChannelId)>
+        建立目标侧channel并闸停消费Async(Topology topo, LocalServer target)
+    {
+        GatedTransport? gated = null;
+        var sessionA = await topo.EstablishTunnelAsync(wrapB: t => gated = new GatedTransport(t));
+        var channelId = sessionA.AllocateChannelId();
+        await sessionA.SendOpenAsync(channelId, new OpenPayload("tcp", "self", target.Port));
+        await UntilAsync(() => target.Connections == 1, "目标侧接受连接（OPEN 已达）");
+        // 登记竞态余量：Connections 在 ConnectAsync 握手期即计，_channels 写入紧随其后——微秒级窗
+        await Task.Delay(300);
+        gated!.Block();
+        return (sessionA, gated, channelId);
+    }
+
+    [Fact]
+    public async Task 入站小帧超旧条数上限_信用窗内不断链_解除后全量到达()
+    {
+        // 655 帧 ×100B = 65,500B：≤64KiB 信用窗（A 侧发送全程不被信用卡住）且远超旧 191 条上限，
+        // <256KiB 字节兜底——旧实现第 192 条 TryWrite 失败即断 channel（红），字节口径下恒不可达（绿）
+        await using var target = new LocalServer(echo: false);
+        await using var topo = new Topology(); // 默认 BacklogBytes=256KiB（生产行为）
+        var logs = new ConcurrentQueue<string>();
+        topo.EngineB.Log += m => logs.Enqueue(m);
+
+        var (sessionA, gatedB, channelId) = await 建立目标侧channel并闸停消费Async(topo, target);
+        for (var i = 0; i < 655; i++)
+            await sessionA.SendDataAsync(channelId, new byte[100]); // 小帧直发（消费闸停，全部入队）
+        Assert.DoesNotContain(logs, m => m.Contains("入站积压超限")); // 65,500B<256KiB：不应触兜底
+
+        gatedB.Unblock(); // 消费恢复（WINDOW 回报放行 → SpliceIn 逐条落本地）
+        await UntilAsync(() => target.Received >= 65_500, "闸停期间入队的小帧全量到达目标");
+        Assert.DoesNotContain(logs, m => m.Contains("入站积压超限"));
+    }
+
+    [Fact]
+    public async Task 入站字节超兜底上限_断开channel_满帧口径同界()
+    {
+        // 直调 OnData 绕过信用窗（模拟混布旧对端/异常对端无信用灌流）：300 帧 ×1368B=410KiB>256KiB
+        // 兜底；第 192 帧累计 262,656B 首超 262,144B——与旧条数口径（191 条容量）同界，兜底语义不变
+        await using var target = new LocalServer(echo: false);
+        await using var topo = new Topology();
+        var logs = new ConcurrentQueue<string>();
+        topo.EngineB.Log += m => logs.Enqueue(m);
+
+        var (_, gatedB, channelId) = await 建立目标侧channel并闸停消费Async(topo, target);
+        var sessionB = topo.HostB.Get(topo.PeerA)!; // entry 挂在 B 侧会话键下
+        var frame = new byte[1368];
+        for (var i = 0; i < 300; i++)
+            topo.EngineB.OnData(sessionB, channelId, frame); // 消费闸停：纯入队，累计字节判定
+
+        await UntilAsync(() => logs.Any(m => m.Contains("入站积压超限")), "超兜底上限应断开 channel");
+        gatedB.Unblock();
     }
 
     [Fact]
