@@ -256,7 +256,7 @@ public sealed class LanSegmentTests : IAsyncLifetime
         // 段内：verdict 通过 → b 收 0x71 PunchInvite（Ack 延后至端点就绪，不在此断言）
         await a.SendAsync(new PunchRequest(a.NextSeq(), a.Now(), MsgType.PunchRequest,
             bId, mappingId, "tcp", null, null));
-        _ = await b.ReceiveAsync<PunchInvite>(15000);
+        _ = await b.ReceiveAsync<PunchInvite>(TestPcpClient.PushWaitMs);
 
         // 段收窄（更新 Cidr）→ 映射现值落在段外 → 0x70 拒 4002
         await UpdateSegmentAsync(b, segmentId, "10.0.0.0/8");

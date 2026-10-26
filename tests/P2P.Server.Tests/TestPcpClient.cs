@@ -22,6 +22,11 @@ internal sealed class StubFactory(Func<AppDbContext> create) : IDbContextFactory
 /// <summary>最小 PCP 客户端桩：分帧 + 可选 HMAC 签名/验签，辅助方法复现握手/注册时序。</summary>
 internal sealed class TestPcpClient : IAsyncDisposable
 {
+    /// <summary>信令推送等待上限（2026-10-26 CI 实证：并行夹具满载下 0x70→0x71 推送 15s 静默超时
+    /// 一次——本地与同 run 其余 302 用例全绿，纯调度长尾无确定性缺陷）：15s→30s 慢机余量。
+    /// 仅失败路径付出等待，绿灯路径零开销。</summary>
+    internal const int PushWaitMs = 30000;
+
     private readonly TcpClient _tcp;
     private readonly PipeReader _reader;
     private readonly PipeWriter _writer;
@@ -41,6 +46,12 @@ internal sealed class TestPcpClient : IAsyncDisposable
     public bool IncomingSigned { get; set; }
     /// <summary>消息时间戳时钟（默认系统真实时钟）：假时钟夹具注入后与服务端 TsWindow 对齐（M2-19）。</summary>
     public TimeProvider? Time { get; set; }
+
+    /// <summary>超时取证对端（2026-10-26 CI 瞬态取证缝）：错误路径（0x7E handler_error/4005/5005 等）
+    /// 的测试表象即「推送静默超时」——拒因帧落在发起方通道上，不在等待方。接线后本端等待超时
+    /// 即转储本端迟帧 + 对端在途帧进异常消息。不接线=零行为变化（AssertSilent 类「预期静默」
+    /// 用例不受取证读帧干扰）。</summary>
+    public TestPcpClient? DiagnosticPeer { get; set; }
 
     public static async Task<TestPcpClient> ConnectAsync(IPEndPoint endpoint)
     {
@@ -157,8 +168,27 @@ internal sealed class TestPcpClient : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
-            throw new TimeoutException($"未在 {timeoutMs}ms 内收到 {typeof(T).Name}");
+            var detail = DiagnosticPeer is null ? "" : await DescribeTimeoutSceneAsync();
+            throw new TimeoutException($"未在 {timeoutMs}ms 内收到 {typeof(T).Name}{detail}");
         }
+    }
+
+    /// <summary>超时现场取证（诊断缝，仅 DiagnosticPeer 接线时）：本端迟帧（迟到即证明调度长尾
+    /// 而非消息缺失）+ 对端在途帧（错误路径拒因）。读窗 800ms/端；取证自身失败不掩盖原超时。</summary>
+    private async Task<string> DescribeTimeoutSceneAsync()
+    {
+        var own = await DumpFramesAsync(800);
+        var peerFrames = "（未接线）";
+        if (DiagnosticPeer is not null)
+        {
+            try
+            {
+                var peer = await DiagnosticPeer.DumpFramesAsync(800);
+                peerFrames = peer.Count == 0 ? "无" : string.Join(" | ", peer);
+            }
+            catch { peerFrames = "（取证失败）"; }
+        }
+        return $"；现场：本端迟帧 {(own.Count == 0 ? "无" : string.Join(" | ", own))}；对端在途帧 {peerFrames}";
     }
 
     public async ValueTask DisposeAsync()

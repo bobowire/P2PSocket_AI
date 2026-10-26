@@ -111,11 +111,11 @@ public sealed class RelayServiceTests : IAsyncLifetime
     {
         await a.SendAsync(new PunchRequest(a.NextSeq(), a.Now(), MsgType.PunchRequest,
             bId, null, "udp", new EndpointPair(new P2P.Core.Protocol.Endpoint("203.0.113.10", 50000), null), null));
-        var invite = await b.ReceiveSkippingPushesAsync<PunchInvite>(15000, skipPunchFire: true)
+        var invite = await b.ReceiveSkippingPushesAsync<PunchInvite>(TestPcpClient.PushWaitMs, skipPunchFire: true)
             ?? throw new IOException("B 未收到 PunchInvite");
         await b.SendAsync(new PunchEndpoint(b.NextSeq(), b.Now(), MsgType.PunchEndpoint,
             invite.SessionId, new EndpointPair(new P2P.Core.Protocol.Endpoint("198.51.100.20", 50001), null)));
-        var ack = await a.ReceiveAsync<PunchRequestAck>(15000) ?? throw new IOException("A 未收到延后 Ack");
+        var ack = await a.ReceiveAsync<PunchRequestAck>(TestPcpClient.PushWaitMs) ?? throw new IOException("A 未收到延后 Ack");
         return ack.SessionId;
     }
 
@@ -123,8 +123,8 @@ public sealed class RelayServiceTests : IAsyncLifetime
     private static async Task<(RelayGrant A, RelayGrant B)> AllocateAsync(TestPcpClient a, TestPcpClient b, Guid sessionId)
     {
         await a.SendAsync(new RelayAllocate(a.NextSeq(), a.Now(), MsgType.RelayAllocate, sessionId));
-        var ga = await a.ReceiveAsync<RelayGrant>(15000) ?? throw new IOException("A 未收到 RelayGrant");
-        var gb = await b.ReceiveSkippingPushesAsync<RelayGrant>(15000, skipPunchFire: true)
+        var ga = await a.ReceiveAsync<RelayGrant>(TestPcpClient.PushWaitMs) ?? throw new IOException("A 未收到 RelayGrant");
+        var gb = await b.ReceiveSkippingPushesAsync<RelayGrant>(TestPcpClient.PushWaitMs, skipPunchFire: true)
             ?? throw new IOException("B 未收到 RelayGrant");
         return (ga, gb);
     }
@@ -479,11 +479,11 @@ public sealed class RelayServiceTests : IAsyncLifetime
     {
         await a.SendAsync(new PunchRequest(a.NextSeq(), a.Now(), MsgType.PunchRequest,
             bId, null, "udp", new EndpointPair(new P2P.Core.Protocol.Endpoint("203.0.113.10", 50000), null), null));
-        var invite = await b.ReceiveSkippingPushesAsync<PunchInvite>(15000, skipPunchFire: true)
+        var invite = await b.ReceiveSkippingPushesAsync<PunchInvite>(TestPcpClient.PushWaitMs, skipPunchFire: true)
             ?? throw new IOException("B 未收到 PunchInvite");
         await b.SendAsync(new PunchEndpoint(b.NextSeq(), b.Now(), MsgType.PunchEndpoint,
             invite.SessionId, new EndpointPair(new P2P.Core.Protocol.Endpoint("198.51.100.20", 50001), null)));
-        var ack = await a.ReceiveAsync<PunchRequestAck>(15000) ?? throw new IOException("A 未收到延后 Ack");
+        var ack = await a.ReceiveAsync<PunchRequestAck>(TestPcpClient.PushWaitMs) ?? throw new IOException("A 未收到延后 Ack");
         return (invite, ack.SessionId);
     }
 

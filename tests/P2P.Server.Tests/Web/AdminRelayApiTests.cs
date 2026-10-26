@@ -123,12 +123,12 @@ public sealed class AdminRelayApiTests : IAsyncLifetime
     {
         await a.SendAsync(new PunchRequest(a.NextSeq(), a.Now(), MsgType.PunchRequest,
             bId, null, "udp", new EndpointPair(new P2P.Core.Protocol.Endpoint("203.0.113.10", 50000), null), null));
-        var invite = await b.ReceiveSkippingPushesAsync<PunchInvite>(15000) ?? throw new IOException("B 未收到 PunchInvite");
+        var invite = await b.ReceiveSkippingPushesAsync<PunchInvite>(TestPcpClient.PushWaitMs) ?? throw new IOException("B 未收到 PunchInvite");
         await b.SendAsync(new PunchEndpoint(b.NextSeq(), b.Now(), MsgType.PunchEndpoint,
             invite.SessionId, new EndpointPair(new P2P.Core.Protocol.Endpoint("198.51.100.20", 50001), null)));
-        var ack = await a.ReceiveSkippingPushesAsync<PunchRequestAck>(15000) ?? throw new IOException("A 未收到延后 Ack");
+        var ack = await a.ReceiveSkippingPushesAsync<PunchRequestAck>(TestPcpClient.PushWaitMs) ?? throw new IOException("A 未收到延后 Ack");
         await a.SendAsync(new RelayAllocate(a.NextSeq(), a.Now(), MsgType.RelayAllocate, ack.SessionId));
-        return await a.ReceiveSkippingPushesAsync<RelayGrant>(15000) ?? throw new IOException("A 未收到 RelayGrant");
+        return await a.ReceiveSkippingPushesAsync<RelayGrant>(TestPcpClient.PushWaitMs) ?? throw new IOException("A 未收到 RelayGrant");
     }
 
     // ── RLP 线格式辅助（与 RelayServiceTests 同口径，测试侧独立实现不复产码）──
