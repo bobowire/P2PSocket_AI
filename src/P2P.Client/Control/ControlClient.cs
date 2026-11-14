@@ -343,33 +343,46 @@ public sealed class ControlClient : IAsyncDisposable
         var attempt = 0;
         while (!ct.IsCancellationRequested)
         {
-            var connected = false;
-            foreach (var (host, port) in _serverAddrs) // FR-C-604 依次尝试
+            try
             {
-                if (ct.IsCancellationRequested) break;
-                SetState(ControlClientState.Connecting);
-                try
+                var connected = false;
+                foreach (var (host, port) in _serverAddrs) // FR-C-604 依次尝试
                 {
-                    await ConnectAndHandshakeAsync(host, port, ct);
-                    connected = true;
-                    attempt = 0; // 任一地址成功即清零退避
-                    break;
+                    if (ct.IsCancellationRequested) break;
+                    SetState(ControlClientState.Connecting);
+                    try
+                    {
+                        await ConnectAndHandshakeAsync(host, port, ct);
+                        connected = true;
+                        attempt = 0; // 任一地址成功即清零退避
+                        break;
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; } // 停机：交外层退出
+                    catch (Exception e) // 含非停机 OCE（连接超时等）：一律视为本地址失败换下一个
+                    {
+                        Log?.Invoke($"连接 {host}:{port} 失败：{e.Message}");
+                        await CleanupConnectionAsync();
+                    }
                 }
-                catch (Exception e) when (e is not OperationCanceledException)
+
+                if (connected && !ct.IsCancellationRequested)
                 {
-                    Log?.Invoke($"连接 {host}:{port} 失败：{e.Message}");
+                    try { await RunSessionAsync(ct); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    catch (Exception e)
+                    {
+                        Log?.Invoke($"会话中断：{e.Message}");
+                    }
+                    attempt++;
                     await CleanupConnectionAsync();
                 }
             }
-
-            if (connected && !ct.IsCancellationRequested)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; } // 唯一正常出口：停机
+            catch (Exception e)
             {
-                try { await RunSessionAsync(ct); }
-                catch (Exception e) when (e is not OperationCanceledException)
-                {
-                    Log?.Invoke($"会话中断：{e.Message}");
-                }
-                attempt++;
+                // 7×24 兜底（2026-11-12 断网不恢复根因家族）：任何未预期异常不得杀死重连循环——
+                // 循环死亡=状态永久滞留（Connecting/Handshaking），此后无人再发起连接，只能重启进程
+                Log?.Invoke($"重连循环异常（已忽略，继续退避重试）：{e.Message}");
                 await CleanupConnectionAsync();
             }
 
@@ -388,12 +401,34 @@ public sealed class ControlClient : IAsyncDisposable
         }
     }
 
+    /// <summary>连接+握手（自超时 OCE → 普通异常转换层）。</summary>
     private async Task ConnectAndHandshakeAsync(string host, int port, CancellationToken ct)
     {
-        using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        connectCts.CancelAfter(_options.ConnectTimeout);
+        // 全程有界（2026-11-12 断网不恢复根因修复）：连接段 ConnectTimeout、握手段 RequestTimeout
+        // 分阶段起表（CancelAfter 重定表）。此前两处无界/裸传 ct：
+        // ①黑洞路由（路由器断电但网卡仍在）SYN 无响应 → ConnectAsync 超时抛 OCE，而 RunLoop
+        //   旧过滤条件放行一切 OCE → 异常穿透整个重连循环（循环死亡、状态永久滞留 Connecting，
+        //   此后无人再连接，只能重启进程——日志 13:26:40 后 [control] 再无任何输出即此）；
+        // ②TCP 连上但对端/中间盒不答（挂起型故障）→ HelloAck 读取无超时 → 永久滞留 Handshaking。
+        // 自超时 OCE 在此转为普通异常上抛（RunLoop 视为本地址失败换下一个）；仅停机（ct）OCE 原样传播。
+        try
+        {
+            await ConnectAndHandshakeCoreAsync(host, port, ct);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new ControlClientException(
+                $"连接/握手 {host}:{port} 超时（连接 {_options.ConnectTimeout.TotalSeconds:0.#}s"
+                + $" + 握手 {_options.RequestTimeout.TotalSeconds:0.#}s）");
+        }
+    }
+
+    private async Task ConnectAndHandshakeCoreAsync(string host, int port, CancellationToken ct)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(_options.ConnectTimeout);
         _tcp = new TcpClient();
-        await _tcp.ConnectAsync(host, port, connectCts.Token);
+        await _tcp.ConnectAsync(host, port, deadline.Token);
         _tcp.NoDelay = true; // 02 §2.1
         _stream = _tcp.GetStream();
         _reader = PipeReader.Create(_stream);
@@ -401,14 +436,15 @@ public sealed class ControlClient : IAsyncDisposable
         _lastPeerSeq = 0;
         _hmacEnabled = false;
         SetState(ControlClientState.Handshaking);
+        deadline.CancelAfter(_options.RequestTimeout); // 连接段通过：重定表为握手段预算
 
         // Hello：ts 不校（OQ-12：尚无共享时间基准）；deviceId 仅注册过设备携带
         _nonceC = RandomGenerator.Bytes(16);
         var sentAt = LocalNowMs;
         await SendWireAsync(PcpCodec.Encode(new Hello(NextSeq(), (ulong)sentAt, MsgType.Hello,
-            _options.ProtocolVersionOverride ?? ProtocolVersion.Current, DeviceId, _nonceC)), ct);
+            _options.ProtocolVersionOverride ?? ProtocolVersion.Current, DeviceId, _nonceC)), deadline.Token);
 
-        var helloAck = PcpCodec.Decode<HelloAck>(await ReadHandshakeFrameAsync(ct));
+        var helloAck = PcpCodec.Decode<HelloAck>(await ReadHandshakeFrameAsync(deadline.Token));
         // 时钟对齐（OQ-12）：RTT/2 补偿。此后全部出站 ts 用校准后时钟
         Clock.Calibrate(helloAck.ServerTs, sentAt, LocalNowMs);
         _nonceS = helloAck.NonceS;
@@ -417,7 +453,7 @@ public sealed class ControlClient : IAsyncDisposable
         switch (helloAck.Status)
         {
             case HelloStatus.VersionNotSupported:
-                await HandleVersionRejectedAsync(helloAck, ct);
+                await HandleVersionRejectedAsync(helloAck, deadline.Token);
                 return; // 不可达：HandleVersionRejectedAsync 恒抛（保持退避重连语义）
             case HelloStatus.NeedRegister:
                 SetState(ControlClientState.NeedRegister); // M1-24 向导在此发 0x10（未签名）
@@ -426,12 +462,12 @@ public sealed class ControlClient : IAsyncDisposable
 
         // Proof：HMAC(deviceSecret, nonceC|nonceS)（02 §2.3；服务端握手期不校 ts）
         await SendWireAsync(PcpCodec.Encode(new Proof(NextSeq(), TimestampMs(), MsgType.Proof,
-            Mac.HmacSha256(_deviceSecret, NonceInput()))), ct);
+            Mac.HmacSha256(_deviceSecret, NonceInput()))), deadline.Token);
 
         // ProofAck(ok) 时服务端已启用签名（先派生 connMacKey 再发送）；ProofAck(false)/Error 为未签名。
         // 客户端可自行派生同一 connMacKey，先按签名帧解，失败回退未签名。
         var candidateKey = Hkdf.Derive(_deviceSecret, NonceInput(), "pcp-mac"u8, 32);
-        var proofFrame = await ReadHandshakeFrameAsync(ct);
+        var proofFrame = await ReadHandshakeFrameAsync(deadline.Token);
         byte[] proofBody;
         try { proofBody = PcpCodec.DecodeSigned(proofFrame, candidateKey); }
         catch (ProtocolException) { proofBody = proofFrame; }

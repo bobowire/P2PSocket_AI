@@ -380,76 +380,93 @@ public sealed class TunnelSession : IAsyncDisposable
             }
             ReceivedFrames++;
 
-            switch (header.Type)
+            // 单帧处理异常（handler/反序列化）只丢该帧不断链：帧已过 AEAD 认证，载荷异常属对端
+            // 实现缺陷/版本错配——与「未知帧容忍丢弃（02 §7）」同口径。原样上抛会击杀接收循环
+            // 且不触发 Disconnect（僵尸会话：不再收帧，仅待 keepalive 连续未响应才断链重建，
+            // 窗口内全部 channel 冻结——7×24 稳定性收口）。
+            try
             {
-                case PtpFrameType.Keepalive:
-                    Volatile.Write(ref _misses, 0); // 对端存活证明（响应帧或对端主动心跳均算）
-                    break;
-                case PtpFrameType.Ping:
-                    _ = TrySendPongAsync(header.ChannelId, plain);
-                    break;
-                case PtpFrameType.Pong:
-                    if (_pingTcs is { } tcs && plain.Length == 8)
-                    {
-                        var sent = BitConverter.ToInt64(plain);
-                        tcs.TrySetResult(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - sent);
-                    }
-                    break;
-                case PtpFrameType.Open:
-                    _handler.OnOpen(this, header.ChannelId, MessagePackSerializer.Deserialize<OpenPayload>(plain));
-                    break;
-                case PtpFrameType.OpenResult:
-                    _handler.OnOpenResult(this, header.ChannelId, MessagePackSerializer.Deserialize<OpenResultPayload>(plain));
-                    break;
-                case PtpFrameType.Data:
-                    _handler.OnData(this, header.ChannelId, plain);
-                    break;
-                case PtpFrameType.UdpDgram:
-                    _handler.OnUdpDgram(this, header.ChannelId, plain);
-                    break;
-                case PtpFrameType.Frag:
-                    HandleFrag(header.ChannelId, plain);
-                    break;
-                case PtpFrameType.Rekey:
-                    if (IsInitiator) Log?.Invoke("REKEY 到达但本端为发起方（不期望），丢弃");
-                    else HandleRekeyRequest(plain);
-                    break;
-                case PtpFrameType.RekeyAck:
+                await HandleDecryptedFrameAsync(header, plain);
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                Log?.Invoke($"帧 0x{header.Type:X2} 处理异常（丢弃该帧）：{e.Message}");
+            }
+        }
+    }
+
+    /// <summary>已认证帧分发（接收循环调用）：单帧异常由调用方丢弃容忍（见调用点注记）。</summary>
+    private async Task HandleDecryptedFrameAsync(PtpHeader header, byte[] plain)
+    {
+        switch (header.Type)
+        {
+            case PtpFrameType.Keepalive:
+                Volatile.Write(ref _misses, 0); // 对端存活证明（响应帧或对端主动心跳均算）
+                break;
+            case PtpFrameType.Ping:
+                _ = TrySendPongAsync(header.ChannelId, plain);
+                break;
+            case PtpFrameType.Pong:
+                if (_pingTcs is { } tcs && plain.Length == 8)
                 {
-                    // 内联完成轮换（发起方）：HandleAck+双钥切换在本循环内原子完成——响应方发 ACK
-                    // 即换发送钥，紧跟 ACK 的新代帧到达时本端环已就位（消除"唤醒异步任务再轮换"竞态窗）
-                    var initiator = Volatile.Read(ref _pendingRekeyInitiator);
-                    var pending = Volatile.Read(ref _pendingRekeyAck);
-                    if (initiator is null || pending is null)
-                    {
-                        Log?.Invoke("REKEY_ACK 无进行中轮换，丢弃");
-                        break;
-                    }
-                    try
-                    {
-                        await RotateKeysAsync(initiator.HandleAck(plain)).ConfigureAwait(false);
-                        Log?.Invoke($"REKEY 完成（发起方，代际 {_recvRing.Generation}，sessionId 不变）");
-                        pending.TrySetResult(plain);
-                    }
-                    catch (Exception e) when (e is not OperationCanceledException)
-                    {
-                        pending.TrySetException(e); // 发起方任务（PerformRekeyAsync）记失败并日志
-                    }
+                    var sent = BitConverter.ToInt64(plain);
+                    tcs.TrySetResult(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - sent);
+                }
+                break;
+            case PtpFrameType.Open:
+                _handler.OnOpen(this, header.ChannelId, MessagePackSerializer.Deserialize<OpenPayload>(plain));
+                break;
+            case PtpFrameType.OpenResult:
+                _handler.OnOpenResult(this, header.ChannelId, MessagePackSerializer.Deserialize<OpenResultPayload>(plain));
+                break;
+            case PtpFrameType.Data:
+                _handler.OnData(this, header.ChannelId, plain);
+                break;
+            case PtpFrameType.UdpDgram:
+                _handler.OnUdpDgram(this, header.ChannelId, plain);
+                break;
+            case PtpFrameType.Frag:
+                HandleFrag(header.ChannelId, plain);
+                break;
+            case PtpFrameType.Rekey:
+                if (IsInitiator) Log?.Invoke("REKEY 到达但本端为发起方（不期望），丢弃");
+                else HandleRekeyRequest(plain);
+                break;
+            case PtpFrameType.RekeyAck:
+            {
+                // 内联完成轮换（发起方）：HandleAck+双钥切换在接收路径内原子完成——响应方发 ACK
+                // 即换发送钥，紧跟 ACK 的新代帧到达时本端环已就位（消除"唤醒异步任务再轮换"竞态窗）
+                var initiator = Volatile.Read(ref _pendingRekeyInitiator);
+                var pending = Volatile.Read(ref _pendingRekeyAck);
+                if (initiator is null || pending is null)
+                {
+                    Log?.Invoke("REKEY_ACK 无进行中轮换，丢弃");
                     break;
                 }
-                case PtpFrameType.Window:
-                    if (MessagePackSerializer.Deserialize<WindowCreditPayload>(plain) is { CreditBytes: > 0 } credit
-                        && _credits.TryGetValue(header.ChannelId, out var gate))
-                        gate.Grant((int)Math.Min(credit.CreditBytes, (uint)int.MaxValue));
-                    break;
-                case PtpFrameType.Close:
-                    _handler.OnClose(this, header.ChannelId);
-                    RemoveChannelCredit(header.ChannelId);
-                    break;
-                default:
-                    Log?.Invoke($"未知帧 type 0x{header.Type:X2} 容忍丢弃（02 §7）");
-                    break;
+                try
+                {
+                    await RotateKeysAsync(initiator.HandleAck(plain)).ConfigureAwait(false);
+                    Log?.Invoke($"REKEY 完成（发起方，代际 {_recvRing.Generation}，sessionId 不变）");
+                    pending.TrySetResult(plain);
+                }
+                catch (Exception e) when (e is not OperationCanceledException)
+                {
+                    pending.TrySetException(e); // 发起方任务（PerformRekeyAsync）记失败并日志
+                }
+                break;
             }
+            case PtpFrameType.Window:
+                if (MessagePackSerializer.Deserialize<WindowCreditPayload>(plain) is { CreditBytes: > 0 } credit
+                    && _credits.TryGetValue(header.ChannelId, out var gate))
+                    gate.Grant((int)Math.Min(credit.CreditBytes, (uint)int.MaxValue));
+                break;
+            case PtpFrameType.Close:
+                _handler.OnClose(this, header.ChannelId);
+                RemoveChannelCredit(header.ChannelId);
+                break;
+            default:
+                Log?.Invoke($"未知帧 type 0x{header.Type:X2} 容忍丢弃（02 §7）");
+                break;
         }
     }
 

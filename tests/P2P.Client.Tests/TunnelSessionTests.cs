@@ -271,6 +271,51 @@ public sealed class TunnelSessionTests
         }
     }
 
+    /// <summary>2026-11-13 7×24 稳定性回归：接收循环内 handler 异常只丢该帧不断链。
+    /// 旧缺陷：分发 switch 无防护，单帧处理异常（对端载荷缺陷/版本错配致反序列化失败等）原样
+    /// 上抛击杀接收循环且不触发 Disconnect——僵尸会话不再收帧，仅待 keepalive 连续未响应才断链
+    /// 重建，窗口内全部 channel 冻结。修复后：坏帧丢弃+告警，后续帧照常分发。</summary>
+    [Fact]
+    public async Task Handler单帧异常_仅丢该帧_会话存活继续分发()
+    {
+        var (staticA, staticB) = StaticKeys();
+        var (ta, tb) = MemoryTransport.CreatePair();
+        var hb = new ThrowingDataHandler { DataThrows = 2 }; // 前两帧炸、第三帧正常
+        var options = new TunnelSessionOptions { KeepaliveInterval = Idle };
+        var sessionId = Guid.NewGuid();
+        var peerA = Guid.NewGuid();
+
+        var connectTask = TunnelSession.ConnectAsync(sessionId, Guid.NewGuid(), staticA,
+            staticB.ExportPublicKey(), ta, NullChannelHandler.Instance, options);
+        var t1 = await tb.ReceiveAsync() ?? throw new IOException("无 THello1");
+        var acceptTask = TunnelSession.AcceptAsync(peerA, t1, staticB,
+            staticA.ExportPublicKey(), tb, hb, options);
+        var a = await connectTask;
+        var b = await acceptTask;
+
+        await using (a)
+        await using (b)
+        {
+            var logs = new ConcurrentQueue<string>();
+            b.Log += logs.Enqueue;
+
+            var ch = a.AllocateChannelId();
+            await a.SendDataAsync(ch, "boom-1"u8.ToArray());
+            await a.SendDataAsync(ch, "boom-2"u8.ToArray());
+            await a.SendDataAsync(ch, "survive"u8.ToArray());
+
+            // 红态（旧代码）：第一帧异常即杀接收循环，DataCalls 恒 1，本等待超时
+            await UntilAsync(() => Volatile.Read(ref hb.DataCalls) >= 3,
+                "坏帧丢弃后循环存活：第三帧照常进入分发");
+            Assert.False(b.IsClosed);
+            Assert.Equal(2, logs.Count(l => l.Contains("处理异常（丢弃该帧）")));
+
+            // 收发循环均在：Ping 往返（PONG 由 b 接收路径内联回发）
+            var rtt = await a.PingAsync();
+            Assert.True(rtt >= TimeSpan.Zero);
+        }
+    }
+
     // —— 桩与工具 ——————————————————————————————————————————————
 
     private sealed record Event(uint ChannelId, string Kind, object? Payload);
@@ -283,6 +328,22 @@ public sealed class TunnelSessionTests
         public void OnData(TunnelSession session, uint channelId, ReadOnlyMemory<byte> data) => Events.Enqueue(new(channelId, "data", data.ToArray()));
         public void OnUdpDgram(TunnelSession session, uint channelId, ReadOnlyMemory<byte> datagram) => Events.Enqueue(new(channelId, "udp_dgram", datagram.ToArray()));
         public void OnClose(TunnelSession session, uint channelId) => Events.Enqueue(new(channelId, "close", null));
+    }
+
+    /// <summary>OnData 前 <see cref="DataThrows"/> 次抛异常（接收循环异常防护用例）。</summary>
+    private sealed class ThrowingDataHandler : ITunnelChannelHandler
+    {
+        public int DataThrows;
+        public int DataCalls;
+        public void OnOpen(TunnelSession session, uint channelId, OpenPayload open) { }
+        public void OnOpenResult(TunnelSession session, uint channelId, OpenResultPayload result) { }
+        public void OnData(TunnelSession session, uint channelId, ReadOnlyMemory<byte> data)
+        {
+            var n = Interlocked.Increment(ref DataCalls);
+            if (n <= DataThrows) throw new InvalidOperationException("handler 异常（对端载荷缺陷模拟）");
+        }
+        public void OnUdpDgram(TunnelSession session, uint channelId, ReadOnlyMemory<byte> datagram) { }
+        public void OnClose(TunnelSession session, uint channelId) { }
     }
 }
 

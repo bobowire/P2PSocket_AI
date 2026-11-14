@@ -1,9 +1,12 @@
+using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Sockets;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using P2P.Client.Control;
 using P2P.Core.Crypto;
 using P2P.Core.Protocol;
+using P2P.Core.Utils;
 using P2P.Server.Data;
 using P2P.Server.Services;
 using Xunit;
@@ -300,5 +303,59 @@ public sealed class ControlClientIntegrationTests : IAsyncLifetime
         var ack = await client.SendRequestAsync<DeviceUpdateAck>(seq => new DeviceUpdate(
             seq, client.TimestampMs(), MsgType.DeviceUpdate, "after-push-storm"));
         Assert.True(ack.Ok);
+    }
+
+    /// <summary>2026-11-12 断网不恢复回归（7×24 稳定性修复）：TCP 连上但对端永不应答
+    ///（黑洞路由/挂起中间盒形态）。旧缺陷两族：①HelloAck 读取无超时 → 永久滞留 Handshaking，
+    /// 重连循环死等（本测试红态：失败日志恒 0 条）；②SYN 黑洞下 ConnectAsync 超时 OCE 被
+    /// RunLoop 旧过滤条件放行 → 穿透杀死整个重连循环（生产日志 13:26:40 后 [control] 再无输出，
+    /// 只能重启进程）。修复后：连接+握手全程有界，失败即退避重试，循环持续存活。</summary>
+    [Fact]
+    public async Task 握手黑洞_超时有界失败_重连循环持续存活()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start(16);
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var held = new List<Socket>(); // 持住已接受 socket：句柄不被 GC 回收（回收会 RST 对端，失败原因变成连接重置而非握手超时，断言失真）
+        var hang = Task.Run(async () =>
+        {
+            while (true)
+            {
+                try
+                {
+                    var sock = await listener.AcceptSocketAsync(); // 接受后挂起：不读不写不断（黑洞形态）
+                    lock (held) held.Add(sock);
+                }
+                catch (Exception e) when (e is SocketException or ObjectDisposedException) { return; }
+            }
+        });
+        try
+        {
+            var logs = new ConcurrentQueue<string>();
+            await using var client = new ControlClient(new[] { $"127.0.0.1:{port}" },
+                new ControlClientOptions
+                {
+                    ConnectTimeout = TimeSpan.FromMilliseconds(300),
+                    RequestTimeout = TimeSpan.FromMilliseconds(300),
+                    HeartbeatInterval = TimeSpan.FromHours(1), // 测试不跑心跳周期
+                },
+                backoff: new BackoffPolicy(TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(300)));
+            client.Log += logs.Enqueue;
+
+            // 红态（旧代码）：首次连接 TCP 即成、Hello 后死等 HelloAck，失败日志恒 0
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            while (logs.Count(l => l.Contains("失败")) < 3 && !cts.IsCancellationRequested)
+                await Task.Delay(50, cts.Token);
+            var failures = logs.Where(l => l.Contains("失败")).ToList();
+            Assert.True(failures.Count >= 3,
+                $"重连循环未存活（失败仅 {failures.Count} 条）：{string.Join(" | ", logs)}");
+            Assert.All(failures, l => Assert.Contains("超时", l)); // 失败原因=握手超时（有界）
+        }
+        finally
+        {
+            listener.Stop();
+            await hang;
+            lock (held) foreach (var s in held) s.Dispose();
+        }
     }
 }
