@@ -125,9 +125,10 @@ public class PtpTunnelTests
     public void ReplayWindow_BeyondWindow_Rejected()
     {
         var w = new ReplayWindow();
-        Assert.True(w.Accept(100));
-        Assert.False(w.Accept(100 - ReplayWindow.WindowSize)); // 恰出窗
-        Assert.True(w.Accept(90));                              // 窗口内
+        var base_ = 5000UL; // 基准须 > WindowSize（M6 决议② 扩 4096 后窗口内回退深度大幅放宽）
+        Assert.True(w.Accept(base_));
+        Assert.False(w.Accept(base_ - ReplayWindow.WindowSize));      // 恰出窗
+        Assert.True(w.Accept(base_ - 10));                            // 窗口内
     }
 
     [Fact]
@@ -223,5 +224,55 @@ public class PtpTunnelTests
         var (_, keys2) = a2.HandleTHello2(b2.THello2Wire);
 
         Assert.False(keys1.KeyAtoB.AsSpan().SequenceEqual(keys2.KeyAtoB));
+    }
+}
+
+// ── M6-03 ReplayWindow 4096 回归（决议②：跨 conv 乱序深度吸收；同 counter 重放拦截不变）──
+
+public class ReplayWindow4096Tests
+{
+    [Fact]
+    public void 窗口内深度乱序_全部接受()
+    {
+        var w = new ReplayWindow();
+        Assert.Equal(4096, ReplayWindow.WindowSize);
+        var base_ = 5000uL;
+        // 深度乱序：先收高 counter，再补 4000 深度的旧帧（KCP 跨 conv 乱序形态）
+        Assert.True(w.Accept(base_));
+        for (var i = 1; i <= 4000; i++)
+            Assert.True(w.Accept(base_ - (ulong)i), $"diff={i} 须在窗内");
+    }
+
+    [Fact]
+    public void 出窗拒绝_与恰在窗内分界()
+    {
+        var w = new ReplayWindow();
+        Assert.True(w.Accept(10_000));
+        Assert.False(w.Accept(10_000 - ReplayWindow.WindowSize));     // 恰出窗（diff=4096）
+        Assert.True(w.Accept(10_000 - (ReplayWindow.WindowSize - 1))); // 恰在窗（diff=4095）
+    }
+
+    [Fact]
+    public void 窗口内任意diff_重复拦截()
+    {
+        var w = new ReplayWindow();
+        Assert.True(w.Accept(100_000));
+        // 抽查跨字边界（diff 63/64/65、127/128、4095）——同 counter 重放必拒（与窗口大小无关）
+        foreach (var diff in new ulong[] { 1, 63, 64, 65, 127, 128, 1000, 4095 })
+        {
+            Assert.True(w.Accept(100_000 - diff), $"diff={diff} 首达");
+            Assert.False(w.Accept(100_000 - diff), $"diff={diff} 重放拦截");
+        }
+    }
+
+    [Fact]
+    public void 大跨跳_整窗重置_旧帧全拒()
+    {
+        var w = new ReplayWindow();
+        Assert.True(w.Accept(1));
+        Assert.True(w.Accept(100));
+        Assert.True(w.Accept(100 + (ulong)ReplayWindow.WindowSize + 10)); // 跨跳超窗：位图重置
+        Assert.False(w.Accept(100)); // 旧帧出窗
+        Assert.True(w.Accept(100 + (ulong)ReplayWindow.WindowSize + 9));  // 新窗内迟达
     }
 }

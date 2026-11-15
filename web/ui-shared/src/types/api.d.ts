@@ -1,5 +1,5 @@
 // 本文件由 export-ts 反射生成（06 §5、08 §2③），禁止手改。
-// 源：P2P.Client 展示 DTO + WsEventNames 常量（src/Tools/ExportTs @ 2026-10-23T13:54:27Z）。
+// 源：P2P.Client 展示 DTO + WsEventNames 常量（src/Tools/ExportTs @ 2026-11-15T09:24:35Z）。
 
 /** 响应包裹（04 §0：code=0 成功；!=0 见错误码表 04 §5）。 */
 export interface ApiEnvelope<T> {
@@ -47,9 +47,9 @@ export interface GroupInfo {
 export interface ClientSettings {
   serverAddrs: string[];
   localWebPort: number;
-  /** M5-12 可配置化（07 §14.2 v1.83）：本地 Web token 鉴权开关，默认 false=免鉴权出厂可用——true=加固（重启生效） */
   webTokenAuth: boolean;
   punchConcurrency: number;
+  kcpBearer: boolean;
   keepaliveSec: number;
   reconnect: ReconnectSettings;
 }
@@ -200,11 +200,29 @@ export interface ServerTestResultView {
 }
 
 
+export interface KcpBearerStatsSnapshot {
+  convCount: number;
+  unknownConvDropped: number;
+  malformedDropped: number;
+  nonWhitelistDropped: number;
+  rawQueueDropped: number;
+  degradedFrameCount: number;
+  segmentsSent: number;
+  segmentsReceived: number;
+  retransmissions: number;
+  fastRetransmissions: number;
+  acksSent: number;
+  acksReceived: number;
+  windowUpdates: number;
+}
+
+
 export interface TunnelView {
   peerDeviceId: string;
   label: string | null;
   viaRelay: boolean;
   isInitiator: boolean;
+  kcp: KcpBearerStatsSnapshot | null;
 }
 
 

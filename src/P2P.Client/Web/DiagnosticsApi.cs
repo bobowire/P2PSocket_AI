@@ -32,8 +32,10 @@ public sealed record ServerTestResultView(string Addr, bool Ok, string Detail);
 /// <summary>server-test 结果：全部候选逐个探测（短路语义仅探测可达性诊断，不做换址）。</summary>
 public sealed record ServerTestView(ServerTestResultView[] Items);
 
-/// <summary>活隧道行（M3-14）：Label=本地映射运行时反查的远程码（无映射指向时 null，显示短 id）。</summary>
-public sealed record TunnelView(Guid PeerDeviceId, string? Label, bool ViaRelay, bool IsInitiator);
+/// <summary>活隧道行（M3-14）：Label=本地映射运行时反查的远程码（无映射指向时 null，显示短 id）。
+/// Kcp（M6-08 生产观察）：KCP 承载计数快照（承载层+全 conv 算法层聚合；非 KCP 承载 null）。</summary>
+public sealed record TunnelView(Guid PeerDeviceId, string? Label, bool ViaRelay, bool IsInitiator,
+    KcpBearerStatsSnapshot? Kcp = null);
 
 /// <summary>活隧道列表快照（TunnelHost 本地表，passive 亦可达）。</summary>
 public sealed record TunnelListView(TunnelView[] Items);
@@ -107,7 +109,8 @@ public static class DiagnosticsApi
                     .Where(s => !s.IsClosed)
                     .OrderBy(s => s.PeerDeviceId) // 确定性排序
                     .Select(s => new TunnelView(
-                        s.PeerDeviceId, peerLabelLookup?.Invoke(s.PeerDeviceId), s.ViaRelay, s.IsInitiator))
+                        s.PeerDeviceId, peerLabelLookup?.Invoke(s.PeerDeviceId), s.ViaRelay, s.IsInitiator,
+                        s.KcpStats)) // M6-08：KCP 承载计数（非 KCP 承载 null）
                     .ToArray();
                 return Api.Ok(new TunnelListView(items));
             }

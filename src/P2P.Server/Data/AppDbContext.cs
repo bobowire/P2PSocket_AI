@@ -193,6 +193,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options, DeviceS
             e.Property(x => x.Result).HasColumnName("result");
             e.Property(x => x.Reason).HasColumnName("reason");
             e.Property(x => x.DurationMs).HasColumnName("duration_ms");
+            e.Property(x => x.Bearer).HasColumnName("bearer"); // M6-08：nullable int 列（迁移 AddPunchStatBearer）
             // DDL 引用 devices(id)；无导航（统计不参与设备对象图）
             e.HasOne<Device>().WithMany().HasForeignKey(x => x.InitiatorId).OnDelete(DeleteBehavior.Restrict);
             e.HasOne<Device>().WithMany().HasForeignKey(x => x.TargetId).OnDelete(DeleteBehavior.Restrict);

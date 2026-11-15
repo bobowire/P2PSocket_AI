@@ -38,14 +38,18 @@ public sealed record StunSnapshotView(long Admitted, double Qps, StunDroppedView
 /// <summary>丢弃三分桶（stun_dropped_total：限速/认证/断路器）。</summary>
 public sealed record StunDroppedView(long Rate, long Auth, long Circuit);
 
-/// <summary>打洞近 24h 统计与按小时桶时序（成功率折线数据源；无数据 successRate=JSON null）。</summary>
+/// <summary>打洞近 24h 统计与按小时桶时序（成功率折线数据源；无数据 successRate=JSON null）。
+/// kcpDirect24h/rawDirect24h（M6-08，NET-77）：直连按承载分组（bearer 列 1/0；null 不计）——
+/// L2 KCP 采用率与包络对照的可见面。</summary>
 public sealed record PunchStatsView(
     int Total24h,
     int Direct24h,
     int Relay24h,
     int Failed24h,
     double? SuccessRate24h,
-    List<HourlyBucketView> Hourly);
+    List<HourlyBucketView> Hourly,
+    int KcpDirect24h = 0,
+    int RawDirect24h = 0);
 
 /// <summary>整点对齐小时桶（最旧→最新共 24 桶，空桶保留；hourStart=Unix ms）。</summary>
 public sealed record HourlyBucketView(long HourStart, int Total, int Success);

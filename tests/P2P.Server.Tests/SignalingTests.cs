@@ -310,6 +310,45 @@ public sealed class SignalingTests : IAsyncLifetime
         Assert.Null(ack.PeerLocalCandidates);
     }
 
+    // ── M6-04 承载能力位图（NET-77，设计 11 §8.1）：BearerCaps 双段透传（服务端纯存转零解析）──
+
+    [Fact]
+    public async Task Punch_BearerCaps_PassedThroughToInviteAndAck()
+    {
+        var (a, _, _) = await RegisterAsync("caps-a");
+        var (b, bId, _) = await RegisterAsync("caps-b");
+
+        await a.SendAsync(new PunchRequest(a.NextSeq(), a.Now(), MsgType.PunchRequest,
+            bId, null, "udp", UdpOnly("203.0.113.10", 50000), null,
+            BearerCaps: BearerCaps.Kcp));
+        var invite = await b.ReceiveAsync<PunchInvite>(TestPcpClient.PushWaitMs) ?? throw new IOException("B 未收到 PunchInvite");
+        Assert.Equal(BearerCaps.Kcp, invite.PeerBearerCaps); // A 的承载位图原样透传给 B（存转零解析）
+
+        await b.SendAsync(new PunchEndpoint(b.NextSeq(), b.Now(), MsgType.PunchEndpoint,
+            invite.SessionId, UdpOnly("198.51.100.20", 50001),
+            BearerCaps: BearerCaps.Kcp));
+        var ack = await a.ReceiveAsync<PunchRequestAck>(TestPcpClient.PushWaitMs) ?? throw new IOException("A 未收到延后 Ack");
+        Assert.Equal(BearerCaps.Kcp, ack.PeerBearerCaps); // B 的承载位图原样透传给 A
+    }
+
+    [Fact]
+    public async Task Punch_OldClientNoCaps_NullPassthrough()
+    {
+        // 旧端混布（02 §7 尾部可空字段缺省容忍）：0x70/0x76 不带位图 → 透传 null，链路照常
+        var (a, _, _) = await RegisterAsync("oldcaps-a");
+        var (b, bId, _) = await RegisterAsync("oldcaps-b");
+
+        await a.SendAsync(new PunchRequest(a.NextSeq(), a.Now(), MsgType.PunchRequest,
+            bId, null, "udp", UdpOnly("203.0.113.10", 50000), null));
+        var invite = await b.ReceiveAsync<PunchInvite>(TestPcpClient.PushWaitMs) ?? throw new IOException("B 未收到 PunchInvite");
+        Assert.Null(invite.PeerBearerCaps);
+
+        await b.SendAsync(new PunchEndpoint(b.NextSeq(), b.Now(), MsgType.PunchEndpoint,
+            invite.SessionId, UdpOnly("198.51.100.20", 50001)));
+        var ack = await a.ReceiveAsync<PunchRequestAck>(TestPcpClient.PushWaitMs) ?? throw new IOException("A 未收到延后 Ack");
+        Assert.Null(ack.PeerBearerCaps);
+    }
+
     // ── 完成判定②：L2 拒 4001 + punch_deny 审计 ──────────────────────
 
     [Fact]

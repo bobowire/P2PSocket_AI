@@ -1,5 +1,9 @@
 using System.Net;
 using P2P.Client.Control;
+using P2P.Client.Punch;
+using P2P.Client.Tunnel;
+using P2P.Core.Crypto;
+using P2P.Core.Tunnel;
 using P2P.Client.Mapping;
 using Xunit;
 
@@ -47,4 +51,41 @@ public sealed class ClientReporterTests
     [InlineData(MappingState.Invalid)]   // 预留 0x75 联动（M2-26+），届时随事件补
     public void 上报态过滤_其余态不上报(MappingState state)
         => Assert.Null(ClientReporter.StatusStringFor(state));
+
+    // ── M6-08：0x72 bearer 承载类型映射（NET-77 L2 包络统计维度）────────
+
+    [Fact]
+    public async Task bearer映射_直连成功_裸承载报0()
+    {
+        // 内存管道会话（非 KCP 承载）→ 裸 UDP=0（KCP=1 分支见 PuncherKcpBearerTests 真实 KCP 会话断言）
+        var (staticA, staticB) = (EcKeyPair.Generate(), EcKeyPair.Generate());
+        var (ta, tb) = MemoryTransport.CreatePair();
+        var sessionId = Guid.NewGuid();
+        var opts = new TunnelSessionOptions { KeepaliveInterval = TimeSpan.FromHours(1) };
+        var connectTask = TunnelSession.ConnectAsync(sessionId, Guid.NewGuid(), staticA,
+            staticB.ExportPublicKey(), ta, NullChannelHandler.Instance, opts);
+        var t1 = await tb.ReceiveAsync() ?? throw new IOException("无 THello1");
+        var b = await TunnelSession.AcceptAsync(Guid.NewGuid(), t1, staticB,
+            staticA.ExportPublicKey(), tb, NullChannelHandler.Instance, opts);
+        var a = await connectTask;
+        try
+        {
+            Assert.Equal((byte)0, ClientReporter.BearerFor(new PunchOutcome(
+                true, sessionId, Guid.NewGuid(), a, null, null, null)));
+        }
+        finally
+        {
+            await a.DisposeAsync();
+            await b.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public void bearer映射_中继与失败_不携带()
+    {
+        Assert.Null(ClientReporter.BearerFor(new PunchOutcome(true, Guid.NewGuid(), Guid.NewGuid(),
+            null, null, null, null, RelayAllowed: true))); // 无会话（中继回退终态形态）
+        Assert.Null(ClientReporter.BearerFor(new PunchOutcome(false, Guid.Empty, Guid.NewGuid(),
+            null, null, null, "punch_timeout")));
+    }
 }

@@ -54,13 +54,23 @@ public sealed class ClientReporter : IAsyncDisposable
     private void OnPunchCompleted(PunchOutcome outcome)
     {
         if (outcome.SessionId == Guid.Empty) return; // Ack 前失败：无服务端会话可归属（M2-08 台账口径）
-        // 工厂组包（M4-05 P0）：0x72 与 0x62/0x64/心跳并发，seq 须在发送门内分配
+        // 工厂组包（M4-05 P0）：0x72 与 0x62/0x64/心跳并发，seq 须在发送门内分配。
+        // bearer（M6-08）：仅直连成功携带承载类型（0=裸 UDP / 1=KCP）——L2 包络统计维度；
+        // 中继/失败不携带（null=旧端缺省容忍同形）。
         _ = SendQuietlyAsync(seq => new PunchResult(
             seq, _control.TimestampMs(), MsgType.PunchResult,
             outcome.SessionId, outcome.Ok,
             EndpointFor(outcome.Ok, outcome.Session?.ViaRelay == true, outcome.PeerEndpoint),
-            outcome.FailReason));
+            outcome.FailReason,
+            BearerFor(outcome)));
     }
+
+    /// <summary>承载类型上报映射（M6-08）：Ok 且非中继 → Session 承载判定（KCP=1/裸=0）；
+    /// 中继/失败/无会话 → null（不携带）。</summary>
+    internal static byte? BearerFor(PunchOutcome outcome)
+        => outcome.Ok && outcome.Session is { } s && !s.ViaRelay
+            ? (byte)(s.UsesKcpBearer ? 1 : 0)
+            : null;
 
     /// <summary>结果端点映射（与服务端 M2-08 三态判据互证）：直连成功携带对端公网端点；
     /// 中继成功（ViaRelay）与失败均不携带——Ok 无端点即 relay 的表达约定。</summary>

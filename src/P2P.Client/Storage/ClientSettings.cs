@@ -21,6 +21,11 @@ public sealed class ClientSettings
     /// <summary>打洞并发数（1~5，OQ-1 决议，默认 3）。</summary>
     public int PunchConcurrency { get; set; } = 3;
 
+    /// <summary>KCP 承载开关（M6-04 kill-switch，NET-77，设计 11 §8.3）：true=打洞信令上送
+    /// CAP_KCP 位（对端同开启且支持时 UDP 直连承载升级 KCP 可靠层）；false=不上送位 → 本端
+    /// 判定恒 false，强制裸 UDP（双角色同效，混布降级同形）。默认 true。</summary>
+    public bool KcpBearer { get; set; } = true;
+
     /// <summary>隧道保活间隔秒（默认 20）。</summary>
     public int KeepaliveSec { get; set; } = 20;
 

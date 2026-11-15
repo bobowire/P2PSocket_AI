@@ -148,6 +148,41 @@ public sealed class StatsTests : IAsyncLifetime
         Assert.Equal(_time.GetLocalNow().UtcDateTime, row.Ts, TimeSpan.FromSeconds(1));
     }
 
+    // ── M6-08：bearer 直连承载分组落库（NET-77 L2 包络统计维度）────────
+
+    [Fact]
+    public async Task PunchResult_Direct_BearerKcpLogged()
+    {
+        var (a, aId) = await RegisterAsync("bearer-k-a");
+        var (b, bId) = await RegisterAsync("bearer-k-b");
+        var sid = await PunchFlowAsync(a, b, bId, proto: "udp", n: null);
+
+        await a.SendAsync(new PunchResult(a.NextSeq(), a.Now(), MsgType.PunchResult,
+            sid, true, new Endpoint("203.0.113.10", 50000), null, Bearer: 1));
+        await SyncAsync(a);
+
+        await using var db = CreateDb();
+        var row = await db.PunchStats.AsNoTracking().SingleAsync(p => p.SessionId == sid);
+        Assert.Equal("direct", row.Result);
+        Assert.Equal(1, row.Bearer); // KCP 承载
+    }
+
+    [Fact]
+    public async Task PunchResult_Direct_NoBearer_NullLogged()
+    {
+        var (a, _) = await RegisterAsync("bearer-n-a");
+        var (b, bId) = await RegisterAsync("bearer-n-b");
+        var sid = await PunchFlowAsync(a, b, bId, proto: "udp", n: null);
+
+        await a.SendAsync(new PunchResult(a.NextSeq(), a.Now(), MsgType.PunchResult,
+            sid, true, new Endpoint("203.0.113.10", 50000), null)); // 旧端不带 bearer
+        await SyncAsync(a);
+
+        await using var db = CreateDb();
+        var row = await db.PunchStats.AsNoTracking().SingleAsync(p => p.SessionId == sid);
+        Assert.Null(row.Bearer);
+    }
+
     [Fact]
     public async Task PunchResult_Relay_OkWithoutEndpointReasonKept()
     {

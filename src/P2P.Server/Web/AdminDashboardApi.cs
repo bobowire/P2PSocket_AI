@@ -39,15 +39,17 @@ public sealed class AdminDashboardApi(
                 .Select(m => m.Id).ToHashSet(), ctx.RequestAborted);
             var punches = (await db.PunchStats.AsNoTracking()
                     .Where(p => p.Ts >= since24h)
-                    .Select(p => new { p.Ts, p.Result })
+                    .Select(p => new { p.Ts, p.Result, p.Bearer })
                     .ToListAsync(ctx.RequestAborted))
-                .Select(p => (p.Ts, p.Result))
+                .Select(p => (p.Ts, p.Result, p.Bearer))
                 .ToList();
 
             var direct = punches.Count(p => p.Result == "direct");
             var relayed = punches.Count(p => p.Result == "relay");
             var total = punches.Count;
-            var buckets = HourlyBuckets(punches, now);
+            var kcpDirect = punches.Count(p => p.Result == "direct" && p.Bearer == 1); // M6-08 承载分组
+            var rawDirect = punches.Count(p => p.Result == "direct" && p.Bearer == 0);
+            var buckets = HourlyBuckets(punches.Select(p => (p.Ts, p.Result)).ToList(), now);
 
             var relayStats = relay?.Stats;
             var stunStats = stun?.Guard.Metrics();
@@ -86,7 +88,9 @@ public sealed class AdminDashboardApi(
                         Relay24h: relayed,
                         Failed24h: total - direct - relayed,
                         SuccessRate24h: total == 0 ? null : (direct + relayed) / (double)total,
-                        Hourly: buckets), // 24 桶（最旧→最新，整点对齐）：折线数据源
+                        Hourly: buckets, // 24 桶（最旧→最新，整点对齐）：折线数据源
+                        KcpDirect24h: kcpDirect,
+                        RawDirect24h: rawDirect),
                     Version: new ServerVersionView(
                         Version: AppVersion.Version, Commit: AppVersion.Commit,
                         BuildDate: AppVersion.BuildDate)), // M4-01 宿主版本（仪表盘角标）

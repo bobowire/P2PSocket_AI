@@ -72,6 +72,7 @@ public sealed class SignalingCoordinator : IAsyncDisposable
         public required PeerInfo TargetInfo { get; init; }
         public required EndpointPair? RequesterEndpoints { get; init; } // 0x70 携带；0x78 晚探测=null（端点经 STUN 交换收齐）
         public required P2P.Core.Protocol.Endpoint[]? RequesterCandidates { get; init; } // 0x70 直连候选透传（§5.4，纯存转）
+        public required uint? InitiatorBearerCaps { get; init; } // 0x70 承载能力位图透传（M6-04，NET-77——纯存转零解析）
         public required string Proto { get; init; }               // 0x70 载荷（udp|tcp，M2-08 统计）
         public required byte PunchCount { get; init; }
         public required bool RelayAllowed { get; init; }               // relay_enabled 合成（M2-07）
@@ -163,6 +164,7 @@ public sealed class SignalingCoordinator : IAsyncDisposable
             TargetInfo = new PeerInfo(b.Id, b.DeviceName, b.RemoteCode, b.StaticPubKey),
             RequesterEndpoints = msg.RequesterEndpoints ?? new EndpointPair(null, null),
             RequesterCandidates = msg.LocalCandidates, // §5.4 直连优先：A 的本机候选随 0x71 透传（存转零解析）
+            InitiatorBearerCaps = msg.BearerCaps,     // M6-04：A 的承载能力位图随 0x71 透传（存转零解析，设计 11 §8.1）
             Proto = string.IsNullOrWhiteSpace(msg.Proto) ? "udp" : msg.Proto, // 旧端缺省容忍（02 §7）
             // OQ-19/TD-20（M2-16）：取发起方请求值（越界/缺省 → 3，容忍哲学），Ack/Invite 统一回填
             PunchCount = PunchPolicy.Normalize(msg.PunchConcurrency),
@@ -184,10 +186,11 @@ public sealed class SignalingCoordinator : IAsyncDisposable
             _sessions[s.SessionId] = s;
         }
 
-        // ① 第一段：向 B 下发 PunchInvite（A 信息/端点/N/relayAllowed/A 直连候选，02 §5.1②·§5.4）
+        // ① 第一段：向 B 下发 PunchInvite（A 信息/端点/N/relayAllowed/A 直连候选/A 承载位图，02 §5.1②·§5.4·§8.1）
         var invite = new PunchInvite(s.Target.NextSeq(), s.Target.ServerTimestamp(), MsgType.PunchInvite,
             s.SessionId, s.InitiatorInfo, s.RequesterEndpoints, s.PunchCount, s.RelayAllowed,
-            LocalCandidates: s.RequesterCandidates);
+            LocalCandidates: s.RequesterCandidates,
+            PeerBearerCaps: s.InitiatorBearerCaps);
         await SafePushAsync(s.Target, invite); // B 中途掉线：由 reaper 超时收尾
     }
 
@@ -256,6 +259,7 @@ public sealed class SignalingCoordinator : IAsyncDisposable
             TargetInfo = new PeerInfo(b.Id, b.DeviceName, b.RemoteCode, b.StaticPubKey),
             RequesterEndpoints = null, // 晚探测：端点经 STUN 交换收齐（02 §5.2⑥）
             RequesterCandidates = null,
+            InitiatorBearerCaps = null, // 0x78 晚探测与 caps 正交（设计 11 §7.4：TCP 路径不判定）
             Proto = msg.Proto,
             PunchCount = PunchPolicy.Normalize(msg.PunchConcurrency),
             RelayAllowed = new ServerConfigStore(db).GetBool("relay_enabled")
@@ -344,10 +348,11 @@ public sealed class SignalingCoordinator : IAsyncDisposable
             RetainForRelayNoLock(s); // 台账：0x74 打洞失败后解析对端（M2-07）
         }
 
-        // ② 第二段：向 A 下发延后 Ack（B 信息 + B 端点 + B 直连候选；OQ-18/TD-19·§5.4）
+        // ② 第二段：向 A 下发延后 Ack（B 信息 + B 端点 + B 直连候选 + B 承载位图；OQ-18/TD-19·§5.4·§8.1）
         var ack = new PunchRequestAck(s.Initiator.NextSeq(), s.Initiator.ServerTimestamp(),
             MsgType.PunchRequest, s.SessionId, s.TargetInfo, msg.Endpoints, s.PunchCount, s.RelayAllowed,
-            PeerLocalCandidates: msg.LocalCandidates);
+            PeerLocalCandidates: msg.LocalCandidates,
+            PeerBearerCaps: msg.BearerCaps);
         await SafePushAsync(s.Initiator, ack); // A 中途掉线：无接收方，静默
 
         // ③ 齐射锚点（02 §5.2⑤）：与 Ack 同刻推给 B——两端各以消息到达为锚倒数同一 Δ 到点齐射，
@@ -421,6 +426,7 @@ public sealed class SignalingCoordinator : IAsyncDisposable
             Result = result,
             Reason = msg.FailReason,
             DurationMs = durationMs,
+            Bearer = result == "direct" ? msg.Bearer : null, // M6-08：仅直连成功携带承载类型（L2 包络统计维度）
         });
         await db.SaveChangesAsync();
     }

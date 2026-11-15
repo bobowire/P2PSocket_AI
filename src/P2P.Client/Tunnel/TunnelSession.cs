@@ -50,6 +50,7 @@ public sealed record TunnelSessionOptions
 public sealed class TunnelSession : IAsyncDisposable
 {
     private readonly ITunnelTransport _transport;
+    private readonly IKcpConvControl? _convControl; // KCP 承载 conv 控制（M6-03 三缝；未实现=no-op）
     private readonly ITunnelChannelHandler _handler;
     private readonly TunnelSessionOptions _options;
     private readonly TimeProvider _time;
@@ -80,6 +81,14 @@ public sealed class TunnelSession : IAsyncDisposable
     /// 映射状态机 relay 态判定与隧道复用检查的依据（加密与路径解耦：同一会话类型，帧逻辑不变）。</summary>
     public bool ViaRelay => _transport is RelayTransport;
 
+    /// <summary>UDP 直连 KCP 承载标记（M6，设计 11 §3.1）：true=帧走 KCP 多 conv 可靠层
+    ///（裸 UDP_DGRAM/FRAG 仍走旁路）；false=裸 UDP/TCP/中继。诊断/测试观察（M6-08 诊断页可选）。</summary>
+    public bool UsesKcpBearer => _transport is KcpTunnelTransport;
+
+    /// <summary>KCP 承载诊断快照（M6-08 生产观察）：仅 KCP 承载非 null——承载层计数+全 conv
+    /// 算法层聚合（诊断页隧道快照数据源；其他承载 null）。</summary>
+    public KcpBearerStatsSnapshot? KcpStats => (_transport as KcpTunnelTransport)?.Snapshot();
+
     /// <summary>已完成的密钥轮换代际（接收侧密钥环；诊断/测试观察）。</summary>
     public int RekeyGeneration => _recvRing.Generation;
 
@@ -108,6 +117,7 @@ public sealed class TunnelSession : IAsyncDisposable
         _staticKey = staticKey; // 引用共享：密钥对宿主所有（随 state 落盘重建）
         _peerStaticPub = peerStaticPub?.ToArray();
         _transport = transport;
+        _convControl = transport as IKcpConvControl; // 软转换：TCP/中继/裸承载=null → 三缝 no-op（设计 11 §6）
         _handler = handler;
         _options = options ?? new TunnelSessionOptions();
         _time = time ?? TimeProvider.System;
@@ -234,10 +244,14 @@ public sealed class TunnelSession : IAsyncDisposable
     /// <summary>分配新 channelId（32bit 随机起点递增，02 §4.3；两侧独立分配靠随机起点避碰撞）。</summary>
     public uint AllocateChannelId() => _nextChannelId++;
 
-    /// <summary>发送 OPEN（访问侧：请求对端打开目标连接）。</summary>
+    /// <summary>发送 OPEN（访问侧：请求对端打开目标连接）。M6-03 三缝①：发送前置 conv 就位
+    ///（发起侧在 OPEN 上 wire 前建好 channel conv——对端凭经 AEAD 的 OPEN 登记自己的 conv，§4.2）。</summary>
     public ValueTask SendOpenAsync(uint channelId, OpenPayload open, CancellationToken ct = default)
-        => SendChannelFrameAsync(PtpFrameType.Open, channelId,
+    {
+        _convControl?.EnsureChannel(channelId);
+        return SendChannelFrameAsync(PtpFrameType.Open, channelId,
             MessagePackSerializer.Serialize(open), ct);
+    }
 
     /// <summary>发送 OPEN_OK / OPEN_FAIL（目标侧）。</summary>
     public ValueTask SendOpenResultAsync(uint channelId, OpenResultPayload result, CancellationToken ct = default)
@@ -262,8 +276,14 @@ public sealed class TunnelSession : IAsyncDisposable
         => SendChannelFrameAsync(PtpFrameType.Window, channelId,
             MessagePackSerializer.Serialize(new WindowCreditPayload((uint)consumedBytes)), ct);
 
-    /// <summary>channel 终结时摘除信用账本（幂等；CLOSE 双侧与本地关闭路径均调用）。</summary>
-    public void RemoveChannelCredit(uint channelId) => _credits.TryRemove(channelId, out _);
+    /// <summary>channel 终结时摘除信用账本（幂等；CLOSE 双侧与本地关闭路径均调用）。
+    /// M6-03 三缝③：同点触发 conv 排空销毁（RemoveChannel 幂等）——OnOpenResult !Ok/对端 CLOSE/
+    /// 本地关闭三路径在此汇聚（设计 11 §4.2/§6）。</summary>
+    public void RemoveChannelCredit(uint channelId)
+    {
+        _credits.TryRemove(channelId, out _);
+        _convControl?.RemoveChannel(channelId);
+    }
 
     /// <summary>发送 CLOSE。</summary>
     public ValueTask SendCloseAsync(uint channelId, CancellationToken ct = default)
@@ -414,11 +434,19 @@ public sealed class TunnelSession : IAsyncDisposable
                 }
                 break;
             case PtpFrameType.Open:
+                // M6-03 三缝②：OPEN 经 conv 0 解密校验后先登记 conv（鉴权前置——conv 凭据=经 AEAD
+                // 的 OPEN，无 lazy accept，设计 11 §4.3），再交付 handler（目标侧 conv 就位于 OnOpen）
+                _convControl?.EnsureChannel(header.ChannelId);
                 _handler.OnOpen(this, header.ChannelId, MessagePackSerializer.Deserialize<OpenPayload>(plain));
                 break;
             case PtpFrameType.OpenResult:
-                _handler.OnOpenResult(this, header.ChannelId, MessagePackSerializer.Deserialize<OpenResultPayload>(plain));
+            {
+                var result = MessagePackSerializer.Deserialize<OpenResultPayload>(plain);
+                _handler.OnOpenResult(this, header.ChannelId, result);
+                if (!result.Ok)
+                    _convControl?.RemoveChannel(header.ChannelId); // OPEN_FAIL：channel 未立，conv 即毁（§4.2）
                 break;
+            }
             case PtpFrameType.Data:
                 _handler.OnData(this, header.ChannelId, plain);
                 break;
@@ -462,7 +490,7 @@ public sealed class TunnelSession : IAsyncDisposable
                 break;
             case PtpFrameType.Close:
                 _handler.OnClose(this, header.ChannelId);
-                RemoveChannelCredit(header.ChannelId);
+                RemoveChannelCredit(header.ChannelId); // M6-03 三缝④：内含 conv 排空销毁（§4.2）
                 break;
             default:
                 Log?.Invoke($"未知帧 type 0x{header.Type:X2} 容忍丢弃（02 §7）");

@@ -14,7 +14,7 @@
 import { computed, onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { ApiPaths, ApiError } from "@p2p/ui-shared";
-import type { StunTestView, PingDeviceView, ServerTestView, TunnelView, TunnelListView, RekeyResultView } from "@p2p/ui-shared";
+import type { StunTestView, PingDeviceView, ServerTestView, TunnelView, TunnelListView, RekeyResultView, KcpBearerStatsSnapshot } from "@p2p/ui-shared";
 import { api } from "../api";
 import { useSettingsStore } from "../stores/settings";
 import { useSystemStore } from "../stores/system";
@@ -27,6 +27,8 @@ const punchConcurrency = ref(3);
 const localWebPort = ref(7100);
 /** M5-12 可配置化（07 §14.2 v1.83）：本地 Web token 鉴权开关——默认关（出厂可用），开启=加固（重启生效） */
 const webTokenAuth = ref(false);
+/** M6-04 kill-switch（NET-77，设计 11 §8.3）：KCP 承载开关——默认开；关=不上送位强制裸 UDP */
+const kcpBearer = ref(true);
 const busy = ref(false);
 /** 提交后置位：localWebPort 变更须重启本地服务才生效（监听端口绑定时机） */
 const restartHint = ref(false);
@@ -63,6 +65,15 @@ const canSave = computed(
     Number.isInteger(localWebPort.value) && localWebPort.value >= 1 && localWebPort.value <= 65535,
 );
 
+/** M6-08 生产观察：KCP 承载计数 tooltip（承载层+全 conv 算法层聚合） */
+function kcpTooltip(kcp: KcpBearerStatsSnapshot | null): string | undefined {
+  if (!kcp) return undefined;
+  return `KCP conv=${kcp.convCount} 段发${kcp.segmentsSent} 段收${kcp.segmentsReceived} `
+    + `重传${kcp.retransmissions}（快重传${kcp.fastRetransmissions}） `
+    + `ACK ${kcp.acksSent}/${kcp.acksReceived} 窗通告${kcp.windowUpdates} `
+    + `丢：unknown-conv${kcp.unknownConvDropped} 畸形${kcp.malformedDropped} 白名单外${kcp.nonWhitelistDropped}`;
+}
+
 function addAddr() {
   addrs.value.push("");
 }
@@ -89,6 +100,7 @@ async function save() {
       punchConcurrency: punchConcurrency.value,
       localWebPort: localWebPort.value,
       webTokenAuth: webTokenAuth.value,
+      kcpBearer: kcpBearer.value,
     });
     restartHint.value = result.restartRequired;
     if (result.restartRequired) ElMessage.warning("本地 Web 端口或鉴权开关已变更：重启客户端后生效");
@@ -107,6 +119,7 @@ onMounted(async () => {
     addrs.value = [...s.serverAddrs];
     punchConcurrency.value = s.punchConcurrency;
     localWebPort.value = s.localWebPort;
+    kcpBearer.value = s.kcpBearer;
     webTokenAuth.value = s.webTokenAuth;
   }
   void refreshPunchQueue(); // 诊断工具区初值（M3-14；失败静默，点刷新重试）
@@ -367,6 +380,17 @@ async function triggerRekey(t: TunnelView) {
         />
         <div class="hint">
           开=本地页面/API 须携带随服务启动轮换的 token（安全加固，公用/多账户机器建议——开启后从自动打开的 URL 或数据目录 web-token 文件取值进入）；关=免鉴权直接访问（默认，任何本机程序也可驱动本地服务）
+        </div>
+      </el-form-item>
+
+      <!-- KCP 承载开关（M6-04 kill-switch，NET-77）：双端同开才启用；关=强制裸 UDP -->
+      <el-form-item label="KCP 承载">
+        <el-switch
+          v-model="kcpBearer"
+          data-testid="settings-kcp-bearer"
+        />
+        <div class="hint">
+          开=UDP 直连承载启用 KCP 可靠层（丢包重传/严格有序，双端均开启且对端支持时生效）；关=强制裸 UDP 丢包容忍（回退开关，对后续打洞会话生效）
         </div>
       </el-form-item>
 
@@ -667,14 +691,15 @@ async function triggerRekey(t: TunnelView) {
         </el-table-column>
         <el-table-column
           label="承载"
-          width="90"
+          width="110"
         >
           <template #default="{ row }">
             <el-tag
               :type="row.viaRelay ? 'warning' : 'success'"
               size="small"
+              :title="kcpTooltip(row.kcp)"
             >
-              {{ row.viaRelay ? "中继" : "直连" }}
+              {{ row.viaRelay ? "中继" : row.kcp ? "直连·KCP" : "直连" }}
             </el-tag>
           </template>
         </el-table-column>

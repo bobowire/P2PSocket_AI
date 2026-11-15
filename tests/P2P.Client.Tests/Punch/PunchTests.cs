@@ -143,7 +143,7 @@ public sealed class PuncherTests
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public ConcurrentQueue<(Guid SessionId, EndpointPair Endpoints)> Reports { get; } = [];
         public ConcurrentQueue<Endpoint[]?> ReportedCandidates { get; } = []; // §5.4 B 侧 0x76 候选
-        public Func<Guid, Guid?, string, EndpointPair, Endpoint[]?, CancellationToken, Task<PunchRequestAck>>? RequestHandler;
+        public Func<Guid, Guid?, string, EndpointPair, Endpoint[]?, uint?, CancellationToken, Task<PunchRequestAck>>? RequestHandler;
         public Exception? RequestError;
 
         /// <summary>探测返回的映射端口 = 真实本地口 + 平移量（0=恒等；&gt;0=假映射，该口无人监听）。</summary>
@@ -174,7 +174,7 @@ public sealed class PuncherTests
             catch (SocketException) { u.Dispose(); } // 已被占（罕见）：退回原口径
         }
 
-        public Task ReportAsync(Guid sessionId, EndpointPair endpoints, Endpoint[]? localCandidates,
+        public Task ReportAsync(Guid sessionId, EndpointPair endpoints, Endpoint[]? localCandidates, uint? bearerCaps,
             CancellationToken ct)
         {
             Reports.Enqueue((sessionId, endpoints));
@@ -184,11 +184,11 @@ public sealed class PuncherTests
         }
 
         public Task<PunchRequestAck> SendRequestAsync(Guid target, Guid? trigger, string proto,
-            EndpointPair requesterEndpoints, Endpoint[]? localCandidates, CancellationToken ct)
+            EndpointPair requesterEndpoints, Endpoint[]? localCandidates, uint? bearerCaps, CancellationToken ct)
         {
             if (RequestError is not null) return Task.FromException<PunchRequestAck>(RequestError);
             if (RequestHandler is not null)
-                return RequestHandler(target, trigger, proto, requesterEndpoints, localCandidates, ct);
+                return RequestHandler(target, trigger, proto, requesterEndpoints, localCandidates, bearerCaps, ct);
             return Task.FromResult(new PunchRequestAck(0, 0, MsgType.PunchRequest, Guid.NewGuid(),
                 new PeerInfo(target, "?", "000000", []),
                 new EndpointPair(new P2P.Core.Protocol.Endpoint("127.0.0.1", 1), null), 3, false));
@@ -226,7 +226,7 @@ public sealed class PuncherTests
         {
             EndpointPair? requestedByA = null;
             // A 的 0x70 假缝：模拟服务端——等 B 的 0x76 端点上报后回延后 Ack（02 §5.1④）
-            seamsA.RequestHandler = async (target, trigger, proto, endpoints, candidates, ct) =>
+            seamsA.RequestHandler = async (target, trigger, proto, endpoints, candidates, bearerCaps, ct) =>
             {
                 var bReported = await seamsB.Reported.Task;
                 requestedByA = endpoints;
@@ -354,7 +354,7 @@ public sealed class PuncherTests
         using (puncherB)
         try
         {
-            seamsA.RequestHandler = async (target, trigger, proto, endpoints, candidates, ct) =>
+            seamsA.RequestHandler = async (target, trigger, proto, endpoints, candidates, bearerCaps, ct) =>
             {
                 var bReported = await seamsB.Reported.Task;
                 return new PunchRequestAck(0, 0, MsgType.PunchRequest, sessionId,

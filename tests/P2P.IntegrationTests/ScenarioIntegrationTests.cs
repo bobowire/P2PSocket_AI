@@ -208,7 +208,7 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
     /// STUN 替身无交换语义）；S78 用例显式开启（TcpStunStub 交换语义 + 真实 0x78 服务端））。</summary>
     private async Task<HttpClient> StartRuntimeAsync(SeededClient c, TimeSpan? relayRetryInterval = null,
         TimeSpan? statsInterval = null, SubnetConflictDetector.SurveySource? subnetSurvey = null,
-        bool localCandidates = false, bool latePunch = false)
+        bool localCandidates = false, bool latePunch = false, bool kcpBearer = true)
     {
         // 每运行时独立网卡替身：共享单例时后启动客户端的 Ensure 覆盖共享 BoundIp，先启动者健康探测
         // 即 IpMismatch → 双端 30s 周期互相重建乒乓（Restored 沿重绑映射监听，杀死在途传输——
@@ -223,6 +223,7 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
             SubnetSurveyOverride = subnetSurvey,
             LocalIpEnumeratorOverride = localCandidates ? null : EmptyLocalCandidates,
             DisableLatePunch = !latePunch,
+            DisableKcpBearer = !kcpBearer, // M6-05 两态回归缝（默认 true=KCP 承载协商开）
         });
         runtime.Log += m => _output.WriteLine($"[{c.Ip}] {m}");
         await runtime.StartAsync();
@@ -884,6 +885,34 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         _output.WriteLine($"S54|same-segment|state={state}");
         await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(40 * 1024));
     }
+
+    // ── M6-05/M6-06 KCP 承载两态与弱网红绿矩阵（设计 11 §11.3/§12 决议⑥，立项级证据）──
+
+    [Fact]
+    public async Task M6_05_A3形态_kcp关_打洞直连与载荷_零回归()
+    {
+        // kcp on 态=114 基线既有 A-3（默认开启已全绿）；本用例补 off 态：DisableKcpBearer 双端
+        // → 不上送位/判定 false → 现状裸承载逐字节路径（混布降级形态在全链路世界的实证）
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.RestrictedCone));
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("m6-off-a", IPAddress.Parse("127.0.0.4"), group);
+        var b = await SeedClientAsync("m6-off-b", IPAddress.Parse("127.0.0.5"), group);
+        var httpA = await StartRuntimeAsync(a, kcpBearer: false);
+        var httpB = await StartRuntimeAsync(b, kcpBearer: false);
+        await WaitPhaseAsync(httpA, "running");
+        await WaitPhaseAsync(httpB, "running");
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+        Assert.Equal("direct", await WaitMappingStateAsync(httpA, "direct"));
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(40 * 1024));
+    }
+
+
 
     [Fact]
     public async Task M2_18_relay态新映射复用_不重复打洞()

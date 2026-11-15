@@ -40,8 +40,8 @@ public sealed class RelayAllowedSynthesisTests
         using var staticKey = EcKeyPair.Generate();
         var target = Guid.NewGuid();
         using var puncher = new Puncher(
-            (_, _, _, _, _, _) => Task.FromResult(Ack(server)),
-            (_, _, _, _) => Task.CompletedTask,
+            (_, _, _, _, _, _, _) => Task.FromResult(Ack(server)),
+            (_, _, _, _, _) => Task.CompletedTask,
             ProbeAsync, staticKey,
             options: FastFail,
             relayFallbackLookup: id => id == target && local);
@@ -59,10 +59,10 @@ public sealed class RelayAllowedSynthesisTests
         using var staticKey = EcKeyPair.Generate();
         var target = Guid.NewGuid();
         using var puncher = new Puncher(
-            (_, _, _, _, _, _) => Task.FromResult(new PunchRequestAck(0, 0, MsgType.PunchRequest, Guid.NewGuid(),
+            (_, _, _, _, _, _, _) => Task.FromResult(new PunchRequestAck(0, 0, MsgType.PunchRequest, Guid.NewGuid(),
                 new PeerInfo(Guid.NewGuid(), "?", "000000", PeerPubKey),
                 new EndpointPair(null, new P2P.Core.Protocol.Endpoint("127.0.0.1", 1)), 3, true)),
-            (_, _, _, _) => Task.CompletedTask,
+            (_, _, _, _, _) => Task.CompletedTask,
             ProbeAsync, staticKey,
             options: FastFail,
             tcpProbe: (socket, ct) => Task.FromResult(Unreachable),
@@ -80,9 +80,9 @@ public sealed class RelayAllowedSynthesisTests
         using var staticKey = EcKeyPair.Generate();
         var target = Guid.NewGuid();
         using var puncher = new Puncher(
-            (_, _, _, _, _, _) => Task.FromException<PunchRequestAck>(
+            (_, _, _, _, _, _, _) => Task.FromException<PunchRequestAck>(
                 new ControlErrorException(4005, "target_offline")),
-            (_, _, _, _) => Task.CompletedTask,
+            (_, _, _, _, _) => Task.CompletedTask,
             ProbeAsync, staticKey,
             options: FastFail,
             relayFallbackLookup: _ => true); // 即便本地开
@@ -99,8 +99,8 @@ public sealed class RelayAllowedSynthesisTests
     {
         using var staticKey = EcKeyPair.Generate();
         using var puncher = new Puncher(
-            (_, _, _, _, _, _) => Task.FromResult(Ack(true)),
-            (_, _, _, _) => Task.CompletedTask,
+            (_, _, _, _, _, _, _) => Task.FromResult(Ack(true)),
+            (_, _, _, _, _) => Task.CompletedTask,
             ProbeAsync, staticKey,
             options: FastFail); // relayFallbackLookup 缺省
 

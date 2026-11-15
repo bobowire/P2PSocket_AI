@@ -285,24 +285,31 @@ public class PcpM2MessageTests
     [Fact]
     public void PunchRequest_OldWire_WithoutLocalCandidatesField_Decodes()
     {
-        // 加法演进兼容（02 §7）：M2 端编码的 8 元素数组（无 localCandidates，NET-76 前旧端）
-        // 在当前 9 元素 schema 下可解；更深一层 M1 端 7 元素（无 punchConcurrency）同容忍
+        // 加法演进兼容（02 §7）：逐层旧端 wire 在当前 schema 下可解——
+        // M6 前旧端 9 元素（无 bearerCaps，NET-77 前）/ M2 前旧端 8 元素（无 localCandidates，NET-76 前）
+        // / M1 端 7 元素（无 punchConcurrency）
         var full = PcpCodec.Encode(new PunchRequest(1, 1UL, MsgType.PunchRequest,
             Guid.NewGuid(), null, "udp", null, null));
-        Assert.Equal(0x99, full[0]); // fixarray(9)
+        Assert.Equal(0x9A, full[0]); // fixarray(10)
 
-        var oldWire = full[..^1]; // 去掉尾部 nil（第 9 元素 localCandidates）
-        oldWire[0] = 0x98;        // 改写为 fixarray(8)
-        var decoded = PcpCodec.Decode<PunchRequest>(oldWire);
+        var m5Wire = full[..^1]; // 去掉尾部 nil（第 10 元素 bearerCaps，M6-04 前旧端）
+        m5Wire[0] = 0x99;        // 改写为 fixarray(9)
+        Assert.Null(PcpCodec.Decode<PunchRequest>(m5Wire).BearerCaps);
+
+        var m2Wire = m5Wire[..^1]; // 再去第 9 元素 nil（localCandidates，NET-76 前旧端）
+        m2Wire[0] = 0x98;          // 改写为 fixarray(8)
+        var decoded = PcpCodec.Decode<PunchRequest>(m2Wire);
         Assert.Null(decoded.LocalCandidates);
+        Assert.Null(decoded.BearerCaps);
         Assert.Null(decoded.PunchConcurrency);
         Assert.Equal("udp", decoded.Proto);
 
-        var m1Wire = oldWire[..^1]; // 再去第 8 元素 nil（punchConcurrency）
+        var m1Wire = m2Wire[..^1]; // 再去第 8 元素 nil（punchConcurrency）
         m1Wire[0] = 0x97;           // 改写为 fixarray(7)
         var m1 = PcpCodec.Decode<PunchRequest>(m1Wire);
         Assert.Null(m1.PunchConcurrency);
         Assert.Null(m1.LocalCandidates);
+        Assert.Null(m1.BearerCaps);
     }
 
     // ── 未知 msgType 容忍不回归（完成判定④，02 §7）────────────────────────

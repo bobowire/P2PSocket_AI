@@ -205,6 +205,7 @@ export function createDefaultState(): MockState {
       webTokenAuth: false, // M5-12 可配置化默认值（v1.83：默认关=出厂可用）
       punchConcurrency: 3,
       keepaliveSec: 20,
+      kcpBearer: true, // M6-04 kill-switch 默认开（NET-77）
       reconnect: { minSec: 1, maxSec: 30 },
     },
     stunTestView: {

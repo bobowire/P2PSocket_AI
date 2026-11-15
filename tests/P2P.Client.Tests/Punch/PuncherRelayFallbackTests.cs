@@ -41,10 +41,10 @@ public sealed class PuncherRelayFallbackTests
         var target = Guid.NewGuid();
         var allocated = false;
         using var puncher = new Puncher(
-            (_, _, _, _, _, _) => Task.FromResult(new PunchRequestAck(0, 0, MsgType.PunchRequest, Guid.NewGuid(),
+            (_, _, _, _, _, _, _) => Task.FromResult(new PunchRequestAck(0, 0, MsgType.PunchRequest, Guid.NewGuid(),
                 new PeerInfo(Guid.NewGuid(), "?", "000000", PeerPubKey),
                 new EndpointPair(new P2P.Core.Protocol.Endpoint("127.0.0.1", 1), null), 3, true)),
-            (_, _, _, _) => Task.CompletedTask,
+            (_, _, _, _, _) => Task.CompletedTask,
             ProbeAsync, staticKey,
             options: FastFail,
             relayFallbackLookup: _ => true,
@@ -63,10 +63,10 @@ public sealed class PuncherRelayFallbackTests
     {
         using var staticKey = EcKeyPair.Generate();
         using var puncher = new Puncher(
-            (_, _, _, _, _, _) => Task.FromResult(new PunchRequestAck(0, 0, MsgType.PunchRequest, Guid.NewGuid(),
+            (_, _, _, _, _, _, _) => Task.FromResult(new PunchRequestAck(0, 0, MsgType.PunchRequest, Guid.NewGuid(),
                 new PeerInfo(Guid.NewGuid(), "?", "000000", PeerPubKey),
                 new EndpointPair(new P2P.Core.Protocol.Endpoint("127.0.0.1", 1), null), 3, true)),
-            (_, _, _, _) => Task.CompletedTask,
+            (_, _, _, _, _) => Task.CompletedTask,
             ProbeAsync, staticKey,
             options: FastFail,
             relayFallbackLookup: _ => true,
@@ -119,10 +119,10 @@ public sealed class PuncherRelayFallbackTests
     {
         using var staticKey = EcKeyPair.Generate();
         using var puncher = new Puncher(
-            (_, _, _, _, _, _) => Task.FromResult(new PunchRequestAck(0, 0, MsgType.PunchRequest, Guid.NewGuid(),
+            (_, _, _, _, _, _, _) => Task.FromResult(new PunchRequestAck(0, 0, MsgType.PunchRequest, Guid.NewGuid(),
                 new PeerInfo(Guid.NewGuid(), "?", "000000", PeerPubKey),
                 new EndpointPair(new P2P.Core.Protocol.Endpoint("127.0.0.1", 1), null), 3, true)),
-            (_, _, _, _) => Task.CompletedTask,
+            (_, _, _, _, _) => Task.CompletedTask,
             ProbeAsync, staticKey,
             options: FastFail,
             relayFallbackLookup: _ => true); // relayAllocator 缺省
@@ -162,10 +162,10 @@ public sealed class PuncherRelayFallbackTests
         await using var existing = await EstablishSessionAsync(staticKey);
         var allocated = false;
         using var puncher = new Puncher(
-            (_, _, _, _, _, _) => Task.FromResult(new PunchRequestAck(0, 0, MsgType.PunchRequest, Guid.NewGuid(),
+            (_, _, _, _, _, _, _) => Task.FromResult(new PunchRequestAck(0, 0, MsgType.PunchRequest, Guid.NewGuid(),
                 new PeerInfo(Guid.NewGuid(), "?", "000000", PeerPubKey),
                 new EndpointPair(new P2P.Core.Protocol.Endpoint("127.0.0.1", 1), null), 3, true)),
-            (_, _, _, _) => Task.CompletedTask,
+            (_, _, _, _, _) => Task.CompletedTask,
             ProbeAsync, staticKey,
             options: FastFail,
             relayFallbackLookup: _ => true,
@@ -190,10 +190,10 @@ public sealed class PuncherRelayFallbackTests
         dead.Close("test"); // 已亡：不复用（TunnelHost 断链摘表后查找落空的同构路径）
         var allocated = false;
         using var puncher = new Puncher(
-            (_, _, _, _, _, _) => Task.FromResult(new PunchRequestAck(0, 0, MsgType.PunchRequest, Guid.NewGuid(),
+            (_, _, _, _, _, _, _) => Task.FromResult(new PunchRequestAck(0, 0, MsgType.PunchRequest, Guid.NewGuid(),
                 new PeerInfo(Guid.NewGuid(), "?", "000000", PeerPubKey),
                 new EndpointPair(new P2P.Core.Protocol.Endpoint("127.0.0.1", 1), null), 3, true)),
-            (_, _, _, _) => Task.CompletedTask,
+            (_, _, _, _, _) => Task.CompletedTask,
             ProbeAsync, staticKey,
             options: FastFail,
             relayFallbackLookup: _ => true,

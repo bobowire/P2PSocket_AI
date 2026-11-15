@@ -54,6 +54,9 @@ public sealed record PunchOptions
     ///（全新 socket=全新 SYN 预算，覆盖「对端瞄准点槽位存活」时段）；单测可调（缩短加速/加宽近似单波）。</summary>
     public TimeSpan TcpWaveInterval { get; init; } = TcpPunchFleet.WaveInterval;
 
+    /// <summary>KCP 承载参数（M6-05，设计 11 §5.4 默认表）：null=缺省参数组（M6-07 调参后经宿主注入）。</summary>
+    public KcpTunnelTransportOptions? KcpBearerOptions { get; init; }
+
     /// <summary>B 侧 0x77 齐射锚点等待上限（02 §5.2⑤ 方案 A）：超时（旧服务端不推送/丢失）立即
     /// 开火兜底；取值≈TcpVolleyCountdown+一次控制往返——兜底路径与 A 的倒计时终点仍近似重合。</summary>
     public TimeSpan PunchFireFallbackTimeout { get; init; } = TimeSpan.FromMilliseconds(600);
@@ -110,14 +113,16 @@ public interface IPuncher
 public sealed class Puncher : IPuncher, IDisposable
 {
     /// <summary>0x70 发送缝：组包（seq/ts 由实现侧盖戳）→ 等待延后 Ack；失败抛 <see cref="ControlErrorException"/>。
-    /// localCandidates=本机直连候选（§5.4，随 0x70 上送经 0x71 透传给对端）。</summary>
+    /// localCandidates=本机直连候选（§5.4，随 0x70 上送经 0x71 透传给对端）。
+    /// bearerCaps=本端承载能力位图（M6-04，设计 11 §8.1；null=不上送——kill-switch/旧端形态）。</summary>
     public delegate Task<PunchRequestAck> PunchRequestSender(
         Guid targetDeviceId, Guid? triggerMappingId, string proto, EndpointPair requesterEndpoints,
-        P2P.Core.Protocol.Endpoint[]? localCandidates, CancellationToken ct);
+        P2P.Core.Protocol.Endpoint[]? localCandidates, uint? bearerCaps, CancellationToken ct);
 
-    /// <summary>0x76 上报缝（无 Ack 单发；02 §5.1③ 不等中转）。localCandidates 同 §5.4（经 Ack 透传）。</summary>
+    /// <summary>0x76 上报缝（无 Ack 单发；02 §5.1③ 不等中转）。localCandidates 同 §5.4（经 Ack 透传）；
+    /// bearerCaps 同 M6-04（仅 UDP 路径上送——TCP 打洞与 caps 正交，设计 11 §7.4）。</summary>
     public delegate Task EndpointReporter(Guid sessionId, EndpointPair endpoints,
-        P2P.Core.Protocol.Endpoint[]? localCandidates, CancellationToken ct);
+        P2P.Core.Protocol.Endpoint[]? localCandidates, uint? bearerCaps, CancellationToken ct);
 
     /// <summary>STUN-UDP 探测缝：在打洞 socket 上探测本端公网端点。</summary>
     public delegate Task<IPEndPoint> StunProbeDelegate(Socket punchSocket, CancellationToken ct);
@@ -166,6 +171,9 @@ public sealed class Puncher : IPuncher, IDisposable
     private readonly PunchFireWaiter? _punchFireWaiter; // 0x77 锚点等待缝（§5.2⑤，缺省建池即打）
     private readonly PunchStartSender? _sendPunchStart; // 0x78 起跑缝（§5.2⑥，缺省跳过晚探测流程）
     private readonly StunTcpExchangeDelegate? _tcpExchange; // STUN-TCP 交换缝（§5.2⑥，缺省跳过晚探测流程）
+    private readonly Func<uint>? _localBearerCaps; // 本端承载能力位图缝（M6-04，设计 11 §8.2：
+    // 发送时点取值随 0x70/0x76 上送+判定用同值；缺省 null=不上送位、判定恒 false=裸 UDP——
+    // DisableKcpBearer 测试缝/kill-switch 双层合成后的最终形态）
     private int _disposed;
 
     public Puncher(PunchRequestSender sendPunchRequest, EndpointReporter reportEndpoints,
@@ -175,7 +183,7 @@ public sealed class Puncher : IPuncher, IDisposable
         RelayAllocator? relayAllocator = null, LiveRelaySessionLookup? liveRelaySessionLookup = null,
         Action<string>? log = null, Func<IPAddress?, IReadOnlyList<IPAddress>>? localIpEnumerator = null,
         PunchFireWaiter? punchFireWaiter = null, PunchStartSender? punchStartSender = null,
-        StunTcpExchangeDelegate? tcpExchange = null)
+        StunTcpExchangeDelegate? tcpExchange = null, Func<uint>? localBearerCaps = null)
     {
         _sendPunchRequest = sendPunchRequest;
         _reportEndpoints = reportEndpoints;
@@ -192,7 +200,20 @@ public sealed class Puncher : IPuncher, IDisposable
         _punchFireWaiter = punchFireWaiter;
         _sendPunchStart = punchStartSender;
         _tcpExchange = tcpExchange;
+        _localBearerCaps = localBearerCaps;
     }
+
+    /// <summary>本端 caps 上送值（发送时点取值；0=不上送——null 字段=旧端/kill-switch 形态）。</summary>
+    private uint? CapsForWire()
+    {
+        var caps = _localBearerCaps?.Invoke() ?? 0u;
+        return caps != 0 ? caps : null;
+    }
+
+    /// <summary>承载协商判定（M6-04，设计 11 §8.2 两端同式）：my=0x70/0x76 上送值（判定用
+    /// 发送时点同值——与本端设置后续变化解耦），peer=对端透传值（null=旧端=0）。</summary>
+    private static bool KcpBearerEnabled(uint myCaps, uint? peerCaps)
+        => BearerCaps.KcpEnabled(myCaps, peerCaps ?? 0u);
 
     // ── 访问方 A（02 §5.1①④⑤ / §5.2①③④）──────────────────────────
 
@@ -224,6 +245,7 @@ public sealed class Puncher : IPuncher, IDisposable
     {
         var socket = CreatePunchSocket(_options.BindAddress);
         UdpPunchTransport? transport = null; // 接管 socket 后的释放责任
+        KcpTunnelTransport? kcpTransport = null; // M6-05：Adopt 后释放责任（socket 所有权随 Adopt 移交）
         var established = false;
         try
         {
@@ -235,13 +257,15 @@ public sealed class Puncher : IPuncher, IDisposable
                 return PunchOutcome.Failure(targetDeviceId, $"stun_failed: {e.Message}");
             }
 
-            // ② 第一段上送：端点+本机直连候选随 0x70；Ack 延后至 B 的 0x76（4005/5001 即时失败）
+            // ② 第一段上送：端点+本机直连候选+承载能力位图随 0x70；Ack 延后至 B 的 0x76（4005/5001 即时失败）
             var candidates = BuildLocalCandidates(((IPEndPoint)socket.LocalEndPoint!).Port);
+            var myCaps = _localBearerCaps?.Invoke() ?? 0u; // 判定用上送同值（§8.2 两端同式输入）
             PunchRequestAck ack;
             try
             {
                 ack = await _sendPunchRequest(targetDeviceId, triggerMappingId, "udp",
-                    new EndpointPair(ToProtocolEndpoint(local), null), candidates, punchCt);
+                    new EndpointPair(ToProtocolEndpoint(local), null), candidates,
+                    myCaps != 0 ? myCaps : null, punchCt);
             }
             catch (ControlErrorException e)
             {
@@ -251,22 +275,41 @@ public sealed class Puncher : IPuncher, IDisposable
             // 回退资格合成（05 §3.1，M2-23 供 M2-18）：本地设备级配置 AND 服务端中继开关
             var relayAllowed = _relayFallback(targetDeviceId) && ack.RelayAllowed;
 
-            // ④ 收 Ack → THello1 扇发映射端点+对端候选（§5.4 直连优先；首个到达包钉定回程）→ PTP 握手
+            // ④ 收 Ack → 承载协商判定（开火前完成，§8.2：Ack 到手即两端输入齐备）→
+            //    THello1 扇发映射端点+对端候选（§5.4 直连优先；首个到达包钉定回程）→ PTP 握手
             try
             {
                 var peerEp = ParseEndpoint(ack.PeerEndpoints.Udp)
                     ?? throw new IOException("PunchRequest Ack 未携带对端 UDP 端点");
                 transport = new UdpPunchTransport(socket, peerEp, ParseEndpoints(ack.PeerLocalCandidates));
-                var session = await TunnelSession.ConnectAsync(ack.SessionId, ack.Peer.DeviceId,
-                    _staticKey, ack.Peer.StaticPubKey, transport, _handler,
-                    new TunnelSessionOptions
-                    {
-                        KeepaliveInterval = TimeSpan.FromSeconds(_options.KeepaliveSec),
-                        HandshakeTimeout = _options.PunchTimeout,
-                        HandshakeResendCount = _options.BurstCount,
-                        HandshakeResendInterval = _options.BurstInterval,
-                    });
-                established = true; // 成功：socket 归会话（Disconnect 时 transport 释放）
+                TunnelSession session;
+                if (KcpBearerEnabled(myCaps, ack.PeerBearerCaps))
+                {
+                    // M6-05 KCP 承载（设计 11 §7.2）：Puncher 外驱动握手（M2-16 形态）→
+                    // Adopt（socket 所有权移交）→ FromEstablishedKeys 接 KCP 承载
+                    var keys = await HandshakeInitiateAsync(transport, ack.SessionId, ack.Peer.StaticPubKey,
+                        punchCt).ConfigureAwait(false);
+                    kcpTransport = KcpTunnelTransport.Adopt(socket, transport.Peer, _options.KcpBearerOptions);
+                    transport.ReleaseSocket(); // 此后 UdpPunchTransport 释放不关 socket（§7.3）
+                    session = TunnelSession.FromEstablishedKeys(ack.SessionId, ack.Peer.DeviceId, true,
+                        keys, kcpTransport, _handler,
+                        new TunnelSessionOptions { KeepaliveInterval = TimeSpan.FromSeconds(_options.KeepaliveSec) },
+                        staticKey: _staticKey, peerStaticPub: ack.Peer.StaticPubKey);
+                }
+                else
+                {
+                    // 现状裸路径：逐字节不动（混布降级形态）
+                    session = await TunnelSession.ConnectAsync(ack.SessionId, ack.Peer.DeviceId,
+                        _staticKey, ack.Peer.StaticPubKey, transport, _handler,
+                        new TunnelSessionOptions
+                        {
+                            KeepaliveInterval = TimeSpan.FromSeconds(_options.KeepaliveSec),
+                            HandshakeTimeout = _options.PunchTimeout,
+                            HandshakeResendCount = _options.BurstCount,
+                            HandshakeResendInterval = _options.BurstInterval,
+                        });
+                }
+                established = true; // 成功：socket 归会话（Disconnect 时承载释放）
                 return PunchOutcome.Success(ack.SessionId, ack.Peer.DeviceId, session, local, transport.Peer);
             }
             catch (Exception e)
@@ -277,9 +320,63 @@ public sealed class Puncher : IPuncher, IDisposable
         }
         finally
         {
-            if (transport is null) socket.Dispose();
-            else if (!established) await transport.DisposeAsync(); // 握手失败：释放接管中的承载
+            // 所有权链（§7.3）：Adopt 前失败=transport 关 socket；Adopt 后失败=kcpTransport 关
+            // socket（transport 已 ReleaseSocket 不再关）；成功=承载随会话生灭
+            if (kcpTransport is not null)
+            {
+                if (!established) await kcpTransport.DisposeAsync();
+            }
+            else if (transport is null) socket.Dispose();
+            else if (!established) await transport.DisposeAsync();
         }
+    }
+
+    /// <summary>KCP 路径发起方握手（M6-05，设计 11 §7；M2-16 TCP 先例同款外驱动形态）：
+    /// THello1 连发（打洞窗口丢包容忍；收到 THello2 即停）→ HandleTHello2 → 发 TConfirm →
+    /// 产出会话密钥。时序语义与 <see cref="TunnelSession.ConnectAsync"/> 握手段一致（02 §5.1）。</summary>
+    private async Task<PtpSessionKeys> HandshakeInitiateAsync(UdpPunchTransport transport,
+        Guid sessionId, byte[] peerStaticPub, CancellationToken punchCt)
+    {
+        using var initiator = PtpHandshake.StartInitiator(sessionId, _staticKey, peerStaticPub);
+        await transport.SendAsync(initiator.THello1Wire, punchCt);
+        using var resendCts = CancellationTokenSource.CreateLinkedTokenSource(punchCt);
+        var resend = ResendHandshakeBurstAsync(transport, initiator.THello1Wire,
+            _options.BurstCount, _options.BurstInterval, resendCts.Token);
+        try
+        {
+            while (true)
+            {
+                var frame = await transport.ReceiveAsync(punchCt)
+                    ?? throw new IOException("承载在握手期间关闭");
+                if (PtpFrameCodec.ParseHeader(frame).Type != PtpFrameType.THello2) continue; // 打洞窗口杂包丢弃
+                var (tConfirm, keys) = initiator.HandleTHello2(frame);
+                await transport.SendAsync(tConfirm, punchCt);
+                return keys;
+            }
+        }
+        finally
+        {
+            resendCts.Cancel();
+            try { await resend; } catch { /* 尽力而为重发 */ }
+        }
+    }
+
+    /// <summary>打洞窗握手帧周期连发（ConnectAsync.ResendHandshakeAsync 同语义副本：首发已由
+    /// 调用方发出，此处补发 N-1 次；收到应答/超时经 linked cts 停止）。</summary>
+    private static async Task ResendHandshakeBurstAsync(UdpPunchTransport transport, byte[] wire,
+        int burstCount, TimeSpan burstInterval, CancellationToken ct)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(burstInterval, TimeProvider.System);
+            for (var i = 1; i < burstCount; i++)
+            {
+                if (!await timer.WaitForNextTickAsync(ct)) return;
+                await transport.SendAsync(wire, ct);
+            }
+        }
+        catch (OperationCanceledException) { /* 收到应答/超时：停止连发 */ }
+        catch (Exception) { /* 重发尽力而为，失败不阻断握手等待 */ }
     }
 
     /// <summary>TCP 打洞编排（02 §5.2⑥，2026-10-24）：晚探测新流程优先——0x78 起跑（双端并行探测、
@@ -452,7 +549,8 @@ public sealed class Puncher : IPuncher, IDisposable
         try
         {
             ack = await _sendPunchRequest(targetDeviceId, triggerMappingId, "tcp",
-                new EndpointPair(null, ToProtocolEndpoint(mappedL)), candidates, punchCt);
+                new EndpointPair(null, ToProtocolEndpoint(mappedL)), candidates,
+                bearerCaps: null, ct: punchCt); // TCP 路径与 caps 正交（设计 11 §7.4）
         }
         catch (ControlErrorException e)
         {
@@ -619,6 +717,7 @@ public sealed class Puncher : IPuncher, IDisposable
     {
         var socket = CreatePunchSocket(_options.BindAddress);
         UdpPunchTransport? transport = null;
+        KcpTunnelTransport? kcpTransport = null; // M6-05：Adopt 后释放责任（socket 所有权随 Adopt 移交）
         var established = false;
         try
         {
@@ -630,12 +729,15 @@ public sealed class Puncher : IPuncher, IDisposable
                 return PunchOutcome.Failure(invite.Peer.DeviceId, $"stun_failed: {e.Message}");
             }
 
-            // ③ 先校验发起方端点（无效邀请不污染 0x76 上报），再回传端点+本机候选（第二段，无 Ack 单发）
+            // ③ 先校验发起方端点（无效邀请不污染 0x76 上报），再回传端点+本机候选+承载能力位图
+            //（第二段，无 Ack 单发）。承载协商判定输入=Invite.PeerBearerCaps（A 的 caps 透传，§8.2）
             var peerEp = ParseEndpoint(invite.PeerEndpoints.Udp)
                 ?? throw new IOException("PunchInvite 未携带发起方 UDP 端点");
             var candidates = BuildLocalCandidates(((IPEndPoint)socket.LocalEndPoint!).Port);
+            var myCaps = _localBearerCaps?.Invoke() ?? 0u;
             await _reportEndpoints(invite.SessionId,
-                new EndpointPair(ToProtocolEndpoint(local), null), candidates, punchCt);
+                new EndpointPair(ToProtocolEndpoint(local), null), candidates,
+                myCaps != 0 ? myCaps : null, punchCt);
 
             transport = new UdpPunchTransport(socket, peerEp, ParseEndpoints(invite.LocalCandidates));
 
@@ -649,16 +751,46 @@ public sealed class Puncher : IPuncher, IDisposable
                     var frame = await transport.ReceiveAsync(punchCt)
                         ?? throw new IOException("打洞承载关闭");
                     if (PtpFrameCodec.ParseHeader(frame).Type != PtpFrameType.THello1) continue; // 无关包丢弃
-                    var session = await TunnelSession.AcceptAsync(invite.Peer.DeviceId, frame,
-                        _staticKey, invite.Peer.StaticPubKey, transport, _handler,
-                        new TunnelSessionOptions
-                        {
-                            KeepaliveInterval = TimeSpan.FromSeconds(_options.KeepaliveSec),
-                            HandshakeTimeout = _options.PunchTimeout,
-                        });
+
+                    if (!KcpBearerEnabled(myCaps, invite.PeerBearerCaps))
+                    {
+                        // 现状裸路径：逐字节不动（混布降级形态）
+                        var rawSession = await TunnelSession.AcceptAsync(invite.Peer.DeviceId, frame,
+                            _staticKey, invite.Peer.StaticPubKey, transport, _handler,
+                            new TunnelSessionOptions
+                            {
+                                KeepaliveInterval = TimeSpan.FromSeconds(_options.KeepaliveSec),
+                                HandshakeTimeout = _options.PunchTimeout,
+                            });
+                        established = true;
+                        return PunchOutcome.Success(invite.SessionId, invite.Peer.DeviceId, rawSession, local,
+                            transport.Peer); // §5.4：钉定后的实际可达对端（直连路径≠映射端点）
+                    }
+
+                    // M6-05 KCP 承载（设计 11 §7.2）：响应方握手外驱动（THello1 在手→THello2→
+                    // TConfirm）→ Adopt（socket 所有权移交）→ FromEstablishedKeys
+                    using var responder = PtpHandshake.AcceptTHello1(frame, _staticKey,
+                        invite.Peer.StaticPubKey);
+                    await transport.SendAsync(responder.THello2Wire, punchCt);
+                    byte[] confirmWire;
+                    while (true)
+                    {
+                        var next = await transport.ReceiveAsync(punchCt)
+                            ?? throw new IOException("打洞承载关闭");
+                        if (PtpFrameCodec.ParseHeader(next).Type != PtpFrameType.TConfirm) continue;
+                        confirmWire = next;
+                        break;
+                    }
+                    var keys = responder.VerifyTConfirm(confirmWire);
+                    kcpTransport = KcpTunnelTransport.Adopt(socket, transport.Peer, _options.KcpBearerOptions);
+                    transport.ReleaseSocket(); // 此后 UdpPunchTransport 释放不关 socket（§7.3）
+                    var session = TunnelSession.FromEstablishedKeys(invite.SessionId, invite.Peer.DeviceId,
+                        false, keys, kcpTransport, _handler,
+                        new TunnelSessionOptions { KeepaliveInterval = TimeSpan.FromSeconds(_options.KeepaliveSec) },
+                        staticKey: _staticKey, peerStaticPub: invite.Peer.StaticPubKey);
                     established = true;
                     return PunchOutcome.Success(invite.SessionId, invite.Peer.DeviceId, session, local,
-                        transport.Peer); // §5.4：钉定后的实际可达对端（直连路径≠映射端点）
+                        transport.Peer);
                 }
             }
             finally
@@ -669,7 +801,13 @@ public sealed class Puncher : IPuncher, IDisposable
         }
         finally
         {
-            if (transport is null) socket.Dispose();
+            // 所有权链（§7.3）：Adopt 前失败=transport 关 socket；Adopt 后失败=kcpTransport 关
+            // socket；成功=承载随会话生灭
+            if (kcpTransport is not null)
+            {
+                if (!established) await kcpTransport.DisposeAsync();
+            }
+            else if (transport is null) socket.Dispose();
             else if (!established) await transport.DisposeAsync();
         }
     }
@@ -724,7 +862,8 @@ public sealed class Puncher : IPuncher, IDisposable
         try
         {
             await _reportEndpoints(invite.SessionId,
-                new EndpointPair(null, ToProtocolEndpoint(mappedL)), BuildLocalCandidates(portL), punchCt);
+                new EndpointPair(null, ToProtocolEndpoint(mappedL)), BuildLocalCandidates(portL),
+                bearerCaps: null, ct: punchCt); // TCP 路径与 caps 正交（设计 11 §7.4）
 
             // B 不扇出（响应方等 THello1；对端仅在收到 THello1 的连接上收 THello2，天然消歧）
             var (winner, tHello1) = await fleet.WaitFrameAsync(punchCt);

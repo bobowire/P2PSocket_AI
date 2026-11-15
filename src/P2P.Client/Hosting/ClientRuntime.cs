@@ -71,6 +71,11 @@ public sealed record ClientRuntimeOptions
     /// <summary>禁用 0x78 晚探测流程（§5.2⑥ 测试缝）：true=仅旧 0x70 流程（A-3~A-6 场景
     /// 断言旧流程行为——STUN 替身无交换语义）；生产 false=新流程优先、旧流程兜底。</summary>
     public bool DisableLatePunch { get; init; }
+
+    /// <summary>禁用 KCP 承载（M6-04 测试缝，DisableLatePunch 同款；设计 11 §8.3）：true=
+    /// Puncher 的 localBearerCaps 缝不装配 → 不上送位、判定恒 false（两态回归用：kcp on/off）；
+    /// 生产 false=随 settings.KcpBearer（用户 kill-switch 双层合成）。</summary>
+    public bool DisableKcpBearer { get; init; }
 }
 
 /// <summary>客户端全组件生命周期（单一属主；启动序=01 §4.1，停机序为其逆序）。</summary>
@@ -446,15 +451,17 @@ public sealed class ClientRuntime : IAsyncDisposable
         _puncher.Attach(new Puncher(
             // OQ-19/TD-20 punchConcurrency 通路（M2-16 打通）：settings → 0x70 上送（发送时点取当前值，
             // 设置页修改对后续打洞会话生效）；服务端 PunchPolicy.Normalize 校验后经 0x71/0x70 Ack 回填
-            (targetId, trigger, proto, endpoints, localCandidates, ct) => _control.SendRequestAsync<PunchRequestAck>(seq => new PunchRequest(
+            (targetId, trigger, proto, endpoints, localCandidates, bearerCaps, ct) => _control.SendRequestAsync<PunchRequestAck>(seq => new PunchRequest(
                 seq, _control.TimestampMs(), MsgType.PunchRequest,
                 targetId, trigger, proto, endpoints,
                 PunchConcurrency: (byte?)_settings.Settings.PunchConcurrency,
-                LocalCandidates: localCandidates), ct),
-            (sessionId, endpoints, localCandidates, ct) => _control.SendAsync(seq => new PunchEndpoint(
+                LocalCandidates: localCandidates,
+                BearerCaps: bearerCaps), ct),
+            (sessionId, endpoints, localCandidates, bearerCaps, ct) => _control.SendAsync(seq => new PunchEndpoint(
                 seq, _control.TimestampMs(), MsgType.PunchEndpoint,
                 sessionId, endpoints,
-                LocalCandidates: localCandidates), ct),
+                LocalCandidates: localCandidates,
+                BearerCaps: bearerCaps), ct),
             (socket, ct) => stunEp is null
                 ? throw new IOException("STUN 地址解析失败（服务端主机名不可解析，TD-07 :3478）")
                 : StunProber.ProbeAsync(socket, stunEp, deviceId, deviceSecret, _control.Clock, ct: ct),
@@ -498,7 +505,11 @@ public sealed class ClientRuntime : IAsyncDisposable
                 : (socket, sessionId, candidates, token) => stunEp is null
                     ? throw new IOException("STUN 地址解析失败（服务端主机名不可解析，TD-07 :3478）")
                     : StunTcpProber.ProbeExchangeAsync(socket, stunEp, deviceId, deviceSecret, _control.Clock,
-                        sessionId, candidates, ct: token)));
+                        sessionId, candidates, ct: token),
+            // 本端承载能力位图缝（M6-04，设计 11 §8.2/§8.3）：DisableKcpBearer 测试缝 OR 用户
+            // kill-switch（settings.KcpBearer）任一关闭 → 缝不装配=不上送位、判定恒 false（裸 UDP）
+            localBearerCaps: _options.DisableKcpBearer ? null
+                : () => _settings.Settings.KcpBearer ? BearerCaps.Kcp : 0u));
         Log?.Invoke($"打洞器已接线（STUN={stunEp?.ToString() ?? "解析失败"}，派生自控制地址 :3478，TD-07）");
     }
 

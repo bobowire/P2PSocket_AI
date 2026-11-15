@@ -70,6 +70,37 @@ public sealed record FilterRecord(string Receiver, string Sender, IPEndPoint Sen
 public sealed record BlockedRecord(string Client, IPEndPoint Target);
 
 /// <summary>
+/// M6-06 弱网注入旋钮（设计 11 §11.4/§12 决议⑥）：作用于数据投递面（入站过滤后的 ④ 投递点，
+/// 双向皆染）；STUN 代理与打洞发现不注（弱网矩阵先净网建链后注扰动=「直连成功但弱网丢包」
+/// 的 M2-38 场景形态）。运行期可整体启停（<c>sim.Perturbation = null</c> 即恢复净网）。
+/// 判定确定性：乱序按包序取模（每 depth+1 包延迟 depth×步长制造倒置）、突发档按墙钟奇偶窗
+/// 连片丢；丢包/重复/抖动按 Seed 播种的 Random（可复现）。
+/// </summary>
+public sealed class UdpPerturbation
+{
+    /// <summary>均匀丢包率 [0,1]；≥1=黑洞（全丢——KEEPALIVE 断链档）。</summary>
+    public double LossRate { get; init; }
+
+    /// <summary>重复率 [0,1)（同包投递两次）。</summary>
+    public double DuplicateRate { get; init; }
+
+    /// <summary>随机延迟上界 ms（[0,JitterMs) 均匀——延迟差即自然乱序）。</summary>
+    public int JitterMs { get; init; }
+
+    /// <summary>结构性乱序深度（>0：每 depth+1 包延迟 depth×<see cref="ReorderStepMs"/>，制造确定性倒置）。</summary>
+    public int ReorderDepth { get; init; }
+
+    /// <summary>乱序延迟步长 ms。</summary>
+    public int ReorderStepMs { get; init; } = 25;
+
+    /// <summary>突发连片丢窗宽 ms（决议⑥：窗内全丢/窗外全通交替——WiFi 漫游/NAT 重绑定形态）。</summary>
+    public int BurstLossWindowMs { get; init; }
+
+    /// <summary>随机源种子（可复现红绿）。</summary>
+    public int Seed { get; init; } = 42;
+}
+
+/// <summary>
 /// 单宿主机 UDP NAT 模拟器（09 §2.2、TD-17）：一个实例同时扮演"互联网"与全部客户端 NAT——
 /// 拥有全部公网套接字（绑定 <see cref="UdpNatOptions.PublicAddress"/>，端口取自模拟端口段），
 /// 代理 STUN（请求经映射公网套接字转发上游，响应按事务 ID 改写 XOR-MAPPED-ADDRESS 后回内部端点）。
@@ -155,6 +186,29 @@ public sealed class UdpNatSimulator : IAsyncDisposable
     {
         get { lock (_lock) return _blocked.ToList(); }
     }
+
+    /// <summary>M6-06 弱网注入（null=净网，默认）；作用于数据投递面，运行期可切换。
+    /// 每次激活按 Seed 重播种（各矩阵格独立可复现）。</summary>
+    public UdpPerturbation? Perturbation
+    {
+        get => _perturbation;
+        set
+        {
+            _perturbation = value;
+            _perturbRandom = new(value?.Seed ?? 42);
+            _perturbSeq = 0;
+        }
+    }
+
+    /// <summary>弱网注入丢弃计数（红绿矩阵断言扰动确实生效）。</summary>
+    public long PerturbDropped { get; private set; }
+
+    /// <summary>投递/监听循环故障数（诊断：扰动路径异常会击杀对应映射的投递循环=静默断链）。</summary>
+    public int LoopFaults => _loops.Count(t => t.IsFaulted);
+
+    private UdpPerturbation? _perturbation;
+    private Random _perturbRandom = new(42);
+    private long _perturbSeq;
 
     // ── 主循环 ─────────────────────────────────────────────────────────
 
@@ -258,9 +312,37 @@ public sealed class UdpNatSimulator : IAsyncDisposable
                 }
 
                 // ④ 投递：从发送方公网套接字发出 → 接收方看到的源即发送方公网身份；
-                //    外部来源无法伪造源地址，经接收侧公网套接字代发
+                //    外部来源无法伪造源地址，经接收侧公网套接字代发。
+                //    M6-06 弱网注入面（设计 11 §11.4）：Perturbation 非 null 时按旋钮变换
+                //    （丢/重/乱序/抖动/突发连片丢）——STUN 代理与打洞发现不经此点（净网建链前提）
                 deliverTo = m.Internal;
                 deliverFrom = senderSocket ?? m.Socket;
+                if (Perturbation is { } pb)
+                {
+                    var seq = ++_perturbSeq;
+                    var drop = pb.LossRate >= 1.0
+                        || _perturbRandom.NextDouble() < pb.LossRate
+                        || (pb.BurstLossWindowMs > 0 && Environment.TickCount64 / pb.BurstLossWindowMs % 2 == 1);
+                    if (drop)
+                    {
+                        PerturbDropped++;
+                        continue;
+                    }
+                    var delay = pb.JitterMs > 0 ? _perturbRandom.Next(pb.JitterMs) : 0;
+                    if (pb.ReorderDepth > 0 && seq % (pb.ReorderDepth + 1) == 0)
+                        delay += pb.ReorderDepth * pb.ReorderStepMs; // 确定性倒置（延迟超后续包）
+                    var dup = pb.DuplicateRate > 0 && _perturbRandom.NextDouble() < pb.DuplicateRate;
+                    var copy = (byte[])r.Buffer.Clone();
+                    var from = deliverFrom;
+                    var to = deliverTo;
+                    _ = Task.Run(async () =>
+                    {
+                        if (delay > 0) await Task.Delay(delay);
+                        from.Send(copy, copy.Length, to);
+                        if (dup) from.Send(copy, copy.Length, to);
+                    });
+                    continue;
+                }
             }
             deliverFrom.Send(r.Buffer, r.Buffer.Length, deliverTo);
         }

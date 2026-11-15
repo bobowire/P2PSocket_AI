@@ -1,5 +1,5 @@
 // 本文件由 export-ts 反射生成（06 §5、08 §2③），禁止手改；
-// 源：LocalWebApi 真实路由表（src/Tools/ExportTs @ 2026-10-23T13:54:27Z）。前端禁止手写 API 字符串路径。
+// 源：LocalWebApi 真实路由表（src/Tools/ExportTs @ 2026-11-15T09:24:35Z）。前端禁止手写 API 字符串路径。
 
 export const ApiPaths = {
   AuthChangePassword: "/api/auth/change-password",

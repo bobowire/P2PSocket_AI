@@ -111,6 +111,7 @@ onUnmounted(() => dashboard.stopPolling());
         </p>
         <p class="sub-line">
           {{ data.punch.total24h }} 次：直连 {{ data.punch.direct24h }} · 中继 {{ data.punch.relay24h }} · 失败 {{ data.punch.failed24h }}
+          <div class="punch-bearer">直连承载：KCP {{ data.punch.kcpDirect24h }} · 裸 UDP {{ data.punch.rawDirect24h }}</div>
         </p>
       </el-card>
     </div>
@@ -130,6 +131,11 @@ onUnmounted(() => dashboard.stopPolling());
 </template>
 
 <style scoped>
+.punch-bearer {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
 .cards {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

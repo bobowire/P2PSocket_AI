@@ -28,7 +28,7 @@ export const useSettingsStore = defineStore("settings", () => {
 
   /** 部分修改：仅送变更字段（null=保持现值语义在服务端，04 §2.1）。 */
   async function save(patch: Partial<Pick<ClientSettings,
-    "serverAddrs" | "localWebPort" | "webTokenAuth" | "punchConcurrency" | "keepaliveSec">>) {
+    "serverAddrs" | "localWebPort" | "webTokenAuth" | "punchConcurrency" | "keepaliveSec" | "kcpBearer">>) {
     const result = await api.put<SettingsSaveResult>(ApiPaths.Settings, patch);
     settings.value = result.settings;
     return result;

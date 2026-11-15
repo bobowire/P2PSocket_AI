@@ -22,6 +22,7 @@ public sealed class UdpPunchTransport : ITunnelTransport
     private readonly IReadOnlyList<IPEndPoint> _targets; // 扇出集：主映射端点 + 直连候选（去重后）
     private IPEndPoint? _pinned; // 首个到达包的源端点——回程钉定（直连路径回程不走映射端点）
     private int _disposed;
+    private int _released; // M6-05：socket 所有权移交标记（Adopt 后 Dispose 不再关 socket）
 
     public UdpPunchTransport(Socket socket, IPEndPoint peer, IReadOnlyList<IPEndPoint>? extraTargets = null)
     {
@@ -78,10 +79,14 @@ public sealed class UdpPunchTransport : ITunnelTransport
         // OperationCanceledException 正常传播（停机/断链取消）
     }
 
+    /// <summary>socket 所有权移交（M6-05，设计 11 §5.4/§7.3）：此后 <see cref="DisposeAsync"/>
+    /// 不再关闭 socket（由接管方 KcpTunnelTransport 独占并在其 Dispose 时关闭）。幂等。</summary>
+    public void ReleaseSocket() => Volatile.Write(ref _released, 1);
+
     public ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return ValueTask.CompletedTask;
-        _socket.Dispose();
+        if (Volatile.Read(ref _released) != 1) _socket.Dispose();
         return ValueTask.CompletedTask;
     }
 }

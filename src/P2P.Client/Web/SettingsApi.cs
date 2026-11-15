@@ -29,6 +29,7 @@ public static class SettingsApi
                     PunchConcurrency = body.PunchConcurrency ?? current.PunchConcurrency,
                     KeepaliveSec = body.KeepaliveSec ?? current.KeepaliveSec,
                     WebTokenAuth = body.WebTokenAuth ?? current.WebTokenAuth, // M5-12 可配置化（07 §14.2）
+                    KcpBearer = body.KcpBearer ?? current.KcpBearer,         // M6-04 kill-switch（后续打洞会话生效）
                     Reconnect = current.Reconnect,
                 };
                 await settings.SaveAsync(merged, ct); // 校验失败抛 ConfigValidationException → 1001 带字段明细
@@ -58,10 +59,12 @@ public static class SettingsApi
         s.WebTokenAuth,
         s.PunchConcurrency,
         s.KeepaliveSec,
+        s.KcpBearer, // M6-04（NET-77）
         s.Reconnect,
     };
 
     /// <summary>部分更新体（null=保持现值；04 §2.1）。</summary>
     public sealed record SettingsUpdateRequest(
-        string[]? ServerAddrs, int? LocalWebPort, int? PunchConcurrency, int? KeepaliveSec, bool? WebTokenAuth);
+        string[]? ServerAddrs, int? LocalWebPort, int? PunchConcurrency, int? KeepaliveSec, bool? WebTokenAuth,
+        bool? KcpBearer);
 }

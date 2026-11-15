@@ -377,6 +377,10 @@ namespace P2P.Server.Data.Migrations
                         .HasColumnName("id")
                         .HasAnnotation("Sqlite:Autoincrement", true);
 
+                    b.Property<int?>("Bearer")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("bearer");
+
                     b.Property<int>("Concurrency")
                         .HasColumnType("INTEGER")
                         .HasColumnName("concurrency");

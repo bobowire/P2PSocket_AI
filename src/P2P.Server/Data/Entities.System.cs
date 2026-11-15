@@ -33,4 +33,5 @@ public sealed class PunchStat
     public string Result { get; set; } = "";           // direct|relay|failed
     public string? Reason { get; set; }
     public int DurationMs { get; set; }
+    public int? Bearer { get; set; }                   // M6-08：直连承载（0=裸 UDP/1=KCP；中继/失败/旧端 null——NET-77 L2 包络统计维度）
 }
