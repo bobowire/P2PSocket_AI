@@ -85,6 +85,10 @@ public sealed class TunnelSession : IAsyncDisposable
     ///（裸 UDP_DGRAM/FRAG 仍走旁路）；false=裸 UDP/TCP/中继。诊断/测试观察（M6-08 诊断页可选）。</summary>
     public bool UsesKcpBearer => _transport is KcpTunnelTransport;
 
+    /// <summary>裸 UDP 直连承载标记（M6-08 0x72 包络统计判别）：true=UDP 打洞直连且未升级 KCP
+    ///（bearer=0）；TCP 直连承载不参与 UDP 包络（BearerFor 报 null）。</summary>
+    public bool RawUdpBearer => _transport is Punch.UdpPunchTransport;
+
     /// <summary>KCP 承载诊断快照（M6-08 生产观察）：仅 KCP 承载非 null——承载层计数+全 conv
     /// 算法层聚合（诊断页隧道快照数据源；其他承载 null）。</summary>
     public KcpBearerStatsSnapshot? KcpStats => (_transport as KcpTunnelTransport)?.Snapshot();

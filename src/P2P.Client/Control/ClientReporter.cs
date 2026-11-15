@@ -65,11 +65,14 @@ public sealed class ClientReporter : IAsyncDisposable
             BearerFor(outcome)));
     }
 
-    /// <summary>承载类型上报映射（M6-08）：Ok 且非中继 → Session 承载判定（KCP=1/裸=0）；
-    /// 中继/失败/无会话 → null（不携带）。</summary>
+    /// <summary>承载类型上报映射（M6-08，实机部署修正）：仅 UDP 直连承载参与包络统计
+    ///（KCP=1/裸=0）；TCP 直连承载不携带 null——bearer 列语义=UDP 直连承载类型，混入 TCP
+    /// 会污染丢包包络。中继/失败/无会话 → null（不携带）。</summary>
     internal static byte? BearerFor(PunchOutcome outcome)
         => outcome.Ok && outcome.Session is { } s && !s.ViaRelay
-            ? (byte)(s.UsesKcpBearer ? 1 : 0)
+            ? s.UsesKcpBearer ? (byte)1
+              : s.RawUdpBearer ? (byte)0
+              : (byte?)null
             : null;
 
     /// <summary>结果端点映射（与服务端 M2-08 三态判据互证）：直连成功携带对端公网端点；

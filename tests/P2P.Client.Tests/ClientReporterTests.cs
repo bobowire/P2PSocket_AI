@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using P2P.Client.Control;
 using P2P.Client.Punch;
 using P2P.Client.Tunnel;
@@ -55,11 +56,16 @@ public sealed class ClientReporterTests
     // ── M6-08：0x72 bearer 承载类型映射（NET-77 L2 包络统计维度）────────
 
     [Fact]
-    public async Task bearer映射_直连成功_裸承载报0()
+    public async Task bearer映射_真实UDP承载报0_非UDP承载报null()
     {
-        // 内存管道会话（非 KCP 承载）→ 裸 UDP=0（KCP=1 分支见 PuncherKcpBearerTests 真实 KCP 会话断言）
+        // ① 真实 UdpPunchTransport 会话 → 裸 UDP=0（KCP=1 分支见 PuncherKcpBearerTests 真实 KCP 会话断言）
+        var sa = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        var sb = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        sa.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        sb.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        var ta = new UdpPunchTransport(sa, (IPEndPoint)sb.LocalEndPoint!);
+        var tb = new UdpPunchTransport(sb, (IPEndPoint)sa.LocalEndPoint!);
         var (staticA, staticB) = (EcKeyPair.Generate(), EcKeyPair.Generate());
-        var (ta, tb) = MemoryTransport.CreatePair();
         var sessionId = Guid.NewGuid();
         var opts = new TunnelSessionOptions { KeepaliveInterval = TimeSpan.FromHours(1) };
         var connectTask = TunnelSession.ConnectAsync(sessionId, Guid.NewGuid(), staticA,
@@ -70,6 +76,7 @@ public sealed class ClientReporterTests
         var a = await connectTask;
         try
         {
+            Assert.True(a.RawUdpBearer);
             Assert.Equal((byte)0, ClientReporter.BearerFor(new PunchOutcome(
                 true, sessionId, Guid.NewGuid(), a, null, null, null)));
         }
@@ -77,6 +84,25 @@ public sealed class ClientReporterTests
         {
             await a.DisposeAsync();
             await b.DisposeAsync();
+        }
+
+        // ② 非 UDP 承载形态（内存管道=TCP 承载同型）→ null（实机修正：TCP 直连不污染 UDP 包络）
+        var (tma, tmb) = MemoryTransport.CreatePair();
+        var connect2 = TunnelSession.ConnectAsync(Guid.NewGuid(), Guid.NewGuid(), staticA,
+            staticB.ExportPublicKey(), tma, NullChannelHandler.Instance, opts);
+        var t2 = await tmb.ReceiveAsync() ?? throw new IOException("无 THello1");
+        var b2 = await TunnelSession.AcceptAsync(Guid.NewGuid(), t2, staticB,
+            staticA.ExportPublicKey(), tmb, NullChannelHandler.Instance, opts);
+        var a2 = await connect2;
+        try
+        {
+            Assert.Null(ClientReporter.BearerFor(new PunchOutcome(
+                true, Guid.NewGuid(), Guid.NewGuid(), a2, null, null, null)));
+        }
+        finally
+        {
+            await a2.DisposeAsync();
+            await b2.DisposeAsync();
         }
     }
 
