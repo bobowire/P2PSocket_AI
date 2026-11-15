@@ -117,3 +117,4 @@ p2pclient-windows-x64\
 | 2026-09-11 | v1.0:首次部署;修复 SPA 静态托管缺失缺陷并验证;沉淀 ps1-BOM/cmd-ASCII 编码坑 |
 | 2026-09-11 | v1.1:新增 §8 离线分发包(客户端 B 人工部署,p2pclient-windows-x64.zip) |
 | 2026-09-12 | v1.2:§7 增缺陷二(映射监听绑 127.0.0.1 而非虚拟 IP,UpdateVirtualIp 修复)+重启 AddressNotAvailable 观察项;§8 标注当前 zip 不含该修复;更新流程补 publish 须单文件自包含参数(-p:PublishSingleFile=true -p:SelfContained=true,框架依赖散装会致服务起不来) |
+| 2026-11-15 | v1.3:M6 部署实录（e3f70af→75538ab，NET-77）——升级走 out/upgrade-local-e3f70af.ps1（对齐 upgrade-local 先例，dst=D:\P2PClient 服务实指）；**PS5.1 编码坑复发实录**（UTF-8 无 BOM 中文脚本 GBK 解析崩——M1 §5④ 修复法重演：WriteAllText 带 BOM）；**Stop-Service 须提权**（非管理员 shell 走 Start-Process -Verb RunAs 弹 UAC）；版本注入竞态坑（git commit 与 dotnet publish 并行致 AssemblyMetadata 注入旧 commit——**commit 必须先于 publish 完成且产物须 grep 短哈希核验**）；0x72 bearer 三态收窄实机反馈回流（TCP 直连不携带，75538ab）；回滚件 p2p-client.bak-20261115-m6.exe |
