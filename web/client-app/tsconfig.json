@@ -15,5 +15,6 @@
       "@p2p/ui-shared": ["../ui-shared/src/index.ts"]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.vue", "../ui-shared/src/**/*.ts", "../ui-shared/src/**/*.vue"]
+  "include": ["src/**/*.ts", "src/**/*.vue", "../ui-shared/src/**/*.ts", "../ui-shared/src/**/*.vue"],
+  "exclude": ["../ui-shared/src/**/*.test.ts"]
 }

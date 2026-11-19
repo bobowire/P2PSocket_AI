@@ -103,7 +103,7 @@ public sealed class ClientRuntime : IAsyncDisposable
     private WebApplication _app = null!;
     private WebToken _webToken = null!; // M5-12：本地 Web token（07 §14.2，随启动轮换）
     private NicHealthMonitor? _nicMonitor;
-    private Task? _relayRetryLoop;
+    private Task? _punchRetryLoop; // M7-03 更名（原 _relayRetryLoop）：中继回切+Failed 重试统一周期循环
     private readonly SemaphoreSlim _restoreMutex = new(1, 1); // 启用映射恢复重入闸（启动与登录补发并发防扰）
     private int _registeredPathStarted;
     private int _disposed;
@@ -164,7 +164,9 @@ public sealed class ClientRuntime : IAsyncDisposable
         _host = new TunnelHost();
         _host.SessionLog += (s, m) => Log?.Invoke($"[tunnel {s.PeerDeviceId.ToString()[..8]}{(s.ViaRelay ? "/relay" : "")}] {m}");
         _puncher = new LazyPuncher();
-        _scheduler = new PunchScheduler(_puncher);
+        // M7-02 生产装配（设计 12 §4.3）：planner 注入——打洞协议出队时点按设备级 punchMode 解析
+        //（PeersStore.GetPunchMode 发送时点取现值，设备页修改对后续打洞会话即时生效）
+        _scheduler = new PunchScheduler(_puncher, new PunchModePlanner(_peers.GetPunchMode));
         _scheduler.Log += m => Log?.Invoke($"[punch] {m}"); // 打洞完成四型日志——M2_38 排查曾因未接线被误导为"调度未返回"
         var bindIp = IPAddress.TryParse(_state.State.VirtualIp, out var vip) ? vip : IPAddress.Loopback;
         _engine = new MappingEngine(_host, _scheduler, bindIp,
@@ -343,8 +345,8 @@ public sealed class ClientRuntime : IAsyncDisposable
             //（登录后可见性就位时经 LoginSucceeded 补发重入，P3 修复）
             await RestoreEnabledMappingsAsync("startup");
 
-            // 中继回切周期循环（M2-19，02 §6.2/OQ-7）：relay 态设备对每 60s 重试直连
-            _relayRetryLoop = RelayRetryLoopAsync(_cts.Token);
+            // 打洞周期循环（M2-19 中继回切 + M7-03 Failed 周期重试，设计 12 §2.3）：60s 周期统一驱动
+            _punchRetryLoop = PunchRetryLoopAsync(_cts.Token);
 
             Log?.Invoke($"注册后路径完成：网卡已应用，映射恢复 {_state.State.Mappings.Count(m => m.Enabled)} 条");
         }
@@ -567,6 +569,9 @@ public sealed class ClientRuntime : IAsyncDisposable
         try
         {
             var outcome = await _scheduler.RespondAsync(invite, _cts.Token);
+            // 被邀请侧结果线（M7-04，设计 12 §6.2）：与 A 侧四型日志同口径携带 proto
+            Log?.Invoke($"[punch] 被邀请打洞完成 peer={outcome.PeerDeviceId} proto={outcome.Proto} " +
+                        $"ok={outcome.Ok}{(outcome.Ok ? "" : $"：{outcome.FailReason}")}（0x71 会话）");
             if (outcome.Ok && outcome.Session is { IsClosed: false })
             {
                 _host.Attach(outcome.Session);
@@ -590,6 +595,9 @@ public sealed class ClientRuntime : IAsyncDisposable
         try
         {
             var outcome = await _scheduler.RespondGoAsync(go, _cts.Token);
+            // 被邀请侧结果线（M7-04，设计 12 §6.2）：与 0x71 同口径
+            Log?.Invoke($"[punch] 被邀请打洞完成 peer={outcome.PeerDeviceId} proto={outcome.Proto} " +
+                        $"ok={outcome.Ok}{(outcome.Ok ? "" : $"：{outcome.FailReason}")}（0x78 Go 会话）");
             if (outcome.Ok && outcome.Session is { IsClosed: false })
             {
                 _host.Attach(outcome.Session);
@@ -700,18 +708,21 @@ public sealed class ClientRuntime : IAsyncDisposable
         }
     }
 
-    // ── 中继回切直连（M2-19，02 §6.2/OQ-7/NET-75）────────────────────
+    // ── 打洞周期循环（M2-19 中继回切 + M7-03 Failed 周期重试，02 §6.2/OQ-7/设计 12 §2.3/§5.3）──
 
-    /// <summary>回切重试周期（PRD 06 §6 定值 60s；测试缝 RelayRetryIntervalOverride）。</summary>
+    /// <summary>回切重试周期（PRD 06 §6 定值 60s；测试缝 RelayRetryIntervalOverride——名不变）。</summary>
     private static readonly TimeSpan RelayRetryInterval = TimeSpan.FromSeconds(60);
 
-    /// <summary>relay 态设备对周期重试直连：访问方（会话发起侧，IsInitiator）每周期发 0x73 请求协调
-    /// （服务端台账/活中继解析 → 双端 0x73 通知；被邀请侧非发起方不触发，防双端同时重打）→
-    /// 随后入队全新 0x70 打洞（端点须新鲜，两段式不变）。成功 → 直连会话替换中继（TunnelHost
-    /// 排水窗，NET-75）→ 映射 relay→direct；失败且回退资格真 → 设备对活中继会话在位则直接复用
-    /// 保持现状（M2-37：不再 0x74 整体替换——排水窗杀传输中 channel，60s 周期下长传输必断），
-    /// 会话已亡才全新分配重建。</summary>
-    private async Task RelayRetryLoopAsync(CancellationToken ct)
+    /// <summary>打洞周期循环（原中继回切循环更名扩容，设计 12 §5.3）：每 tick ①中继回切——
+    /// relay 态设备对重试直连：访问方（会话发起侧，IsInitiator）每周期发 0x73 请求协调（服务端
+    /// 台账/活中继解析 → 双端 0x73 通知；被邀请侧非发起方不触发，防双端同时重打）→ 随后
+    /// EnqueueRetry 入队全新 0x70 打洞（端点须新鲜，两段式不变；协议交由 planner 交替——以设备级
+    /// 优先模式为起点 TCP/KCP 交替，单一形态不可达的网络下另一形态仍有周期性机会，设计 12 决策②）。
+    /// 成功 → 直连会话替换中继（TunnelHost 排水窗，NET-75）→ 映射 relay→direct；失败且回退资格真 →
+    /// 设备对活中继会话在位则直接复用保持现状（M2-37），会话已亡才全新分配重建。
+    /// ②Failed 态周期重试（M7-03，设计 12 §2.3）：未回退中继的失败映射同 tick 补一轮打洞重试
+    ///（仅重排打洞不拆建；无监听失败归 M2-24 监听重试集）——7×24 无人值守自愈。</summary>
+    private async Task PunchRetryLoopAsync(CancellationToken ct)
     {
         try
         {
@@ -719,12 +730,9 @@ public sealed class ClientRuntime : IAsyncDisposable
             using var timer = new PeriodicTimer(interval);
             while (await timer.WaitForNextTickAsync(ct))
             {
+                // ① 中继回切（现状逻辑不变；proto 计算三行删除——协议交由 planner 交替，设计 12 §5.3）
                 foreach (var session in _host.Sessions.Where(s => s.ViaRelay && !s.IsClosed && s.IsInitiator))
                 {
-                    // proto 取该设备对 relay 态映射（隧道为设备对级资源，02 §4.5）；无映射兜底 udp
-                    var proto = _engine.Snapshots.FirstOrDefault(m =>
-                            m.Config.PeerDeviceId == session.PeerDeviceId && m.State == MappingState.Relay)
-                        ?.Config.Proto ?? "udp";
                     try
                     {
                         await _control.SendRequestAsync<PunchRetry>(seq => new PunchRetry(
@@ -740,8 +748,12 @@ public sealed class ClientRuntime : IAsyncDisposable
                     {
                         Log?.Invoke($"[relay] PunchRetry 发送失败：{e.Message}（下周期重试）");
                     }
-                    _scheduler.Enqueue(session.PeerDeviceId, null, proto);
+                    _scheduler.EnqueueRetry(session.PeerDeviceId);
                 }
+
+                // ② Failed 态周期重试（设计 12 §2.3 新增）：仅重排打洞；非 Failed/无监听在引擎内 no-op
+                foreach (var snap in _engine.Snapshots.Where(s => s.State == MappingState.Failed).ToList())
+                    _ = _engine.RetryPunchAsync(snap.Config.MappingId);
             }
         }
         catch (OperationCanceledException) { /* 停机 */ }

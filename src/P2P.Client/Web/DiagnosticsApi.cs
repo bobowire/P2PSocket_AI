@@ -33,9 +33,10 @@ public sealed record ServerTestResultView(string Addr, bool Ok, string Detail);
 public sealed record ServerTestView(ServerTestResultView[] Items);
 
 /// <summary>活隧道行（M3-14）：Label=本地映射运行时反查的远程码（无映射指向时 null，显示短 id）。
-/// Kcp（M6-08 生产观察）：KCP 承载计数快照（承载层+全 conv 算法层聚合；非 KCP 承载 null）。</summary>
+/// Kcp（M6-08 生产观察）：KCP 承载计数快照（承载层+全 conv 算法层聚合；非 KCP 承载 null）。
+/// Bearer（M7-04，设计 12 §7.2）：承载形态四态 relay/kcp/raw-udp/tcp（展示口径，诊断页/设备页隧道类型列）。</summary>
 public sealed record TunnelView(Guid PeerDeviceId, string? Label, bool ViaRelay, bool IsInitiator,
-    KcpBearerStatsSnapshot? Kcp = null);
+    KcpBearerStatsSnapshot? Kcp = null, string Bearer = "tcp");
 
 /// <summary>活隧道列表快照（TunnelHost 本地表，passive 亦可达）。</summary>
 public sealed record TunnelListView(TunnelView[] Items);
@@ -110,7 +111,7 @@ public static class DiagnosticsApi
                     .OrderBy(s => s.PeerDeviceId) // 确定性排序
                     .Select(s => new TunnelView(
                         s.PeerDeviceId, peerLabelLookup?.Invoke(s.PeerDeviceId), s.ViaRelay, s.IsInitiator,
-                        s.KcpStats)) // M6-08：KCP 承载计数（非 KCP 承载 null）
+                        s.KcpStats, s.Bearer)) // M6-08 KCP 计数 + M7-04 承载四态（设计 12 §7.2）
                     .ToArray();
                 return Api.Ok(new TunnelListView(items));
             }

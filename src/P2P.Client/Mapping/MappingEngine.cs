@@ -259,6 +259,24 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
         return EnableAsync(config);
     }
 
+    /// <summary>周期失败重试（M7-03，设计 12 §2.3/§5.2）：仅 Failed 态且有监听的映射——置 Punching 并
+    /// 按交替协议重排打洞（EnqueueRetry，协议由设备级 punchMode 决策）；无监听失败归监听重试集
+    ///（M2-24，防周期性"先拆后建"与重试集双驱动叠加——<b>绝不触发拆建</b>）；非 Failed 态 no-op
+    ///（幂等，供 60s 周期循环安全调用；与手动重试/重连沿补试并发时由同对合并 OQ-11 兜底去重）。
+    /// 纯同步入队无异步面，返回 Task 与 <see cref="RetryAsync"/> 签名风格对称。</summary>
+    public Task RetryPunchAsync(Guid mappingId)
+    {
+        if (!_mappings.TryGetValue(mappingId, out var rt))
+            return Task.CompletedTask;
+        if (rt.State != MappingState.Failed)
+            return Task.CompletedTask; // 非 Failed 态 no-op（幂等）
+        if (rt.Listener is null && rt.UdpListener is null)
+            return Task.CompletedTask; // 无监听失败（listen_failed）：归 M2-24 监听重试集
+        SetState(rt, MappingState.Punching, null);
+        _scheduler.EnqueueRetry(rt.Config.PeerDeviceId, mappingId); // 交替协议（设计 12 决策②③）
+        return Task.CompletedTask;
+    }
+
     /// <summary>授权失效（预留：服务端禁用/0x64 事件到达即标 invalid，任意态可入）。</summary>
     public async Task MarkInvalidAsync(Guid mappingId, string detail)
     {

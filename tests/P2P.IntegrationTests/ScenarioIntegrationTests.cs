@@ -200,15 +200,18 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
 
     /// <summary>启动客户端运行时（网卡替身 + 打洞 socket 绑内网别名缝；诊断日志进测试产物；
     /// relayRetryInterval：M2-19 回切 60s 周期的缩短缝——周期机制本身驱动回切，间接验证触发；
+    /// （M7-03 起同缝驱动 PunchRetryLoop 的 Failed 周期重试，设计 12 §2.3）；
     /// statsInterval：M2-22 0x64 30s 上报周期的缩短缝——周期落库与停机补报验证；
     /// subnetSurvey：M3-13 网段冲突检测的枚举源替身缝——注入可变数据驱动命中→解除全链；
     /// localCandidates：§5.4 本机候选默认关——回环别名 fabric 全互通，候选直连会击穿
     /// 「跨 NAT 不可直达」的必败前提（M2-18/22/32/37）；同网段用例显式开启驱动候选路径；
     /// latePunch：0x78 晚探测流程默认**关**（§5.2⑥ 测试缝——既有 A-3~A-5 断言旧流程行为，
-    /// STUN 替身无交换语义）；S78 用例显式开启（TcpStunStub 交换语义 + 真实 0x78 服务端））。</summary>
+    /// STUN 替身无交换语义）；S78 用例显式开启（TcpStunStub 交换语义 + 真实 0x78 服务端）；
+    /// logSink：M7-04 日志断言缝——四型/B 侧结果线 proto= 标注的收集器（缺省仅进测试产物）。</summary>
     private async Task<HttpClient> StartRuntimeAsync(SeededClient c, TimeSpan? relayRetryInterval = null,
         TimeSpan? statsInterval = null, SubnetConflictDetector.SurveySource? subnetSurvey = null,
-        bool localCandidates = false, bool latePunch = false, bool kcpBearer = true)
+        bool localCandidates = false, bool latePunch = false, bool kcpBearer = true,
+        System.Collections.Concurrent.ConcurrentQueue<string>? logSink = null)
     {
         // 每运行时独立网卡替身：共享单例时后启动客户端的 Ensure 覆盖共享 BoundIp，先启动者健康探测
         // 即 IpMismatch → 双端 30s 周期互相重建乒乓（Restored 沿重绑映射监听，杀死在途传输——
@@ -225,7 +228,11 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
             DisableLatePunch = !latePunch,
             DisableKcpBearer = !kcpBearer, // M6-05 两态回归缝（默认 true=KCP 承载协商开）
         });
-        runtime.Log += m => _output.WriteLine($"[{c.Ip}] {m}");
+        runtime.Log += m =>
+        {
+            _output.WriteLine($"[{c.Ip}] {m}");
+            logSink?.Enqueue(m);
+        };
         await runtime.StartAsync();
         _runtimes.Add(runtime);
         var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{runtime.WebPort}") };
@@ -1058,13 +1065,16 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
     /// 探测门每次毒化封扇首 +0 腿 + 随机分配封非扇首腿——重打每个周期必 miss）+ 回退开 → relay 态；
     /// 回切周期缩短 3s 驱动周期性重打。断言：序号载荷流跨 ≥3 个回切周期
     /// **连接不断**（修复前每周期 0x74 整体替换 → 排水窗杀 channel → 流断连；即公网"网页资源跨周期
-    /// 加载失败"），已收序号严格递增，映射保持 relay，echo 往返仍通。</summary>
+    /// 加载失败"），已收序号严格递增，映射保持 relay，echo 往返仍通。
+    /// M7-03 适配：重打协议由 planner 交替（tcp→udp→tcp…，设计 12 决策②）——UDP 侧同为
+    /// SymmetricRandom（原 FullCone×FullCone 下 udp 重打会命中回切直连，"永败世界"前提失效——
+    /// 那是交替重试的正确新行为，回切命中的验证归 M2_19/M7_03 系）。</summary>
     [Fact]
     public async Task M2_37_回切重打周期性失败_活中继会话复用_长传输跨周期不断()
     {
         await StartSimulatorAsync(
-            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
-            (IPAddress.Parse("127.0.0.5"), UdpNatMode.FullCone), tcpStub: false);
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.SymmetricRandom),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.SymmetricRandom), tcpStub: false);
         await StartTcpSimulatorAsync(mode: TcpNatMode.SymmetricRandom, persistPerturbation: true); // 随机分配封非扇首腿 + 探测门持续毒化：重打永败（≠M2-19 扰动一次性）
         var group = await CreateGroupAsync();
         var a = await SeedClientAsync("r37-a", IPAddress.Parse("127.0.0.4"), group, punchConcurrency: 2);
@@ -1290,6 +1300,166 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(40 * 1024));
         await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(3 * 1024));
         _output.WriteLine("A6-VARIANT|nat=UdpBlocked|carrier=relay-tcp|state=relay");
+    }
+
+    // ── M7-03 设备级优先打洞与交替重试（设计 12 §10.2 三例；周期缝=RelayRetryIntervalOverride）──
+
+    /// <summary>双形态必败世界（TCP=SymmetricRandom+persistPerturbation、UDP=SymmetricRandom×2）：
+    /// 任一协议打洞均 10s 超时失败——交替序列的恒失败桩（决策②红绿对照的红侧前提）。</summary>
+    private async Task StartDualFailWorldAsync()
+    {
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.SymmetricRandom),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.SymmetricRandom), tcpStub: false);
+        await StartTcpSimulatorAsync(mode: TcpNatMode.SymmetricRandom, persistPerturbation: true);
+    }
+
+    /// <summary>用例①中继回切交替（设计 12 §10.2①）：双形态必败+回退开+周期 3s——首打按设备级
+    /// punchMode（默认 tcp）失败回退中继；此后每周期 EnqueueRetry 按以优先模式为起点的交替重打
+    ///（tcp→udp→tcp…，执行层口径）。断言：punch_stats proto 序列 = [tcp, tcp, udp, tcp] 前缀
+    ///（首打 Begin + NextRetry n=0,1,2）；映射保持 relay（失败复用中继，M2-37）；A 侧结果线日志
+    /// 携带 proto=（M7-04）。</summary>
+    [Fact]
+    public async Task M7_03_中继回切重打_协议以优先模式为起点交替_日志带proto()
+    {
+        await StartDualFailWorldAsync();
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("m7-alt-a", IPAddress.Parse("127.0.0.4"), group, punchConcurrency: 2);
+        var b = await SeedClientAsync("m7-alt-b", IPAddress.Parse("127.0.0.5"), group, punchConcurrency: 2);
+        var logs = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        var httpA = await StartRuntimeAsync(a, relayRetryInterval: TimeSpan.FromSeconds(3), logSink: logs);
+        await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+
+        var put = await PutAsync(httpA, $"/api/peers/{b.DeviceId}", new { relayFallback = true });
+        Assert.Equal(0, put.GetProperty("code").GetInt32());
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+
+        // ① 首打 tcp 失败 → 中继（relay 态）
+        await WaitMappingStateAsync(httpA, "relay", seconds: 40);
+
+        // ② 周期重打 ≥4 次完成落库（首打 + ≥3 次回切周期；同 M2_37 的 0x72 relay 行计数口径——
+        //    失败复用中继上报 relay 行，proto 取 0x70 台账）
+        await PollDbAsync(db => db.PunchStats.AsNoTracking()
+                .Count(p => p.InitiatorId == a.DeviceId && p.TargetId == b.DeviceId) >= 4
+            ? "done" : null, "回切周期重打完成 ≥4 次", seconds: 90);
+
+        // ③ proto 序列断言（按 Id 落库序）：首打 Begin=tcp，重试 NextRetry 交替 tcp,udp,tcp——
+        //    即 [tcp, tcp, udp, tcp] 前缀（序列跳号/恒定协议均红）
+        var protos = await PollDbAsync(db => db.PunchStats.AsNoTracking()
+                .Where(p => p.InitiatorId == a.DeviceId && p.TargetId == b.DeviceId)
+                .OrderBy(p => p.Id).Select(p => p.Proto).ToList()
+            is { Count: >= 4 } list ? list : null, "proto 序列 ≥4 行");
+        Assert.Equal(["tcp", "tcp", "udp", "tcp"], protos.Take(4).ToArray());
+
+        // ④ 映射保持 relay（重打失败复用既有中继，M2-37 不回归）；中继仍可访问
+        await WaitMappingStateAsync(httpA, "relay", seconds: 5);
+        await AssertEchoRoundtripAsync(IPAddress.Parse("127.0.0.4"), localPort, RandomGenerator.Bytes(8 * 1024));
+
+        // ④b M7-04 承载四态：诊断隧道行携带 bearer（中继会话 → relay，设计 12 §7.2）
+        var tunnels = await GetAsync(httpA, "/api/diagnostics/tunnels");
+        Assert.Equal(0, tunnels.GetProperty("code").GetInt32());
+        var row = Assert.Single(tunnels.GetProperty("data").GetProperty("items").EnumerateArray());
+        Assert.Equal("relay", row.GetProperty("bearer").GetString());
+        Assert.True(row.GetProperty("viaRelay").GetBoolean());
+
+        // ⑤ M7-04 日志协议化：结果线携带 proto=（回切重打失败形态=中继承载复用行，tcp/udp
+        //    两承载均出现——交替序列的日志呈现；04 §5 口径无 HTTP 4xx）
+        Assert.Contains(logs, m => m.Contains("中继承载复用") && m.Contains("proto=tcp"));
+        Assert.Contains(logs, m => m.Contains("中继承载复用") && m.Contains("proto=udp"));
+        _output.WriteLine($"M7-03|relay-retry-alternating|protos=[{string.Join(",", protos)}]|state=relay");
+    }
+
+    /// <summary>用例②Failed 周期自愈（设计 12 §10.2②，决策③）：双形态必败+回退关——首打失败 →
+    /// Failed 态无中继可回退；PunchRetryLoop ② 每 3s 对 Failed 且有监听的映射 RetryPunchAsync
+    ///（仅重排打洞不拆建）：状态机 failed→punching 往返、协议交替推进。无人值守自愈的周期性实证。</summary>
+    [Fact]
+    public async Task M7_03_Failed态周期自动重试_状态机往返_协议交替()
+    {
+        await StartDualFailWorldAsync();
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("m7-fail-a", IPAddress.Parse("127.0.0.4"), group, punchConcurrency: 2);
+        var b = await SeedClientAsync("m7-fail-b", IPAddress.Parse("127.0.0.5"), group, punchConcurrency: 2);
+        var httpA = await StartRuntimeAsync(a, relayRetryInterval: TimeSpan.FromSeconds(3));
+        await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+        // 无 peers.json 条目：回退关（默认）——失败直接 Failed
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+
+        // ① 首打失败 → Failed（无回退）
+        await WaitMappingStateAsync(httpA, "failed", seconds: 40);
+
+        // ② 周期重试驱动状态机往返：Failed → Punching（重打在飞）→ Failed（再次超时）
+        await WaitMappingStateAsync(httpA, "punching", seconds: 15);
+        await WaitMappingStateAsync(httpA, "failed", seconds: 40);
+
+        // ③ 周期重打 ≥3 次完成落库（failed 行——无中继复用形态，0x72 !Ok 落库）
+        var protos = await PollDbAsync(db => db.PunchStats.AsNoTracking()
+                .Where(p => p.InitiatorId == a.DeviceId && p.TargetId == b.DeviceId)
+                .OrderBy(p => p.Id).Select(p => p.Proto).ToList()
+            is { Count: >= 3 } list ? list : null, "Failed 周期重打 ≥3 次", seconds: 90);
+
+        // ④ 协议交替（首打 tcp + 重试 tcp,udp…——执行层口径）；且首行为 tcp（默认优先模式）
+        Assert.Equal("tcp", protos[0]);
+        Assert.Equal(["tcp", "tcp", "udp"], protos.Take(3).ToArray());
+        _output.WriteLine($"M7-03|failed-retry-loop|protos=[{string.Join(",", protos)}]");
+    }
+
+    /// <summary>用例③交替起点随 punchMode 切换（设计 12 §10.2③）：PUT /api/peers punchMode=kcp
+    /// 后——手动重试（新序列 Begin）按新优先模式执行（kcp→执行层 udp）；此后周期重试（NextRetry
+    /// 自复位计数起）同样以新优先为起点。发送时点取现值的实证（同 KcpBearer kill-switch 口径）。</summary>
+    [Fact]
+    public async Task M7_03_punchMode切换_手动重试与周期重试起点随之生效()
+    {
+        await StartDualFailWorldAsync();
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("m7-pm-a", IPAddress.Parse("127.0.0.4"), group, punchConcurrency: 2);
+        var b = await SeedClientAsync("m7-pm-b", IPAddress.Parse("127.0.0.5"), group, punchConcurrency: 2);
+        var httpA = await StartRuntimeAsync(a, relayRetryInterval: TimeSpan.FromSeconds(3));
+        await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        var mappingId = await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+
+        // ① 默认 punchMode=tcp：首打 proto=tcp
+        await WaitMappingStateAsync(httpA, "failed", seconds: 40);
+        var first = await PollDbAsync(db => db.PunchStats.AsNoTracking()
+            .FirstOrDefault(p => p.InitiatorId == a.DeviceId && p.TargetId == b.DeviceId), "首打落库");
+        Assert.Equal("tcp", first.Proto); // 默认优先 tcp（决策①）
+
+        // ② 设备页切换 punchMode=kcp（M7-01 PUT 双字段形状）
+        var put = await PutAsync(httpA, $"/api/peers/{b.DeviceId}", new { punchMode = "kcp" });
+        Assert.Equal(0, put.GetProperty("code").GetInt32());
+        Assert.Equal("kcp", put.GetProperty("data").GetProperty("punchMode").GetString());
+
+        // ③ 手动重试（/retry → Enqueue 普通 → Begin 新序列）：按新优先 kcp → 执行层 udp
+        var retry = await PostAsync(httpA, $"/api/mappings/{mappingId}/retry", null);
+        Assert.Equal(0, retry.GetProperty("code").GetInt32());
+        await WaitMappingStateAsync(httpA, "failed", seconds: 40);
+        var rows = await PollDbAsync(db => db.PunchStats.AsNoTracking()
+            .Where(p => p.InitiatorId == a.DeviceId && p.TargetId == b.DeviceId)
+            .OrderBy(p => p.Id).Select(p => p.Proto).ToList()
+            is { Count: >= 2 } list ? list : null, "手动重试落库");
+        Assert.Equal("udp", rows[1]); // Begin 随现值（kcp→udp）
+
+        // ④ 周期重试（NextRetry）：Begin 已复位计数 → n=0 → 新优先 kcp → udp（下一周期生效）
+        var third = await PollDbAsync(db => db.PunchStats.AsNoTracking()
+            .Where(p => p.InitiatorId == a.DeviceId && p.TargetId == b.DeviceId)
+            .OrderBy(p => p.Id).Select(p => p.Proto).ToList()
+            is { Count: >= 3 } list ? list : null, "周期重试落库", seconds: 30);
+        Assert.Equal("udp", third[2]); // 周期起点=新优先（设计 12 §2.2 对称规则）
+        _output.WriteLine($"M7-03|punch-mode-switch|protos=[{string.Join(",", third)}]");
     }
 
     // ── M2-22 客户端上报三消息（02 §2.4、FR-C-404/1002；服务端落库断言衔接 M2-08）──

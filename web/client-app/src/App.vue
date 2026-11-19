@@ -48,11 +48,17 @@ const wsUrl = buildWsUrl(ApiPaths.WsStatus); // M5-12：query token 注入（07 
 const { connected } = useWs({
   url: wsUrl,
   onStats: (ev) => mappings.applyStats(ev),
-  refetch: {
-    system: () => void system.refresh(),
-    mappings: () => void mappings.refresh(),
-    auth: () => void auth.refresh(),
-    devices: () => void devices.refresh(),
+  // refetch 为函数形态（WsOptions 契约）：按事件资源名分派 store 刷新。M7-05 顺手修复存量
+  // 形态错配——原对象形态使 flushRefetch 的 refetch?.(resource) 调用抛 TypeError（setTimeout
+  // 回调内静默），WS 事件驱动/onOpen·visibility resync 的 refetch 实际全部失效
+  refetch: (resource) => {
+    const refetchers: Record<string, () => void> = {
+      system: () => void system.refresh(),
+      mappings: () => void mappings.refresh(),
+      auth: () => void auth.refresh(),
+      devices: () => void devices.refresh(),
+    };
+    refetchers[resource]?.();
   },
   onState: (ev) => {
     // 0x75 失效推送（网段移除/远程码重置/禁用等）→ 全局提示；原因见 05 §5

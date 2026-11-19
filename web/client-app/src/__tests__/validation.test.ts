@@ -8,6 +8,12 @@ import { isValidIp, makeMappingRules, mappingFormRules, REMOTE_CODE_PATTERN, val
 import { INVITE_CODE_PATTERN, normalizeInviteCode } from "../pages/inviteCodeRule";
 import { normalizeCidrPreview, segmentsFormRules } from "../pages/segmentsRules";
 
+/** FormRules 字段值归一为数组（Arrayable 联合的测试侧索引收窄——M7-05 类型清账）。 */
+function rulesOf(v: unknown): { validator?: unknown }[] {
+  if (v === undefined) return [];
+  return (Array.isArray(v) ? v : [v]) as { validator?: unknown }[];
+}
+
 function runPortRule(value: number): string | null {
   let error: string | null = null;
   validatePort({}, value, (e) => {
@@ -40,8 +46,8 @@ describe("端口校验（04 §2.5：1~65535）", () => {
   });
 
   it("映射表单两条端口字段（localPort/targetPort）均挂同一规则", () => {
-    expect(mappingFormRules.localPort?.[0]?.validator).toBe(validatePort);
-    expect(mappingFormRules.targetPort?.[0]?.validator).toBe(validatePort);
+    expect(rulesOf(mappingFormRules.localPort)[0]?.validator).toBe(validatePort);
+    expect(rulesOf(mappingFormRules.targetPort)[0]?.validator).toBe(validatePort);
   });
 });
 
@@ -97,18 +103,18 @@ describe("目标地址校验（M2-28，04 §2.5：self 恒放行 / IP 格式）"
 
   it("规则工厂：self 模式空值放行；IP 模式必填+格式拦截（联动 targetMode）", () => {
     const ipRules = makeMappingRules(() => true);
-    const targetRule = ipRules.targetAddr![0]!.validator;
+    const targetRule = rulesOf(ipRules.targetAddr)[0]!.validator;
     expect(runRule(targetRule, "")).toContain("请输入目标 IP");
     expect(runRule(targetRule, "not-an-ip")).toContain("合法 IPv4/IPv6");
     expect(runRule(targetRule, "192.168.1.50")).toBeNull();
 
     const selfRules = makeMappingRules(() => false);
-    expect(runRule(selfRules.targetAddr![0]!.validator, "")).toBeNull(); // self 恒放行
+    expect(runRule(rulesOf(selfRules.targetAddr)[0]!.validator, "")).toBeNull(); // self 恒放行
   });
 });
 
 describe("网段校验（M2-28，服务端 NormalizeCidr 同口径）", () => {
-  const cidrRule = segmentsFormRules.cidr![0]!.validator;
+  const cidrRule = rulesOf(segmentsFormRules.cidr)[0]!.validator;
 
   it("CIDR 与裸 IP 合法；空/坏地址/越界前缀/双斜杠拒绝", () => {
     for (const v of ["192.168.1.0/24", "10.0.0.0/8", "0.0.0.0/0", "10.0.0.5", "fd00::/8", "::1"])

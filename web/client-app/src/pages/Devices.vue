@@ -3,6 +3,9 @@
 // "建映射"快捷按钮带入远程码跳转；按分组筛选。
 // M2-28：设备级中继回退开关（/api/peers，D3 v0.4——目标设备层级，不经控制协议）；
 // 列表刷新由 WS device_list 事件驱动（10s 轮询已移除，TD-16）。
+// M7-05（设计 12 §8.3/§7.3）：两新列——"优先打洞模式"（TCP/KCP inline-prompt 切换，默认 TCP；
+// 设备级 punchMode，发送时点取现值对后续打洞即时生效）与"隧道类型"（四态 el-tag：中继/
+// 直连·KCP/直连·UDP/直连·TCP，无隧道 —；数据复用 GET /api/diagnostics/tunnels）。
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
@@ -43,6 +46,32 @@ async function toggleRelay(row: DeviceItem, value: string | number | boolean) {
     ElMessage.error(e instanceof ApiError ? e.message : "请求失败");
   }
 }
+
+/** 切换打洞优先模式（M7-05，设计 12 决策①：设备级 punchMode——对后续打洞会话即时生效；
+ * 失败回退中继后重试自动 TCP/KCP 交替，决策②）。 */
+async function togglePunchMode(row: DeviceItem, value: string | number | boolean) {
+  const mode = value === true ? "kcp" : "tcp";
+  try {
+    await devices.setPunchMode(row.deviceId, mode);
+    ElMessage.success(`「${row.deviceName}」优先打洞模式已切换为 ${mode === "kcp" ? "KCP（UDP 打洞+KCP 可靠承载）" : "TCP"}（对后续打洞即时生效）`);
+  } catch (e) {
+    ElMessage.error(e instanceof ApiError ? e.message : "请求失败");
+  }
+}
+
+/** 隧道类型列呈现（M7-05，设计 12 §7.3 表）：四态文本；无隧道 undefined。 */
+function tunnelType(bearer: string | undefined): string | undefined {
+  switch (bearer) {
+    case "relay": return "中继";
+    case "kcp": return "直连·KCP";
+    case "raw-udp": return "直连·UDP";
+    case "tcp": return "直连·TCP";
+    default: return undefined;
+  }
+}
+
+/** raw-udp 第四态说明（设计 12 §7.3）：承载协商降级形态。 */
+const RAW_UDP_TIP = "对端未启用 KCP，已降级裸 UDP";
 
 onMounted(() => void devices.refresh());
 </script>
@@ -145,10 +174,52 @@ onMounted(() => void devices.refresh());
         </template>
         <template #default="{ row }">
           <el-switch
-            :model-value="devices.peers[row.deviceId] ?? false"
+            :model-value="devices.peers[row.deviceId]?.relayFallback ?? false"
             data-testid="devices-relay-fallback"
             @change="(v: string | number | boolean) => toggleRelay(row, v)"
           />
+        </template>
+      </el-table-column>
+      <el-table-column width="110">
+        <template #header>
+          <el-tooltip
+            content="打洞优先使用的承载（目标设备级配置，默认 TCP；KCP=UDP 打洞+KCP 可靠承载；失败回退中继后重试自动 TCP/KCP 交替）"
+            placement="top"
+          >
+            优先打洞模式
+          </el-tooltip>
+        </template>
+        <template #default="{ row }">
+          <el-switch
+            :model-value="(devices.peers[row.deviceId]?.punchMode ?? 'tcp') === 'kcp'"
+            inline-prompt
+            inactive-text="TCP"
+            active-text="KCP"
+            data-testid="devices-punch-mode"
+            @change="(v: string | number | boolean) => togglePunchMode(row, v)"
+          />
+        </template>
+      </el-table-column>
+      <el-table-column width="110">
+        <template #header>
+          <el-tooltip
+            content="该设备当前隧道承载形态（随刷新更新；直连·UDP=对端未启用 KCP 已降级裸 UDP）"
+            placement="top"
+          >
+            隧道类型
+          </el-tooltip>
+        </template>
+        <template #default="{ row }">
+          <el-tag
+            v-if="tunnelType(devices.tunnelBearers[row.deviceId])"
+            :type="devices.tunnelBearers[row.deviceId] === 'relay' ? 'warning' : 'success'"
+            size="small"
+            :title="devices.tunnelBearers[row.deviceId] === 'raw-udp' ? RAW_UDP_TIP : undefined"
+            data-testid="devices-tunnel-type"
+          >
+            {{ tunnelType(devices.tunnelBearers[row.deviceId]) }}
+          </el-tag>
+          <span v-else data-testid="devices-tunnel-type">—</span>
         </template>
       </el-table-column>
       <el-table-column

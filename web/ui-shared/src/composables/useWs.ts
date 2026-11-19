@@ -50,7 +50,10 @@ export const REFETCH_DEBOUNCE_MS = 100;
 
 export function useWs(options: WsOptions) {
   const connected: Ref<boolean> = ref(false);
-  const wsFactory = options.wsFactory ?? ((url: string) => new WebSocket(url));
+  // 原生 WebSocket 的 DOM 事件签名（onopen 携 Event 等）与最小形状结构兼容但 TS 严格模式
+  // 下不可直赋（属性协变）——显式归一（M7-05 类型清账）
+  const wsFactory: (url: string) => WebSocketLike =
+    options.wsFactory ?? ((url: string) => new WebSocket(url) as unknown as WebSocketLike);
   const minMs = options.reconnect?.minMs ?? 1000;
   const maxMs = options.reconnect?.maxMs ?? 30_000;
 
@@ -115,14 +118,16 @@ export function useWs(options: WsOptions) {
 
   const open = () => {
     if (closed) return;
-    const socket = wsFactory(options.url);
+    // 原生 WebSocket 落 WebSocketLike 契约（运行时结构兼容；显式收窄避免 DOM 事件签名与
+    // 最小形状的联合推断——M7-05 类型清账）
+    const socket: WebSocketLike = wsFactory(options.url);
     ws = socket;
     socket.onopen = () => {
       connected.value = true;
       retries = 0; // 连接成功归零（06 §4）
       resync();
     };
-    socket.onmessage = (ev) => handleMessage(ev.data);
+    socket.onmessage = (ev: { data: string }) => handleMessage(ev.data);
     socket.onclose = () => {
       connected.value = false;
       ws = null;

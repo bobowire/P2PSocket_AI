@@ -74,6 +74,16 @@ function kcpTooltip(kcp: KcpBearerStatsSnapshot | null): string | undefined {
     + `丢：unknown-conv${kcp.unknownConvDropped} 畸形${kcp.malformedDropped} 白名单外${kcp.nonWhitelistDropped}`;
 }
 
+/** M7-04 承载四态文本（设计 12 §7.2）：旧"直连"二分为 直连·TCP/直连·UDP；kcp tooltip 现状保留。 */
+function bearerText(bearer: string): string {
+  switch (bearer) {
+    case "relay": return "中继";
+    case "kcp": return "直连·KCP";
+    case "raw-udp": return "直连·UDP";
+    default: return "直连·TCP";
+  }
+}
+
 function addAddr() {
   addrs.value.push("");
 }
@@ -697,9 +707,9 @@ async function triggerRekey(t: TunnelView) {
             <el-tag
               :type="row.viaRelay ? 'warning' : 'success'"
               size="small"
-              :title="kcpTooltip(row.kcp)"
+              :title="row.bearer === 'raw-udp' ? '对端未启用 KCP，已降级裸 UDP' : kcpTooltip(row.kcp)"
             >
-              {{ row.viaRelay ? "中继" : row.kcp ? "直连·KCP" : "直连" }}
+              {{ bearerText(row.bearer) }}
             </el-tag>
           </template>
         </el-table-column>

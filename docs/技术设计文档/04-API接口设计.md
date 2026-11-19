@@ -56,7 +56,7 @@
 | PUT | `/api/groups/{id}` | 所有者编辑：改名/改准入策略（0x55，FR-S-302） |
 | DELETE | `/api/groups/{id}` | 所有者解散（0x56，FR-S-302）；组内在线成员收 0x75 |
 | POST | `/api/groups/{id}/members/{deviceId}/kick` | 所有者移出成员（0x57，FR-S-307）；被移出设备收 0x75 |
-| GET · PUT | `/api/peers/{deviceId}` | **目标设备级配置** `{ relayFallback }`（D3 v0.4/OQ-10；读写本地 peers.json，不经控制协议、不同步服务端；该目标设备下全部映射共用） | FR-S-702/FR-C-803 |
+| GET · PUT | `/api/peers/{deviceId}` | **目标设备级配置** `{ relayFallback, punchMode }`（relayFallback=D3 v0.4/OQ-10；punchMode=tcp/kcp 默认 tcp——NET-78/设计 12 号 M7，值域不含 "udp"（配置层无此值），非法 → 1001 §5；读写本地 peers.json，不经控制协议、不同步服务端；该目标设备下全部映射共用；PUT 部分更新——null/缺省=保持现值，单字段写不丢另一字段） | FR-S-702/FR-C-803/FR-C-405 |
 | GET | `/api/groups/{id}/invite` | 生成邀请码（所有者） |
 | DELETE | `/api/groups/{id}/invite` | 撤销邀请码 |
 | GET | `/api/groups/{id}/requests` | 审批队列 |
@@ -86,7 +86,7 @@
 | POST | `/api/diagnostics/stun-test` | 触发 STUN UDP/TCP 探测，返回 `StunTestView{publicEndpoint, udpMapping, udpFiltering, tcpSequential, tcpPortDependent, downgraded, notes[], durationMs}`（M3-15 已落地：RFC5780 子集两桶族判型 `eim/adm_or_apdm`×`eif/adf_or_apdf`，编排与降级语义见 05 §7.2 实现注记；未注册 1002、探测失败 1001；服务端双地址由 `stun_alt_addr` 配置驱动） |
 | POST | `/api/diagnostics/ping-device` | `{ remoteCode }` 隧道 PING 测 RTT（PTP 0x06）。M3-16 已落地：返回 `PingDeviceView{targetDevice, targetRemoteCode, sent, received, minMs, avgMs, maxMs, viaRelay, durationMs}`（4 次 PING 各 2s 预算、丢失容忍只统计收到的样本）；错误通道：空码 1001/远程码不在可见列表 4003（同映射解析口径）/无活隧道 1002"须先启用一条到该设备的映射"；列表解析走 0x40 主动类 → passive 下本地拒发（须 normal），编排详见 05 §7.3 |
 | POST | `/api/diagnostics/server-test` | 服务端连通性运行态入口（FR-C-808 诊断区）。M3-14 已落地：对 settings 全部 serverAddrs 候选**逐个** TCP 探测（复用向导 server-test 的版本协商预检同源逻辑，单元素数组独立呈现——短路语义仅服务向导换址），返回 `ServerTestView{items[]{addr, ok, detail}}`；纯 socket 不走控制通道 → passive 亦可达；未配置候选 1001 |
-| GET | `/api/diagnostics/tunnels` | 活动隧道列表快照（M3-14 已落地）：`TunnelListView{items[]{peerDeviceId, label, viaRelay, isInitiator}}`——TunnelHost 本地表（IsClosed 过滤、peerDeviceId 确定性排序）；label=本地映射运行时反查的目标远程码（引擎快照 join state.json，无映射指向时 null，前端回退 peerId 短码），纯本地数据 passive 亦可达 |
+| GET | `/api/diagnostics/tunnels` | 活动隧道列表快照（M3-14 已落地）：`TunnelListView{items[]{peerDeviceId, label, viaRelay, isInitiator, kcp?, bearer}}`——TunnelHost 本地表（IsClosed 过滤、peerDeviceId 确定性排序）；label=本地映射运行时反查的目标远程码（引擎快照 join state.json，无映射指向时 null，前端回退 peerId 短码）；kcp=KCP 承载计数快照（M6-08，非 KCP 承载 null）；bearer=承载形态四态 `relay/kcp/raw-udp/tcp`（NET-78/设计 12 §7，M7：TunnelSession 按 transport 类型判别；设备页"隧道类型"列同源），纯本地数据 passive 亦可达 |
 | POST | `/api/diagnostics/rekey` | `{ peerDeviceId }` 手动 REKEY 密钥轮换（05 §2.3 M2-21 预留收口，M3-14 已落地）：返回 `RekeyResultView{peerDeviceId, outcome, detail}`，outcome=`ok/not_initiator/busy/failed`（发起方本轮完成/本端为响应方密钥由对端轮换/上一轮未完/发送或等待 ACK 失败携原因）；空 peerDeviceId 1001/无活动隧道 1002；纯本地隧道操作 passive 亦可达 |
 
 ### 2.7 升级页（FR-C-904）

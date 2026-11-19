@@ -527,4 +527,72 @@ public sealed class PunchSchedulerTests
             Assert.Equal(["tcp"], fake.Protos); // 出队即映射的 proto，非缺省 udp
         }
     }
+
+    // ── M7-02 设备级协议决策（设计 12 §10.1 PunchScheduler 四例）────────
+
+    [Fact]
+    public async Task planner未装配_旧行为零破坏()
+    {
+        // 兼容缝（设计 12 §4.3）：构造缺省 planner=null → 出队 proto 用入队值——既有全部测试同形态
+        var fake = new FakePuncher();
+        await using (var scheduler = new PunchScheduler(fake))
+        {
+            var target = Guid.NewGuid();
+            Assert.True(scheduler.Enqueue(target, null, "tcp"));
+            await UntilAsync(() => fake.CompletedOrder.Count == 1, "完成");
+            Assert.Equal(["tcp"], fake.Protos);
+        }
+    }
+
+    [Fact]
+    public async Task planner装配_普通Enqueue出队为Begin_覆盖入队proto()
+    {
+        var fake = new FakePuncher();
+        var planner = new PunchModePlanner(_ => "kcp"); // 设备级优先=kcp（配置层）
+        await using (var scheduler = new PunchScheduler(fake, planner))
+        {
+            var target = Guid.NewGuid();
+            scheduler.Enqueue(target, null, "tcp"); // 入队 tcp（映射 proto）——决策①设备级接管
+            await UntilAsync(() => fake.CompletedOrder.Count == 1, "完成");
+            Assert.Equal(["udp"], fake.Protos); // 出队=Begin(kcp)→执行层 udp，覆盖入队值
+        }
+    }
+
+    [Fact]
+    public async Task planner装配_EnqueueRetry出队交替()
+    {
+        var fake = new FakePuncher();
+        var planner = new PunchModePlanner(_ => "tcp"); // 优先 tcp：交替 tcp→udp→tcp…
+        await using (var scheduler = new PunchScheduler(fake, planner))
+        {
+            var target = Guid.NewGuid();
+            for (var i = 0; i < 3; i++)
+            {
+                Assert.True(scheduler.EnqueueRetry(target));
+                await UntilAsync(() => fake.CompletedOrder.Count == i + 1, $"第 {i + 1} 次完成");
+            }
+            Assert.Equal(["tcp", "udp", "tcp"], fake.Protos); // 以优先模式为起点的交替（决策②）
+        }
+    }
+
+    [Fact]
+    public async Task 同对合并_普通与Retry并存_仅执行一次且计数不跳号()
+    {
+        var fake = new FakePuncher();
+        var planner = new PunchModePlanner(_ => "tcp");
+        await using (var scheduler = new PunchScheduler(fake, planner))
+        {
+            var target = Guid.NewGuid();
+            Assert.True(scheduler.Enqueue(target)); // 普通入队（新序列）
+            Assert.False(scheduler.EnqueueRetry(target)); // 进行中 → 合并丢弃（OQ-11）
+            await UntilAsync(() => fake.CompletedOrder.Count == 1, "第一次完成");
+            Assert.Equal(["tcp"], fake.Protos); // Begin=tcp
+
+            // 丢弃的 Retry 未消耗序列号：下一次 Retry 仍取序列首位 tcp（无跳号，设计 12 §4.2）
+            Assert.True(scheduler.EnqueueRetry(target));
+            Assert.False(scheduler.EnqueueRetry(target)); // 已在队列 → 合并丢弃
+            await UntilAsync(() => fake.CompletedOrder.Count == 2, "第二次完成");
+            Assert.Equal(["tcp", "tcp"], fake.Protos); // 第二次=NextRetry 首位 tcp（非 udp——跳号即红）
+        }
+    }
 }

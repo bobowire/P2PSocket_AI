@@ -707,16 +707,96 @@ describe("Devices 中继回退开关（M2-28，D3 v0.4）", () => {
   it("开关现值随列表拉取；切换 → PUT 生效", async () => {
     const state = createDefaultState();
     state.capability = "normal";
-    state.peers = { "22222222-2222-4222-8222-222222222222": true };
+    state.peers = { "22222222-2222-4222-8222-222222222222": { relayFallback: true, punchMode: "tcp" } };
     const { wrapper } = await mountPage(Devices, state, "/devices");
 
+    // 每行两开关（中继回退 + M7-05 优先打洞模式）：3 行 × 2 = 6
     const switches = wrapper.findAllComponents({ name: "ElSwitch" });
-    expect(switches.length).toBe(3);
-    await vi.waitFor(() => expect(switches[1].props("modelValue")).toBe(true)); // 现值异步拉取
+    expect(switches.length).toBe(6);
+    await vi.waitFor(() => expect(switches[2].props("modelValue")).toBe(true)); // 现值异步拉取（第二行中继回退）
 
     await switches[0].vm.$emit("change", true); // 开启本机回退
     await flushPromises();
     expect(switches[0].props("modelValue")).toBe(true);
+  });
+});
+
+// ── 设备页优先打洞模式 + 隧道类型列（M7-05，设计 12 §8.3/§7.3）─────
+
+describe("Devices 优先打洞模式与隧道类型列（M7-05）", () => {
+  it("punchMode 开关默认 TCP；切换 → PUT 单字段 + 成功提示（即时生效语义）", async () => {
+    const state = createDefaultState();
+    state.capability = "normal";
+    const { wrapper } = await mountPage(Devices, state, "/devices");
+
+    await vi.waitFor(() => {
+      // punchMode 开关=每行第 2 个（索引 1/3/5）；无条目默认 false=TCP
+      const modeSwitch = wrapper.findAllComponents({ name: "ElSwitch" })[1];
+      expect(modeSwitch.props("modelValue")).toBe(false);
+      expect(modeSwitch.props("inactiveText")).toBe("TCP"); // inline-prompt 文案
+      expect(modeSwitch.props("activeText")).toBe("KCP");
+    });
+
+    // 切换 → PUT { punchMode } 单字段（mock 状态即回显：合并写不动 relayFallback）+ 消息提示
+    await wrapper.findAllComponents({ name: "ElSwitch" })[1].vm.$emit("change", true);
+    await flushPromises();
+    expect(state.peers["11111111-1111-4111-8111-111111111111"]).toEqual({
+      relayFallback: false, // 单字段 punchMode 写不动回退（部分更新合并，设计 12 §3.3）
+      punchMode: "kcp",
+    });
+    await vi.waitFor(() => {
+      expect([...document.querySelectorAll(".el-message")]
+        .some((m) => m.textContent?.includes("优先打洞模式"))).toBe(true);
+    });
+  });
+
+  it("隧道类型列四态 tag + 无隧道 —（数据源 tunnels.bearer）", async () => {
+    const state = createDefaultState();
+    state.capability = "normal";
+    // 覆盖四态：办公室主机=relay、家里 NAS=raw-udp、本机=tcp（kcp 态换行验证）
+    state.tunnels = [
+      {
+        peerDeviceId: "11111111-1111-4111-8111-111111111111",
+        label: null, viaRelay: false, isInitiator: true, kcp: null, bearer: "tcp",
+      },
+      {
+        peerDeviceId: "22222222-2222-4222-8222-222222222222",
+        label: null, viaRelay: true, isInitiator: false, kcp: null, bearer: "relay",
+      },
+      {
+        peerDeviceId: "33333333-3333-4333-8333-333333333333",
+        label: null, viaRelay: false, isInitiator: true, kcp: null, bearer: "raw-udp",
+      },
+    ];
+    const { wrapper } = await mountPage(Devices, state, "/devices");
+
+    const tags = await vi.waitFor(() => {
+      const t = wrapper.findAll('[data-testid="devices-tunnel-type"]');
+      expect(t.length).toBe(3);
+      return t;
+    });
+    expect(tags[0].text()).toBe("直连·TCP");
+    expect(tags[1].text()).toBe("中继");
+    expect(tags[2].text()).toBe("直连·UDP"); // 协商降级形态
+
+    // tag 样式与降级 tooltip（组件 props/透传 attr 断言）
+    const tagComps = wrapper.findAllComponents({ name: "ElTag" })
+      .filter((c) => c.attributes("data-testid") === "devices-tunnel-type");
+    expect(tagComps[1]!.props("type")).toBe("warning"); // 中继=warning
+    expect(tagComps[0]!.props("type")).toBe("success"); // 直连系=success
+    expect(tagComps[2]!.attributes("title")).toContain("已降级裸 UDP");
+
+    // 无隧道 → —（清空 tunnels 再挂载）
+    const empty = createDefaultState();
+    empty.capability = "normal";
+    empty.tunnels = [];
+    const emptyPage = await mountPage(Devices, empty, "/devices");
+    const emptyTags = await vi.waitFor(() => {
+      const t = emptyPage.wrapper.findAll('[data-testid="devices-tunnel-type"]');
+      expect(t.length).toBe(3);
+      return t;
+    });
+    expect(emptyTags[0].text()).toBe("—");
   });
 });
 
@@ -939,7 +1019,7 @@ describe("Login 修改密码（M2-29，0x23）", () => {
     await wrapper.find('[data-testid="login-change-password"]').trigger("click");
     await flushPromises();
     const dialog = document.querySelector('[data-testid="login-change-dialog"]')!;
-    const [oldPw, newPw, confirmPw] = [...dialog.querySelectorAll("input[type=password]")];
+    const [oldPw, newPw, confirmPw] = [...dialog.querySelectorAll("input[type=password]")] as HTMLInputElement[];
     oldPw.value = "secret123";
     oldPw.dispatchEvent(new Event("input"));
     newPw.value = "newpass9";
@@ -983,6 +1063,8 @@ describe("网段冲突告警条（M3-13）", () => {
       phase: "running",
       serverReachable: true,
       protocolVersion: 1,
+      version: "",
+      commit: "",
       conflict: {
         subnet: "100.64.0.0/24",
         items: [
@@ -1226,7 +1308,7 @@ describe("Settings 走查", () => {
     const rows = table.findAll(".el-table__row");
     expect(rows).toHaveLength(2);
     expect(rows[0]!.text()).toContain("d4e5f6"); // Label=映射目标远程码
-    expect(rows[0]!.text()).toContain("直连");
+    expect(rows[0]!.text()).toContain("直连·TCP"); // M7-04 承载细化：mock 行 bearer=tcp（旧"直连"二分）
     expect(rows[0]!.text()).toContain("发起方");
     expect(rows[1]!.text()).toContain("33333333"); // 无映射指向：peerId 短码回退
     expect(rows[1]!.text()).toContain("中继");

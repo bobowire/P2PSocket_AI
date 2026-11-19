@@ -89,6 +89,18 @@ public sealed class TunnelSession : IAsyncDisposable
     ///（bearer=0）；TCP 直连承载不参与 UDP 包络（BearerFor 报 null）。</summary>
     public bool RawUdpBearer => _transport is Punch.UdpPunchTransport;
 
+    /// <summary>隧道承载形态四态判别（M7-04，设计 12 §7.1）：relay=中继；kcp=UDP 直连 KCP 承载；
+    /// raw-udp=UDP 直连裸承载；tcp=TCP 直连（TcpFrameTransport 及兜底——TCP 直连为唯一剩余形态）。
+    /// 展示口径（设备页"隧道类型"列/诊断页承载列）——与 0x72 上报三态
+    ///（<see cref="Control.ClientReporter.BearerFor"/>，M6-08 决议）解耦，不因展示改变统计语义。</summary>
+    public string Bearer => _transport switch
+    {
+        RelayTransport => "relay",
+        KcpTunnelTransport => "kcp",
+        Punch.UdpPunchTransport => "raw-udp",
+        _ => "tcp",
+    };
+
     /// <summary>KCP 承载诊断快照（M6-08 生产观察）：仅 KCP 承载非 null——承载层计数+全 conv
     /// 算法层聚合（诊断页隧道快照数据源；其他承载 null）。</summary>
     public KcpBearerStatsSnapshot? KcpStats => (_transport as KcpTunnelTransport)?.Snapshot();

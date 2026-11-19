@@ -304,7 +304,8 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
         lanSegments.Load();
         stack.LogsDir = Path.Combine(dir, "logs"); // M2-27 日志端点读目录（测试可确定性写文件）
         stack.Api = new LocalApiServices(stack.Control, stack.Store, stack.Settings,
-            peers, stack.Wizard, sync, stack.Scheduler, lanSegments, stack.LogsDir);
+            peers, stack.Wizard, sync, stack.Scheduler, lanSegments, stack.LogsDir,
+            tunnels: stack.Host); // M7-04：诊断隧道端点装配（GET /api/diagnostics/tunnels 形状用例）
 
         var webPort = FreePort();
         var webToken = new WebToken(dir); // M5-12：本地 Web token（07 §14.2，与生产同法生成）
@@ -892,18 +893,20 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
         catch { /* 对端断开 */ }
     }
 
-    // ── ⑧ 目标设备级配置（M2-23，04 §2.4 /api/peers；不经控制协议、不同步服务端）──
+    // ── ⑧ 目标设备级配置（M2-23，04 §2.4 /api/peers；不经控制协议、不同步服务端；
+    //      M7-01 双字段 punchMode，设计 12 §8.1/§10.2）─────────────────────
 
     [Fact]
-    public async Task 设备级配置端点_形状与持久化_登录登出2002()
+    public async Task 设备级配置端点_双字段形状与持久化_登录登出2002()
     {
         var (deviceId, secret, _) = await SeedDeviceAsync("peers-dev");
         await using var stack = await StartStackAsync((deviceId, secret, "000000"));
 
-        // GET：无条目=默认关闭（PRD 06 §2）
+        // GET：无条目=默认关闭/tcp（PRD 06 §2 + 设计 12 决策①默认 tcp）
         var before = await GetAsync(stack, $"/api/peers/{deviceId}");
         Assert.Equal(ErrorCode.Ok, before.code);
         Assert.False(before.data!.Value.GetProperty("relayFallback").GetBoolean());
+        Assert.Equal("tcp", before.data!.Value.GetProperty("punchMode").GetString());
 
         // PUT true → 回显与回读一致；不经控制协议（无服务端侧状态可断言，契约即本地生效）
         var put = await PutAsync(stack, $"/api/peers/{deviceId}", new { relayFallback = true });
@@ -912,9 +915,29 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
         var after = await GetAsync(stack, $"/api/peers/{deviceId}");
         Assert.True(after.data!.Value.GetProperty("relayFallback").GetBoolean());
 
-        // 设备隔离：另一目标不受影响
+        // PUT punchMode=kcp 生效往返（M7-01，设计 12 §8.1）
+        var putMode = await PutAsync(stack, $"/api/peers/{deviceId}", new { punchMode = "kcp" });
+        Assert.Equal(ErrorCode.Ok, putMode.code);
+        Assert.Equal("kcp", putMode.data!.Value.GetProperty("punchMode").GetString());
+        Assert.Equal("kcp", (await GetAsync(stack, $"/api/peers/{deviceId}")).data!.Value.GetProperty("punchMode").GetString());
+
+        // PUT 非法 punchMode（含 "udp"——配置层值域 tcp/kcp，设计 12 §2.1）→ 1001
+        Assert.Equal(ErrorCode.BadRequest,
+            (await PutAsync(stack, $"/api/peers/{deviceId}", new { punchMode = "udp" })).code);
+        Assert.Equal(ErrorCode.BadRequest,
+            (await PutAsync(stack, $"/api/peers/{deviceId}", new { punchMode = "TCP" })).code);
+        Assert.Equal("kcp", (await GetAsync(stack, $"/api/peers/{deviceId}")).data!.Value.GetProperty("punchMode").GetString());
+
+        // PUT 单字段 relayFallback 不动 punchMode（部分更新合并写，设计 12 §3.3）
+        var putSingle = await PutAsync(stack, $"/api/peers/{deviceId}", new { relayFallback = false });
+        Assert.Equal(ErrorCode.Ok, putSingle.code);
+        Assert.False(putSingle.data!.Value.GetProperty("relayFallback").GetBoolean());
+        Assert.Equal("kcp", putSingle.data!.Value.GetProperty("punchMode").GetString()); // 未随单字段写丢失
+
+        // 设备隔离：另一目标不受影响（回退关/tcp 默认）
         var other = await GetAsync(stack, $"/api/peers/{Guid.NewGuid()}");
         Assert.False(other.data!.Value.GetProperty("relayFallback").GetBoolean());
+        Assert.Equal("tcp", other.data!.Value.GetProperty("punchMode").GetString());
 
         // passive（登出）→ 2002（04 §2.4 节仅 normal 模式）
         var logout = await PostAsync(stack, "/api/auth/logout", null);
@@ -923,6 +946,22 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
         Assert.Equal(ErrorCode.ForbiddenPassive, denied.code);
         var deniedPut = await PutAsync(stack, $"/api/peers/{deviceId}", new { relayFallback = false });
         Assert.Equal(ErrorCode.ForbiddenPassive, deniedPut.code);
+        var deniedMode = await PutAsync(stack, $"/api/peers/{deviceId}", new { punchMode = "tcp" });
+        Assert.Equal(ErrorCode.ForbiddenPassive, deniedMode.code);
+    }
+
+    // ── ⑧b 诊断隧道行形状（M7-04，设计 12 §7.2：bearer 四态字段入 TunnelView）────────
+
+    [Fact]
+    public async Task 诊断隧道端点_空列表形状正常_无隧道不炸()
+    {
+        var (deviceId, secret, _) = await SeedDeviceAsync("tunnels-dev");
+        await using var stack = await StartStackAsync((deviceId, secret, "000000"));
+        // 无活隧道（未启用映射）：items 空数组——bearer 字段随行出现（非空列表的形状断言在
+        // ScenarioIntegrationTests M7-03 用例①：relay 会话行 bearer=relay）
+        var resp = await GetAsync(stack, "/api/diagnostics/tunnels");
+        Assert.Equal(ErrorCode.Ok, resp.code);
+        Assert.Equal(0, resp.data!.Value.GetProperty("items").GetArrayLength());
     }
 
     // ── ⑨ 分组端点全链（M2-27，04 §2.4：0x42/0x50~0x57 薄转发 + 聚合）──

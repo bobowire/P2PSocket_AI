@@ -66,7 +66,7 @@ export interface MockState {
   groups: MockGroup[]; // M2-27：已加入分组（04 §2.4 /api/groups）
   joinRequests: MockJoinRequest[]; // 待审批申请（所有者侧聚合）
   lanSegments: MockLanSegment[]; // M2-27：开放内网段白名单（04 §2.5）
-  peers: Record<string, boolean>; // M2-23：deviceId → relayFallback
+  peers: Record<string, { relayFallback: boolean; punchMode: string }>; // M2-23+M7-01：deviceId → 设备级配置双字段
   conflict: { subnet: string; items: { kind: string; value: string; interface: string }[] } | null; // M3-13：网段冲突（null=无）
   logs: { ts: string; level: string; message: string }[]; // M2-27：演示日志（04 §2.6）
   upgrade: { latestVersion: string; minProtocol: number; maxProtocol: number; upgradeUrl: string; notes: string;
@@ -78,6 +78,7 @@ export interface MockState {
     punchConcurrency: number;
     keepaliveSec: number;
     reconnect: { minSec: number; maxSec: number };
+    kcpBearer: boolean; // M6-04 kill-switch（NET-77）——mock 形状随 ClientSettings 对齐（M7-05 补账）
   };
   stunTestView: StunTestView; // M3-15：stun-test 判型结果（POST 即回固定态；走查用例注入降级形态）
   pingDeviceView: PingDeviceView; // M3-16：ping-device RTT 结果（POST 即回固定态）
@@ -242,12 +243,16 @@ export function createDefaultState(): MockState {
         label: "d4e5f6",
         viaRelay: false,
         isInitiator: true,
+        kcp: null, // M6-08 生成物字段补账（非 KCP 承载 null）
+        bearer: "tcp", // M7-04：承载四态（此行=TCP 直连）
       },
       {
         peerDeviceId: "33333333-3333-4333-8333-333333333333",
         label: null,
         viaRelay: true,
         isInitiator: false,
+        kcp: null,
+        bearer: "relay",
       },
     ],
     rekeyOutcome: "ok",
@@ -347,8 +352,8 @@ export function createHandlers(state: MockState = createDefaultState()) {
       const { username, password } = (await request.json()) as {
         username?: string; password?: string;
       };
-      if (state.users[username] !== password) return fail(2001, "bad_credentials");
-      state.username = username ?? null;
+      if (!username || state.users[username] !== password) return fail(2001, "bad_credentials");
+      state.username = username;
       state.capability = "normal";
       return ok({ username, mode: "normal" });
     }),
@@ -539,13 +544,25 @@ export function createHandlers(state: MockState = createDefaultState()) {
       return ok({ remoteCode: state.remoteCode });
     }),
 
-    // ── M2-23 目标设备级配置（04 §2.4）───────────────────────
-    http.get("*/api/peers/:deviceId", ({ params }) =>
-      ok({ deviceId: params.deviceId, relayFallback: state.peers[params.deviceId as string] ?? false })),
+    // ── M2-23 目标设备级配置（04 §2.4；M7-01 双字段+punchMode 校验+合并写）──
+    http.get("*/api/peers/:deviceId", ({ params }) => {
+      const cur = state.peers[params.deviceId as string];
+      return ok({
+        deviceId: params.deviceId,
+        relayFallback: cur?.relayFallback ?? false,
+        punchMode: cur?.punchMode ?? "tcp",
+      });
+    }),
     http.put("*/api/peers/:deviceId", async ({ request, params }) => {
-      const body = (await request.json()) as { relayFallback?: boolean };
-      state.peers[params.deviceId as string] = body.relayFallback ?? false;
-      return ok({ deviceId: params.deviceId, relayFallback: body.relayFallback ?? false });
+      const body = (await request.json()) as { relayFallback?: boolean; punchMode?: string };
+      if (body.punchMode !== undefined && body.punchMode !== "tcp" && body.punchMode !== "kcp")
+        return badRequest(1001, "punchMode 须为 tcp|kcp"); // 配置层值域（设计 12 §2.1；"udp" 同拒）
+      const cur = state.peers[params.deviceId as string];
+      state.peers[params.deviceId as string] = {
+        relayFallback: body.relayFallback ?? cur?.relayFallback ?? false, // 部分更新合并写（§3.3）
+        punchMode: body.punchMode ?? cur?.punchMode ?? "tcp",
+      };
+      return ok({ deviceId: params.deviceId, ...state.peers[params.deviceId as string] });
     }),
 
     // ── M2-26 升级信息（04 §2.7）─────────────────────────────

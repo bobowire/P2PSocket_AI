@@ -11,7 +11,8 @@ const conflict = computed(() => system.state?.conflict ?? null);
 
 const detail = computed(() =>
   conflict.value
-    ? conflict.value.items.map((i) => `${i.kind === "address" ? "地址" : "路由"} ${i.value}（${i.interface}）`).join("；")
+    ? conflict.value.items.map((i: { kind: string; value: string; interface: string }) =>
+        `${i.kind === "address" ? "地址" : "路由"} ${i.value}（${i.interface}）`).join("；")
     : "");
 </script>
 

@@ -71,7 +71,10 @@ public sealed record PunchOptions
 /// M2-22）；Ack 前失败为 Guid.Empty（无会话）。
 /// <see cref="RelayAllowed"/>（M2-23）：失败结果的中继回退资格 = 本地 peers.json 设备级配置 AND
 /// 服务端 PunchRequestAck.relayAllowed（05 §3.1，Puncher 出队执行时合成；消费方 M2-18 走 0x74）。
-/// 仅 Ack 后失败携带 true；Ack 前失败无会话不可中继。</summary>
+/// 仅 Ack 后失败携带 true；Ack 前失败无会话不可中继。
+/// <see cref="Proto"/>（M7-04，设计 12 §6.1）：本次打洞使用的协议——执行层口径 tcp/udp（与
+/// 0x70/punch_stats 对账一致；punchMode=kcp 的打洞记 "udp"）。中继回退产物继承本次尝试的 proto
+/// （日志语义="本次用 X 协议打洞失败后回退中继"）。</summary>
 public sealed record PunchOutcome(
     bool Ok,
     Guid SessionId,
@@ -80,14 +83,15 @@ public sealed record PunchOutcome(
     IPEndPoint? LocalEndpoint,
     IPEndPoint? PeerEndpoint,
     string? FailReason,
-    bool RelayAllowed = false)
+    bool RelayAllowed = false,
+    string? Proto = null)
 {
     public static PunchOutcome Success(Guid sessionId, Guid peerDeviceId, TunnelSession? session,
-        IPEndPoint local, IPEndPoint peer)
-        => new(true, sessionId, peerDeviceId, session, local, peer, null);
+        IPEndPoint local, IPEndPoint peer, string? proto = null)
+        => new(true, sessionId, peerDeviceId, session, local, peer, null, Proto: proto);
 
-    public static PunchOutcome Failure(Guid peerDeviceId, string reason)
-        => new(false, Guid.Empty, peerDeviceId, null, null, null, reason);
+    public static PunchOutcome Failure(Guid peerDeviceId, string reason, string? proto = null)
+        => new(false, Guid.Empty, peerDeviceId, null, null, null, reason, Proto: proto);
 }
 
 /// <summary>打洞器接口（PunchScheduler 依赖；测试替身用）。</summary>
@@ -236,7 +240,7 @@ public sealed class Puncher : IPuncher, IDisposable
             return PunchOutcome.Failure(targetDeviceId,
                 e is OperationCanceledException && !ct.IsCancellationRequested
                     ? "punch_timeout"
-                    : $"punch_error: {e.Message}");
+                    : $"punch_error: {e.Message}", proto);
         }
     }
 
@@ -254,7 +258,7 @@ public sealed class Puncher : IPuncher, IDisposable
             try { local = await _probe(socket, punchCt); }
             catch (Exception e) when (e is not OperationCanceledException)
             {
-                return PunchOutcome.Failure(targetDeviceId, $"stun_failed: {e.Message}");
+                return PunchOutcome.Failure(targetDeviceId, $"stun_failed: {e.Message}", "udp");
             }
 
             // ② 第一段上送：端点+本机直连候选+承载能力位图随 0x70；Ack 延后至 B 的 0x76（4005/5001 即时失败）
@@ -269,7 +273,7 @@ public sealed class Puncher : IPuncher, IDisposable
             }
             catch (ControlErrorException e)
             {
-                return PunchOutcome.Failure(targetDeviceId, $"server_{e.Code}: {e.HttpLikeMsg}");
+                return PunchOutcome.Failure(targetDeviceId, $"server_{e.Code}: {e.HttpLikeMsg}", "udp");
             }
 
             // 回退资格合成（05 §3.1，M2-23 供 M2-18）：本地设备级配置 AND 服务端中继开关
@@ -310,12 +314,12 @@ public sealed class Puncher : IPuncher, IDisposable
                         });
                 }
                 established = true; // 成功：socket 归会话（Disconnect 时承载释放）
-                return PunchOutcome.Success(ack.SessionId, ack.Peer.DeviceId, session, local, transport.Peer);
+                return PunchOutcome.Success(ack.SessionId, ack.Peer.DeviceId, session, local, transport.Peer, "udp");
             }
             catch (Exception e)
             {
                 return await FailOrFallbackAsync(ack.SessionId, ack.Peer.DeviceId, ack.Peer.StaticPubKey,
-                    targetDeviceId, e, ct, relayAllowed).ConfigureAwait(false);
+                    targetDeviceId, e, ct, relayAllowed, "udp").ConfigureAwait(false);
             }
         }
         finally
@@ -423,7 +427,7 @@ public sealed class Puncher : IPuncher, IDisposable
         }
         catch (ControlErrorException e)
         {
-            return PunchOutcome.Failure(targetDeviceId, $"server_{e.Code}: {e.HttpLikeMsg}"); // 服务端已识别并拒绝（授权/离线）——旧流程同结果
+            return PunchOutcome.Failure(targetDeviceId, $"server_{e.Code}: {e.HttpLikeMsg}", "tcp"); // 服务端已识别并拒绝（授权/离线）——旧流程同结果
         }
         catch (OperationCanceledException) when (!punchCt.IsCancellationRequested)
         {
@@ -456,7 +460,7 @@ public sealed class Puncher : IPuncher, IDisposable
             // 设备对去重吞掉；直接失败走中继回退（133102 类 CGNAT 的兜底路径不变）
             exchangeSocket = null!;
             var fail = new PunchOutcome(false, go.SessionId, targetDeviceId, null, null, null,
-                $"exchange_failed: {e.Message}", relayAllowed);
+                $"exchange_failed: {e.Message}", relayAllowed, "tcp");
             return await RelayOrReturnAsync(fail, go.Peer.StaticPubKey, ct).ConfigureAwait(false);
         }
 
@@ -491,7 +495,7 @@ public sealed class Puncher : IPuncher, IDisposable
                             HandshakeTimeout = _options.PunchTimeout,
                         }, staticKey: _staticKey, peerStaticPub: go.Peer.StaticPubKey);
                     return PunchOutcome.Success(go.SessionId, go.Peer.DeviceId, session,
-                        winner.LocalEndPoint!, winner.RemoteEndPoint!);
+                        winner.LocalEndPoint!, winner.RemoteEndPoint!, "tcp");
                 }
                 finally
                 {
@@ -510,7 +514,7 @@ public sealed class Puncher : IPuncher, IDisposable
         {
             var fail = new PunchOutcome(false, go.SessionId, go.Peer.DeviceId, null, null, null,
                 e is OperationCanceledException && !ct.IsCancellationRequested
-                    ? "punch_timeout" : $"punch_error: {e.Message}", relayAllowed);
+                    ? "punch_timeout" : $"punch_error: {e.Message}", relayAllowed, "tcp");
             return await RelayOrReturnAsync(fail, go.Peer.StaticPubKey, ct).ConfigureAwait(false);
         }
         finally
@@ -540,7 +544,7 @@ public sealed class Puncher : IPuncher, IDisposable
         }
         catch (Exception e) when (e is not OperationCanceledException)
         {
-            return PunchOutcome.Failure(targetDeviceId, $"stun_failed: {e.Message}");
+            return PunchOutcome.Failure(targetDeviceId, $"stun_failed: {e.Message}", "tcp");
         }
 
         // ② 第一段上送（端点+本机直连候选在 tcp 槽位随行）；Ack 延后至 B 的 0x76（4005/5001 即时失败）
@@ -554,7 +558,7 @@ public sealed class Puncher : IPuncher, IDisposable
         }
         catch (ControlErrorException e)
         {
-            return PunchOutcome.Failure(targetDeviceId, $"server_{e.Code}: {e.HttpLikeMsg}");
+            return PunchOutcome.Failure(targetDeviceId, $"server_{e.Code}: {e.HttpLikeMsg}", "tcp");
         }
 
         // 回退资格合成（05 §3.1，M2-23 供 M2-18）：本地设备级配置 AND 服务端中继开关
@@ -599,7 +603,7 @@ public sealed class Puncher : IPuncher, IDisposable
                             HandshakeTimeout = _options.PunchTimeout,
                         }, staticKey: _staticKey, peerStaticPub: ack.Peer.StaticPubKey);
                     return PunchOutcome.Success(ack.SessionId, ack.Peer.DeviceId, session,
-                        winner.LocalEndPoint!, winner.RemoteEndPoint!);
+                        winner.LocalEndPoint!, winner.RemoteEndPoint!, "tcp");
                 }
                 finally
                 {
@@ -620,24 +624,26 @@ public sealed class Puncher : IPuncher, IDisposable
         catch (Exception e)
         {
             return await FailOrFallbackAsync(ack.SessionId, ack.Peer.DeviceId, ack.Peer.StaticPubKey,
-                targetDeviceId, e, ct, relayAllowed).ConfigureAwait(false);
+                targetDeviceId, e, ct, relayAllowed, "tcp").ConfigureAwait(false);
         }
     }
 
     /// <summary>Ack 后失败（打洞/握手阶段）：失败语义同外层（超时/错误二分），并携带回退资格（05 §3.1）。
-    /// SessionId=会话两段式完成的服务端台账在册 id（0x72 failed 行落库前提，M2-22）。</summary>
+    /// SessionId=会话两段式完成的服务端台账在册 id（0x72 failed 行落库前提，M2-22）。
+    /// proto（M7-04，设计 12 §6.1）：执行层口径——中继回退产物继承此值。</summary>
     private PunchOutcome FailAfterAck(Guid sessionId, Guid targetDeviceId, Exception e, CancellationToken ct,
-        bool relayAllowed)
+        bool relayAllowed, string proto)
         => new(false, sessionId, targetDeviceId, null, null, null,
             e is OperationCanceledException && !ct.IsCancellationRequested
                 ? "punch_timeout"
                 : $"punch_error: {e.Message}",
-            relayAllowed);
+            relayAllowed, proto);
 
     /// <summary>失败统一出口（参数化对端三元组——0x70 Ack 与 0x78 Go 两流程共用）。</summary>
     private async Task<PunchOutcome> FailOrFallbackAsync(Guid sessionId, Guid peerDeviceId,
-        byte[] peerStaticPubKey, Guid targetDeviceId, Exception e, CancellationToken ct, bool relayAllowed)
-        => await RelayOrReturnAsync(FailAfterAck(sessionId, targetDeviceId, e, ct, relayAllowed),
+        byte[] peerStaticPubKey, Guid targetDeviceId, Exception e, CancellationToken ct, bool relayAllowed,
+        string proto)
+        => await RelayOrReturnAsync(FailAfterAck(sessionId, targetDeviceId, e, ct, relayAllowed, proto),
             peerStaticPubKey, ct).ConfigureAwait(false);
 
     /// <summary>回退裁决：资格假/未装 0x74 缝=纯失败；M2-37 回退复用：设备对已有活中继会话
@@ -650,7 +656,8 @@ public sealed class Puncher : IPuncher, IDisposable
     {
         if (!fail.RelayAllowed || _relayAllocator is null) return fail;
         if (_liveRelaySession?.Invoke(fail.PeerDeviceId) is { IsClosed: false } existing)
-            return new PunchOutcome(true, fail.SessionId, fail.PeerDeviceId, existing, null, null, null);
+            return new PunchOutcome(true, fail.SessionId, fail.PeerDeviceId, existing, null, null, null,
+                Proto: fail.Proto); // M7-04：继承本次尝试协议（设计 12 §6.1 中继回退产物）
         return await FallbackToRelayAsync(fail, peerStaticPubKey, ct).ConfigureAwait(false);
     }
 
@@ -680,7 +687,7 @@ public sealed class Puncher : IPuncher, IDisposable
                     HandshakeResendInterval = _options.RelayHandshakeResendInterval,
                 }).ConfigureAwait(false);
             return new PunchOutcome(true, fail.SessionId, fail.PeerDeviceId, session,
-                null, transport.RemoteEndPoint, null);
+                null, transport.RemoteEndPoint, null, Proto: fail.Proto); // 继承本次尝试协议（M7-04）
         }
         catch (Exception e) when (e is not OperationCanceledException || !ct.IsCancellationRequested)
         {
@@ -709,7 +716,8 @@ public sealed class Puncher : IPuncher, IDisposable
             return PunchOutcome.Failure(invite.Peer.DeviceId,
                 e is OperationCanceledException && !ct.IsCancellationRequested
                     ? "punch_timeout"
-                    : $"punch_error: {e.Message}");
+                    : $"punch_error: {e.Message}",
+                invite.PeerEndpoints.Tcp is not null ? "tcp" : "udp"); // 与分派同判（M7-04）
         }
     }
 
@@ -726,7 +734,7 @@ public sealed class Puncher : IPuncher, IDisposable
             try { local = await _probe(socket, punchCt); }
             catch (Exception e) when (e is not OperationCanceledException)
             {
-                return PunchOutcome.Failure(invite.Peer.DeviceId, $"stun_failed: {e.Message}");
+                return PunchOutcome.Failure(invite.Peer.DeviceId, $"stun_failed: {e.Message}", "udp");
             }
 
             // ③ 先校验发起方端点（无效邀请不污染 0x76 上报），再回传端点+本机候选+承载能力位图
@@ -764,7 +772,7 @@ public sealed class Puncher : IPuncher, IDisposable
                             });
                         established = true;
                         return PunchOutcome.Success(invite.SessionId, invite.Peer.DeviceId, rawSession, local,
-                            transport.Peer); // §5.4：钉定后的实际可达对端（直连路径≠映射端点）
+                            transport.Peer, "udp"); // §5.4：钉定后的实际可达对端（直连路径≠映射端点）
                     }
 
                     // M6-05 KCP 承载（设计 11 §7.2）：响应方握手外驱动（THello1 在手→THello2→
@@ -790,7 +798,7 @@ public sealed class Puncher : IPuncher, IDisposable
                         staticKey: _staticKey, peerStaticPub: invite.Peer.StaticPubKey);
                     established = true;
                     return PunchOutcome.Success(invite.SessionId, invite.Peer.DeviceId, session, local,
-                        transport.Peer);
+                        transport.Peer, "udp");
                 }
             }
             finally
@@ -830,7 +838,7 @@ public sealed class Puncher : IPuncher, IDisposable
         }
         catch (Exception e) when (e is not OperationCanceledException)
         {
-            return PunchOutcome.Failure(invite.Peer.DeviceId, $"stun_failed: {e.Message}");
+            return PunchOutcome.Failure(invite.Peer.DeviceId, $"stun_failed: {e.Message}", "tcp");
         }
 
         // ③ 先校验发起方端点（无效邀请不污染 0x76 上报）
@@ -876,7 +884,7 @@ public sealed class Puncher : IPuncher, IDisposable
                     HandshakeTimeout = _options.PunchTimeout,
                 });
             return PunchOutcome.Success(invite.SessionId, invite.Peer.DeviceId, session,
-                winner.LocalEndPoint!, winner.RemoteEndPoint!);
+                winner.LocalEndPoint!, winner.RemoteEndPoint!, "tcp");
         }
         finally
         {
@@ -928,7 +936,7 @@ public sealed class Puncher : IPuncher, IDisposable
                         HandshakeTimeout = _options.PunchTimeout,
                     });
                 return PunchOutcome.Success(go.SessionId, go.Peer.DeviceId, session,
-                    winner.LocalEndPoint!, winner.RemoteEndPoint!);
+                    winner.LocalEndPoint!, winner.RemoteEndPoint!, "tcp");
             }
             finally
             {
@@ -942,7 +950,7 @@ public sealed class Puncher : IPuncher, IDisposable
             return PunchOutcome.Failure(go.Peer.DeviceId,
                 e is OperationCanceledException && !ct.IsCancellationRequested
                     ? "punch_timeout"
-                    : $"punch_error: {e.Message}");
+                    : $"punch_error: {e.Message}", "tcp");
         }
         finally
         {
