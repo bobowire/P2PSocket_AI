@@ -7,8 +7,11 @@
 // - 发包：明文帧头路由（OPEN/KEEPALIVE/PING/PONG/REKEY 族→conv 0；OPEN_RESULT/DATA/CLOSE/
 //   WINDOW→conv=channelId（未登记/超上限→降级 conv 0）；UDP_DGRAM/FRAG→裸 SendToAsync 钉定）。
 // - 更新泵：单 PeriodicTimer 驱动全 conv Update（RTO/窗口通告）；发送侧单任务串行 SendToAsync。
-// - 背压：KCP rcv_wnd 通告（应用不读→窗收敛）；裸队列 DropOldest（丢一包=UDP_DGRAM 语义内
-//   损失，绝不阻塞收包泵——泵阻塞拖累全部 conv 的 ACK 时效，设计 11 §5.1）。
+// - 背压：真实在途上界=应用层 WINDOW 信用（64KiB/channel，设计 11 §5.6）——KCP 层 rcv_wnd
+//   不因消费停滞收敛（ExtractFrames 在泵上即时提取排空 rcv_queue，审查修正口径：原「应用
+//   不读→窗收敛」不成立；_rxQueue 无界，堆积上界=信用窗×ConvCap+低速率控制帧）；裸队列
+//   DropOldest（丢一包=UDP_DGRAM 语义内损失，绝不阻塞收包泵——泵阻塞拖累全部 conv 的
+//   ACK 时效，设计 11 §5.1）。
 // - Adopt：打洞 socket 所有权移交（UdpPunchTransport.ReleaseSocket 后由本类独占；Dispose 关闭）。
 using System.Buffers;
 using System.Buffers.Binary;
@@ -88,6 +91,7 @@ public sealed class KcpTunnelTransport : ITunnelTransport, IKcpConvControl
     public long NonWhitelistDropped { get; private set; } // 迟到 STUN/握手帧/垃圾（白名单闭包）
     public long RawQueueDropped { get; private set; }
     public long DegradedFrameCount { get; private set; } // 降级 conv 0 承载的 channel 帧数
+    public long UpdatePumpErrors { get; private set; } // 更新泵单 conv 异常（审查修复：原计入 MalformedDropped 会污染畸形丢弃读数）
     public int ConvCount => Volatile.Read(ref _channelConvCount);
 
     /// <summary>socket 所有权移交构造（设计 11 §5.4/§7.3）：调用方（UdpPunchTransport）须先
@@ -122,7 +126,7 @@ public sealed class KcpTunnelTransport : ITunnelTransport, IKcpConvControl
     {
         var entry = new ConvEntry
         {
-            Peer = new KcpPeer(conv, _sink, _options.Peer with { }),
+            Peer = new KcpPeer(conv, _sink, _options.Peer), // options 为只读复制入算法层，无须克隆（审查修复：原 with {} 空克隆）
             Gate = new object(),
         };
         entry.Peer.Update(); // 初始化（算法层 updated 标志，参考 ikcp 首调语义）
@@ -160,6 +164,9 @@ public sealed class KcpTunnelTransport : ITunnelTransport, IKcpConvControl
 
     public void RemoveChannel(uint channelId)
     {
+        if (channelId == 0) return; // conv 0 全局控制流永存（机制化 TryReap 注记的不变量，审查修复）
+        _degraded.TryRemove(channelId, out _); // 超限降级项随 channel 销毁清理（审查修复：原无清理路径，
+        // 超限 id 从不入 _convs 故 TryReap 够不着——channel 高频开关的长会话下单调增长）
         if (!_convs.TryGetValue(channelId, out var entry)) return;
         entry.Draining = true; // 排空后销毁：在途段重传至确认（CLOSE 可靠到达）——更新泵收尸
     }
@@ -181,7 +188,7 @@ public sealed class KcpTunnelTransport : ITunnelTransport, IKcpConvControl
 
     // ── ITunnelTransport ────────────────────────────────────────────
 
-    public async ValueTask SendAsync(ReadOnlyMemory<byte> frame, CancellationToken ct = default)
+    public ValueTask SendAsync(ReadOnlyMemory<byte> frame, CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) == 1, this);
         var span = frame.Span;
@@ -193,11 +200,14 @@ public sealed class KcpTunnelTransport : ITunnelTransport, IKcpConvControl
 
         if (type is PtpFrameType.UdpDgram or PtpFrameType.Frag)
         {
-            // 裸旁路：丢包容忍语义保持（不经可靠层；钉定端点直发）
+            // 裸旁路：丢包容忍语义保持（不经可靠层；钉定端点直发）。全程同步完成（审查去 async：
+            // 原方法无 await 的状态机包装无意义）；TryWrite 失败=停机竞态，池缓冲须归还（审查修复：
+            // 原漏还——channel 已完成则发送任务不会取走）
             var buf = ArrayPool<byte>.Shared.Rent(span.Length);
             span.CopyTo(buf);
-            _outbox.Writer.TryWrite((buf, span.Length));
-            return;
+            if (!_outbox.Writer.TryWrite((buf, span.Length)))
+                ArrayPool<byte>.Shared.Return(buf);
+            return ValueTask.CompletedTask;
         }
 
         var conv = ResolveConv(type, BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(2)));
@@ -209,7 +219,7 @@ public sealed class KcpTunnelTransport : ITunnelTransport, IKcpConvControl
                 {
                     entry.Peer.Send(span);
                     entry.Peer.Flush(); // 壳层即时派发（首发出窗即上 wire）
-                    return;
+                    return ValueTask.CompletedTask;
                 }
             }
         }
@@ -224,6 +234,7 @@ public sealed class KcpTunnelTransport : ITunnelTransport, IKcpConvControl
                 conv0.Peer.Flush();
             }
         }
+        return ValueTask.CompletedTask;
     }
 
     /// <summary>路由表（设计 11 §4.1：明文帧头判定，不解密）。</summary>
@@ -400,7 +411,7 @@ public sealed class KcpTunnelTransport : ITunnelTransport, IKcpConvControl
                     }
                     catch (Exception e) when (e is not OperationCanceledException)
                     {
-                        MalformedDropped++; // 单 conv 异常不杀泵
+                        UpdatePumpErrors++; // 单 conv 异常不杀泵（审查修复：独立计数，不再计入 MalformedDropped）
                     }
                 }
             }
@@ -451,7 +462,8 @@ public sealed class KcpTunnelTransport : ITunnelTransport, IKcpConvControl
             var buf = ArrayPool<byte>.Shared.Rent(1 + datagram.Length);
             buf[0] = owner._options.Magic;
             datagram.CopyTo(buf.AsSpan(1));
-            owner._outbox.Writer.TryWrite((buf, 1 + datagram.Length));
+            if (!owner._outbox.Writer.TryWrite((buf, 1 + datagram.Length)))
+                ArrayPool<byte>.Shared.Return(buf); // 停机竞态写不进则归还（审查修复：原漏还）
         }
     }
 

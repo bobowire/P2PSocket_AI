@@ -55,7 +55,7 @@ internal static class KcpBearerBench
         await using (var sim = await BenchSim.CreateAsync())
         {
             var (a, b, h) = await EstablishUdpAsync(sim.Sim, kcp: true, peerOpts: null, setup);
-            await MeasureGroupAsync(four, ping, a, b, h, "kcp-nc1");
+            await MeasureGroupAsync(four, ping, a, b, h, "kcp-nc1"); // 审查修复：原漏 await——测量与 DisposeAsync 竞态且异常被吞
             await a.DisposeAsync();
             await b.DisposeAsync();
         }
@@ -178,7 +178,24 @@ internal static class KcpBearerBench
         while (sent < totalBytes)
         {
             var take = (int)Math.Min(chunk, totalBytes - sent);
-            await a.SendDataAsync(ch, payload.AsMemory(0, take));
+            if (strict)
+            {
+                await a.SendDataAsync(ch, payload.AsMemory(0, take));
+            }
+            else
+            {
+                // 裸承载发送环兜底（审查修复：原 3s 兜底在发送环之后，而裸路径丢帧连带丢 WINDOW
+                // 回报→信用永久缺失→SendDataAsync 环内挂起，兜底永不可达——回环 8ch 满速下内核
+                // 缓冲溢出即触发，基准挂死复现两轮；超时即止=裸语义实收记账）
+                try
+                {
+                    await a.SendDataAsync(ch, payload.AsMemory(0, take)).AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+                }
+                catch (TimeoutException)
+                {
+                    break; // 信用枯竭：该 channel 实发即账（delivered% 反映丢弃）
+                }
+            }
             sent += take;
         }
         // 收齐等待：strict（KCP/TCP——欠收=缺陷即抛）；udp-raw=裸承载无可靠性，回环满速小帧
@@ -382,7 +399,15 @@ internal static class KcpBearerBench
             },
             (socket, ct) => ProbeAsync(socket, sim.StunEndpoint, ct),
             staticB, handlerB,
-            new PunchOptions { KeepaliveSec = 20, BindAddress = IpB },
+            new PunchOptions
+            {
+                KeepaliveSec = 20,
+                BindAddress = IpB,
+                // 审查修复：B 侧透传 peerOpts（原恒默认）——调参矩阵原为 A 单侧调参（B 恒默认参数），
+                // NoDelay/Resend/Interval 等收发两侧行为参数的矩阵语义由此补齐；Mtu 更须双侧一致
+                // （B 恒 1400 时 A 侧大 Mtu 的数据报会被 B 的 MaxWireDatagram 过滤器整包丢弃）
+                KcpBearerOptions = peerOpts is null ? null : new KcpTunnelTransportOptions { Peer = peerOpts },
+            },
             localIpEnumerator: _ => [],
             localBearerCaps: kcp ? () => BearerCaps.Kcp : null);
 

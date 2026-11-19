@@ -241,6 +241,35 @@ public sealed class KcpTunnelTransportTests : IAsyncLifetime
         Assert.True(a.DegradedFrameCount >= 1, "降级帧须可观测");
     }
 
+    [Fact]
+    public async Task 超限channel销毁_降级项清理_conv0守卫永存()
+    {
+        // 审查修复红绿：原 _degraded 无清理路径（超限 id 从不入 _convs，TryReap 够不着——channel
+        // 高频开关的长会话下单调增长）；行为口径：在降级集合内→DegradedFrameCount 递增，
+        // RemoveChannel 清理后再发同 channel 帧→不再计数（未登记路由直达 conv 0 仍可靠到达）。
+        var (a, b) = CreatePair(new KcpTunnelTransportOptions { ConvCap = 1 });
+        a.EnsureChannel(7);
+        a.EnsureChannel(8); // 超上限 → 入 _degraded
+        b.EnsureChannel(7);
+        b.EnsureChannel(8);
+
+        var f = Frame(PtpFrameType.Data, 8, 64);
+        await a.SendAsync(f);
+        await RecvAsync(b);
+        var counted = a.DegradedFrameCount;
+        Assert.True(counted >= 1, "降级集合内的帧须计数");
+
+        a.RemoveChannel(8); // 销毁 → _degraded 随之清理
+        a.RemoveChannel(0); // conv 0 永存守卫：幂等、不置 Draining（原无守卫时更新泵 10ms 内收尸）
+        await Task.Delay(60); // 放行更新泵一 tick（守卫缺失的红态在此窗口内显形）
+        Assert.True(a.ConvExists(0), "conv 0 不得被 RemoveChannel 销毁");
+
+        await a.SendAsync(f);
+        var got = await RecvAsync(b);
+        await AssertSameBytes(f, got); // 清理后仍走 conv 0 可靠到达
+        Assert.Equal(counted, a.DegradedFrameCount); // 不再按降级计数=集合已清（旧代码此处恒红）
+    }
+
     // ── 裸路径白名单闭包（§5.1：迟到 STUN 形似帧不杀隧道——修复项）──
 
     [Fact]

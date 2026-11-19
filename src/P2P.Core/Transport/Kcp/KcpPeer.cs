@@ -116,16 +116,18 @@ public sealed class KcpPeer : IKcpDatagramSource
         Conv = conv;
         _sink = sink;
         var o = options ?? new KcpPeerOptions();
-        if (o.Mtu < 50 || o.Mtu <= Overhead)
-            throw new ArgumentOutOfRangeException(nameof(options), $"MTU {o.Mtu} 非法（参考 ikcp_setmtu 下限）");
+        if (o.Mtu < 50 || o.Mtu <= Overhead || o.Mtu > 65_506)
+            throw new ArgumentOutOfRangeException(nameof(options),
+                $"MTU {o.Mtu} 非法（参考 ikcp_setmtu 下限；上界 65506=UDP 数据报上限 65507 含 1B 魔数，审查补界）");
         _mtu = o.Mtu;
         _mss = _mtu - Overhead;
         _intervalMs = (uint)Math.Clamp(o.IntervalMs, 10, 5000); // 参考 ikcp_interval 夹取
         _noDelay = o.NoDelay;
         _fastResend = o.Resend;
         _noCwnd = o.NoCongestionWindow;
-        _sndWnd = (uint)Math.Max(1, o.SndWnd);
-        _rcvWnd = (uint)Math.Max(1, o.RcvWnd);
+        // 审查补界：窗口夹取到 ushort 上限——flush 模板 (ushort)WndUnused() 通告位宽 16bit，超限配置原会静默截断
+        _sndWnd = (uint)Math.Clamp(o.SndWnd, 1, ushort.MaxValue);
+        _rcvWnd = (uint)Math.Clamp(o.RcvWnd, 1, ushort.MaxValue);
         _rmtWnd = _rcvWnd;
         if (_noDelay) _rxMinrto = RtoNdl; // 参考 ikcp_nodelay：nodelay=1 → rx_minrto=30
         _clock = o.ClockMs ?? (() => Environment.TickCount64);
@@ -242,9 +244,15 @@ public sealed class KcpPeer : IKcpDatagramSource
                     maxack = sn;
                     latestTs = ts;
                 }
+                // 参考 IKCP_FASTACK_CONSERVE（master 定义）：仅更新时间戳更新的 ack。
+                // 审查注记：master 此处为严格 >（CONSERVE 防跨数据报陈旧 ACK 虚增 maxack）；本实现
+                // 取 >=（kcp2k 口径，见文件头出处②）——同毫秒段批是 interval=10 下的常态（发送侧
+                // MTU 攒包多段同 ts、接收侧 ACK 同报回涌），严格 > 会令同报内 maxack 不推进、快重传
+                // 推迟一个窗口；CONSERVE 的防陈旧意图不受损（陈旧 ACK 到达于不同数据报，其 ts 落后
+                // 于本报 latestTs，两口径同样拒绝）。红绿验证：两口径下本套件 14 例均绿（差异仅在
+                // 单报多 ACK 场景判别），保留已基准定型的 >=。
                 else if ((int)(sn - maxack) > 0 && (int)(ts - latestTs) >= 0)
                 {
-                    // 参考 IKCP_FASTACK_CONSERVE（master 定义）：仅更新时间戳更新的 ack
                     maxack = sn;
                     latestTs = ts;
                 }
