@@ -516,13 +516,26 @@ public sealed class GroupService(
         var hasMore = items.Count > limit;
         if (hasMore) items.RemoveAt(items.Count - 1);
 
-        // 批量摘要：分组与开放网段（列表项字段 PRD 06 §2）
+        // 批量摘要：分组与开放网段（列表项字段 PRD 06 §2）。
+        // 分组名按查看者视角过滤（2026-11-21 隐私收口，PRD 05 §2 v0.19）：本账号设备全量；
+        // 跨账号设备仅显示与查看设备共同的分组——组名是元数据，对方（乃至第三方账号）的
+        // 私有组名不下发。共同分组与 VisibleDevices 同源（session.DeviceId 成员行，同样
+        // 不滤 Approved——"可见原因"⊆"显示的组"）；按 groupId 求交防同名组误配
         var pageIds = items.Select(d => d.Id).ToList();
+        var myGroupIds = (await db.GroupMembers.AsNoTracking()
+                .Where(m => m.DeviceId == session.DeviceId)
+                .Select(m => m.GroupId).Distinct().ToListAsync())
+            .ToHashSet();
+        var ownDeviceIds = items
+            .Where(d => session.OwnerUserId != null && d.OwnerUserId == session.OwnerUserId)
+            .Select(d => d.Id).ToHashSet();
         var groupsByDevice = (await db.GroupMembers.Where(m => pageIds.Contains(m.DeviceId))
-                .Join(db.Groups, m => m.GroupId, g => g.Id, (m, g) => new { m.DeviceId, g.Name })
+                .Join(db.Groups, m => m.GroupId, g => g.Id, (m, g) => new { m.DeviceId, g.Id, g.Name })
                 .ToListAsync())
             .GroupBy(x => x.DeviceId)
-            .ToDictionary(g => g.Key, g => g.Select(x => x.Name).Distinct().ToArray());
+            .ToDictionary(g => g.Key, g => g
+                .Where(x => ownDeviceIds.Contains(g.Key) || myGroupIds.Contains(x.Id))
+                .Select(x => x.Name).Distinct().ToArray());
         var segmentsByDevice = (await db.LanSegments.Where(s => pageIds.Contains(s.DeviceId) && s.Enabled)
                 .Select(s => new { s.DeviceId, s.Cidr }).ToListAsync())
             .GroupBy(x => x.DeviceId)

@@ -48,7 +48,7 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/devices` | 可见设备列表（账号 ∪ 分组），字段：deviceId/deviceName/remoteCode/virtualIp/online/groups[]/lanSegments[] |
+| GET | `/api/devices` | 可见设备列表（账号 ∪ 分组），字段：deviceId/deviceName/remoteCode/virtualIp/online/groups[]/lanSegments[]；groups[] 按查看者视角（v1.90/PRD 05 §2 v0.19）——本账号设备全量、跨账号设备仅与查看设备共同分组 |
 | GET | `/api/groups` | 已加入分组 + 待审批申请（若为所有者） |
 | POST | `/api/groups` | `{ name, joinPolicy }` 建组（FR-C-805） |
 | POST | `/api/groups/join` | `{ inviteCode }` 凭码入组 |

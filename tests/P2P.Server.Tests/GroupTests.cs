@@ -154,6 +154,41 @@ public sealed class GroupTests : IAsyncLifetime
         _ = peer;
     }
 
+    [Fact]
+    public async Task DeviceList_CrossAccountItem_GroupsFilteredToShared()
+    {
+        // 分组名隐私收口（2026-11-21，PRD 05 §2 v0.19）：跨账号设备仅显示与查看设备的
+        // 共同分组——组名是元数据，对方（乃至第三方账号）的私有组名不下发；本账号设备全量
+        var (viewer, _) = await ConnectLoggedInAsync("viewer");
+        var (mate, mateId) = await ConnectLoggedInAsync("mate");          // 同 admin 账号第二台
+        var (eve, eveId) = await ConnectRegisteredAsync("eve");
+        await LoginNewUserAsync(eve, "eve");                              // 独立账号
+
+        // eve 私有组（建组即首成员：eve 设备 = 默认分组 + 内网穿透EVE）
+        await eve.SendAsync(new GroupCreate(eve.NextSeq(), eve.Now(), MsgType.GroupCreate,
+            "内网穿透EVE", JoinPolicy.Free));
+        var eveGroup = await eve.ReceiveAsync<GroupCreateAck>();
+        Assert.NotEqual(Guid.Empty, eveGroup!.GroupId);
+
+        // 本账号他组（mate 设备 = 默认分组 + 运维二组；viewer 设备仅默认分组）
+        await mate.SendAsync(new GroupCreate(mate.NextSeq(), mate.Now(), MsgType.GroupCreate,
+            "运维二组", JoinPolicy.Free));
+        var mateGroup = await mate.ReceiveAsync<GroupCreateAck>();
+        Assert.NotEqual(Guid.Empty, mateGroup!.GroupId);
+
+        var list = await ListAsync(viewer, 0, 100);
+        Assert.Equal(3u, list.Total);                                     // 可见范围不变（仅元数据收口）
+
+        // 跨账号：仅共同分组（默认分组），私有组名不下发
+        var eveItem = list.Items.Single(i => i.DeviceId == eveId);
+        Assert.Equal(new[] { DbInitializer.DefaultGroupName }, eveItem.Groups);
+
+        // 本账号：全量（含查看设备不在的他组）
+        var mateItem = list.Items.Single(i => i.DeviceId == mateId);
+        Assert.Contains(DbInitializer.DefaultGroupName, mateItem.Groups);
+        Assert.Contains("运维二组", mateItem.Groups);
+    }
+
     // ── 0x50/0x55/0x56 权限与生命周期 ─────────────────────────────────
 
     [Fact]
