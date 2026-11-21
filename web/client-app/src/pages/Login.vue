@@ -5,7 +5,7 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import type { FormInstance, FormRules } from "element-plus";
-import { ApiError, ApiPaths } from "@p2p/ui-shared";
+import { ApiError, ApiPaths, dialogWidth } from "@p2p/ui-shared";
 import { api } from "../api";
 import { useAuthStore } from "../stores/auth";
 import { useSystemStore } from "../stores/system";
@@ -240,7 +240,7 @@ onMounted(() => void auth.refresh());
     <el-dialog
       v-model="changeVisible"
       title="修改密码"
-      width="400px"
+      :width="dialogWidth('400px')"
       data-testid="login-change-dialog"
     >
       <el-form

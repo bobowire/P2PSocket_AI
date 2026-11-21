@@ -8,7 +8,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { useRoute } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import type { FormInstance } from "element-plus";
-import { StatusTag, ApiError } from "@p2p/ui-shared";
+import { StatusTag, ApiError, useBreakpoint, dialogWidth } from "@p2p/ui-shared";
 import PassiveBanner from "../components/PassiveBanner.vue";
 import { useMappingStore, type MappingFormInput } from "../stores/mappings";
 import { useDeviceStore } from "../stores/devices";
@@ -20,6 +20,7 @@ const mappings = useMappingStore();
 const system = useSystemStore();
 const devices = useDeviceStore();
 const route = useRoute();
+const { isMobile } = useBreakpoint(); // M8-04：小屏卡片列表（设计 13 §7，桌面 DOM 不变）
 
 const drawer = ref(false);
 const busy = ref(false);
@@ -170,6 +171,7 @@ onMounted(() => {
     </div>
 
     <el-table
+      v-if="!isMobile"
       :data="mappings.items"
       data-testid="mappings-table"
       empty-text="暂无映射，点击右上角新建"
@@ -300,17 +302,126 @@ onMounted(() => {
       </el-table-column>
     </el-table>
 
+    <!-- M8-04 小屏卡片列表（设计 13 §7：行数据纵排+关键操作保留；桌面 DOM 不变） -->
+    <div
+      v-else
+      class="card-list"
+      data-testid="mappings-cards"
+    >
+      <el-card
+        v-for="row in mappings.items"
+        :key="row.mappingId"
+        class="row-card"
+        shadow="never"
+      >
+        <div class="card-head">
+          <span class="card-title">{{ row.name }}</span>
+          <StatusTag
+            :state="row.state"
+            data-testid="mapping-state"
+          />
+        </div>
+        <div class="card-line">
+          <span class="k">本地监听</span>
+          <code>{{ row.proto.toUpperCase() }} :{{ row.localPort }}</code>
+        </div>
+        <div class="card-line">
+          <span class="k">目标</span>
+          <span><code>{{ row.targetRemoteCode }}</code> → {{ row.targetAddr }}:{{ row.targetPort }}</span>
+        </div>
+        <div class="card-line">
+          <span class="k">速率</span>
+          <span
+            v-if="rate(row.mappingId)"
+            class="rate"
+          >↑ {{ humanRate(rate(row.mappingId)!.rateUp) }} ↓ {{ humanRate(rate(row.mappingId)!.rateDown) }}</span>
+          <span
+            v-else
+            class="muted"
+          >—</span>
+        </div>
+        <div class="card-line">
+          <span class="k">路径</span>
+          <span>{{ pathText(mappings.rates.get(row.mappingId)?.path, row.state) }}</span>
+        </div>
+        <div
+          v-if="row.detail"
+          class="card-line fail"
+        >
+          {{ detailText(row.detail) }}
+        </div>
+        <div class="card-actions">
+          <el-button
+            v-if="!row.enabled"
+            size="small"
+            type="success"
+            plain
+            :disabled="isPassive"
+            data-testid="mapping-enable"
+            @click="toggle(row.mappingId, row.name, true)"
+          >
+            启用
+          </el-button>
+          <el-button
+            v-else
+            size="small"
+            type="warning"
+            plain
+            :disabled="isPassive"
+            data-testid="mapping-disable"
+            @click="toggle(row.mappingId, row.name, false)"
+          >
+            停用
+          </el-button>
+          <el-button
+            v-if="row.state === 'failed'"
+            size="small"
+            type="primary"
+            plain
+            :disabled="isPassive"
+            data-testid="mapping-retry"
+            @click="retry(row.mappingId)"
+          >
+            重试
+          </el-button>
+          <el-button
+            size="small"
+            :disabled="isPassive"
+            data-testid="mapping-edit"
+            @click="openEdit(row.mappingId)"
+          >
+            编辑
+          </el-button>
+          <el-button
+            size="small"
+            type="danger"
+            plain
+            :disabled="isPassive"
+            data-testid="mapping-delete"
+            @click="remove(row.mappingId, row.name)"
+          >
+            删除
+          </el-button>
+        </div>
+      </el-card>
+      <el-empty
+        v-if="mappings.items.length === 0"
+        description="暂无映射，点击新建"
+      />
+    </div>
+
     <!-- 新建/编辑抽屉 -->
     <el-drawer
       v-model="drawer"
       :title="editing ? '编辑映射' : '新建映射'"
-      size="420px"
+      :size="dialogWidth('420px')"
       data-testid="mapping-drawer"
     >
       <el-form
         ref="formRef"
         :model="form"
         :rules="rules"
+        :label-position="isMobile ? 'top' : undefined"
         label-width="88px"
       >
         <el-form-item
@@ -460,4 +571,21 @@ onMounted(() => {
   color: var(--el-text-color-secondary);
   cursor: help;
 }
+
+/* ── M8-04 小屏卡片列表（设计 13 §7）── */
+.card-list { display: flex; flex-direction: column; gap: 12px; }
+.row-card :deep(.el-card__body) { padding: 12px 14px; }
+.card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.card-title { font-weight: 600; font-size: 15px; }
+.card-line {
+  display: flex;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.8;
+  word-break: break-all;
+}
+.card-line .k { flex-shrink: 0; color: var(--el-text-color-secondary); }
+.card-line.fail { color: var(--el-color-danger); }
+.card-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+.card-actions .el-button + .el-button { margin-left: 0; }
 </style>

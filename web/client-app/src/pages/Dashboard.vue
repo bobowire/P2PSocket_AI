@@ -267,4 +267,13 @@ onMounted(() => {
 .totals { list-style: none; display: grid; gap: 8px; margin: 0; padding: 0; }
 .totals li { display: flex; gap: 12px; align-items: baseline; }
 .totals li span { color: var(--el-text-color-secondary); font-size: 13px; width: 60px; }
+
+/* ── 小屏（2026-11-21 真机走查修复）：双卡并排挤压致 IP/远程码/登录态截断 → 单列；
+   流量表 360px 最小宽在 393px 视口横向溢出 → 放开并随容器内滚 ── */
+@media (max-width: 767px) {
+  .cards { grid-template-columns: 1fr; gap: 12px; }
+  .row dt { width: 64px; flex-shrink: 0; }
+  .row dd { margin: 0; min-width: 0; flex: 1; text-align: right; word-break: break-all; }
+  .stats-flex .el-table { min-width: 0; flex-basis: 100%; }
+}
 </style>

@@ -22,8 +22,6 @@ using P2P.Core.Protocol;
 using P2P.Core.Stun;
 using P2P.Core.Tunnel;
 using P2P.Nic;
-using P2P.Nic.Linux;
-using P2P.Nic.Windows;
 
 namespace P2P.Client.Hosting;
 
@@ -76,6 +74,24 @@ public sealed record ClientRuntimeOptions
     /// Puncher 的 localBearerCaps 缝不装配 → 不上送位、判定恒 false（两态回归用：kcp on/off）；
     /// 生产 false=随 settings.KcpBearer（用户 kill-switch 双层合成）。</summary>
     public bool DisableKcpBearer { get; init; }
+
+    /// <summary>无卡端口映射模式（M8-01，设计 13 §4.1/TD-32）：true=映射监听绑 127.0.0.1——
+    /// 生效点两处（引擎构造初值与注册后 <see cref="MappingEngine.UpdateVirtualIp"/> 调用点均传
+    /// Loopback），state.VirtualIp 保持服务端下发值不篡改（本地真相与服务端记录一致，未来
+    /// VpnService 透明接入可零迁移复用）；展示经 <see cref="MappingEngine.EffectiveBindIp"/> 归真。
+    /// 默认 false=桌面行为零变化。Android 壳必开。</summary>
+    public bool LoopbackMappingMode { get; init; }
+
+    /// <summary>机器指纹注入缝（M8-01，设计 13 §4.4/TD-34）：Android 6+ 系统 MAC 全设备统一
+    /// 02:00:00:00:00:00，默认采集会顶号（OQ-14 覆盖式恢复按 macCode 判身份）；壳注入
+    /// ANDROID_ID 派生指纹，经 ClientRegistrationService 流至 MacCodeProvider.FromFingerprint
+    ///（注入**优先**——回退位序会被全设备同值 MAC 击穿）。默认 null=平台采集（05 §10 现状）。</summary>
+    public Func<string?>? MachineFingerprintOverride { get; init; }
+
+    /// <summary>SPA 物理目录托管缝（M8-02，设计 13 §5.1/TD-35）：null=staticwebassets 现状
+    ///（清单探测 + MapStaticAssets，桌面零变化）；非 null=PhysicalFileProvider+UseStaticFiles+
+    /// MapFallbackToFile（Android 打包布局不产出清单；目录不存在则告警跳过，仅 API）。</summary>
+    public string? SpaRootOverride { get; init; }
 }
 
 /// <summary>客户端全组件生命周期（单一属主；启动序=01 §4.1，停机序为其逆序）。</summary>
@@ -100,7 +116,7 @@ public sealed class ClientRuntime : IAsyncDisposable
     private StunTester _stunTester = null!;
     private DevicePinger _devicePinger = null!;
     private LocalApiServices _api = null!;
-    private WebApplication _app = null!;
+    private WebApplication? _app; // M8-02 起 nullable：Web 宿主启动失败降级（null=页面/API 不可用，数据面照常）
     private WebToken _webToken = null!; // M5-12：本地 Web token（07 §14.2，随启动轮换）
     private NicHealthMonitor? _nicMonitor;
     private Task? _punchRetryLoop; // M7-03 更名（原 _relayRetryLoop）：中继回切+Failed 重试统一周期循环
@@ -168,7 +184,8 @@ public sealed class ClientRuntime : IAsyncDisposable
         //（PeersStore.GetPunchMode 发送时点取现值，设备页修改对后续打洞会话即时生效）
         _scheduler = new PunchScheduler(_puncher, new PunchModePlanner(_peers.GetPunchMode));
         _scheduler.Log += m => Log?.Invoke($"[punch] {m}"); // 打洞完成四型日志——M2_38 排查曾因未接线被误导为"调度未返回"
-        var bindIp = IPAddress.TryParse(_state.State.VirtualIp, out var vip) ? vip : IPAddress.Loopback;
+        var bindIp = _options.LoopbackMappingMode ? IPAddress.Loopback // M8-01 生效点①（设计 13 §4.1）
+            : IPAddress.TryParse(_state.State.VirtualIp, out var vip) ? vip : IPAddress.Loopback;
         _engine = new MappingEngine(_host, _scheduler, bindIp,
             enabledCidrsProvider: _lanSegments.EnabledCidrs); // 监听绑虚拟 IP（01 §3.2）+ L3 白名单（M2-11）
         _engine.Log += m => Log?.Invoke($"[engine] {m}");
@@ -179,7 +196,10 @@ public sealed class ClientRuntime : IAsyncDisposable
         });
         _reporter.Log += m => Log?.Invoke($"[report] {m}");
         _sync = new MappingSyncService(_control, _engine, _state);
-        _wizard = new ClientRegistrationService(_control, _state, _nic);
+        _wizard = new ClientRegistrationService(_control, _state, _nic, new RegistrationOptions
+        {
+            MachineFingerprint = _options.MachineFingerprintOverride, // M8-01 指纹注入缝（设计 13 §4.4）
+        });
         // 网段冲突检测（M3-13，FR-C-204）：枚举源=平台快照（测试缝可注入替身）
         _subnetConflicts = new SubnetConflictDetector(_options.SubnetSurveyOverride ?? P2P.Nic.SubnetSurvey.Snapshot);
         _subnetConflicts.Log += m => Log?.Invoke(m);
@@ -200,7 +220,12 @@ public sealed class ClientRuntime : IAsyncDisposable
                 : null);
         _api = new LocalApiServices(_control, _state, _settings, _peers, _wizard, _sync, _scheduler,
             _lanSegments, Path.Combine(_options.BaseDir, "logs"), _subnetConflicts, _stunTester,
-            _devicePinger, _host, PeerLabelLookup); // M2-27：白名单镜像 + 日志目录同源；M3-14 诊断区（tunnels/rekey 走本地隧道表）
+            _devicePinger, _host, PeerLabelLookup,
+            effectiveVirtualIp: _options.LoopbackMappingMode
+                ? () => _engine.EffectiveBindIp.ToString()
+                : null); // M2-27：白名单镜像 + 日志目录同源；M3-14 诊断区（tunnels/rekey 走本地隧道表）；
+        // M8-01 展示归真缝（设计 13 §4.3）：无卡模式=引擎生效绑定地址（恒 127.0.0.1）；
+        // 桌面 null=API 读 state.VirtualIp 现状零变化
         _control.ServerPush += OnServerPush; // 0x71 PunchInvite → 被邀请方打洞（02 §5.1③）
         _control.SessionReestablished += () => _ = OnSessionReestablishedAsync(); // 断线重连沿：登录重放+failed 映射兜底（缺陷批次 2 修 A/C）
         _wizard.LoginSucceeded += username => // P3 修复：登录后可见性就位，补发启用映射恢复
@@ -218,27 +243,51 @@ public sealed class ClientRuntime : IAsyncDisposable
         // ③ 本地 Web（两种分支都启：向导也经它完成注册）
         WebPort = _settings.Settings.LocalWebPort;
         _webToken = new WebToken(_options.BaseDir); // M5-12：每次启动生成（重启即轮换，07 §14.2）
-        var builder = WebApplication.CreateBuilder();
-        builder.WebHost.UseUrls($"http://127.0.0.1:{WebPort}"); // TD-12 仅本机回环
-        _app = builder.Build();
-        _app.UseWebSockets();
-        if (_settings.Settings.WebTokenAuth) // M5-12：/api/* 与 /ws/status 校验（07 §14.2）——webTokenAuth=false 免鉴权（可配置化，重启生效）
-            _app.UseWebTokenAuth(_webToken.Value);
-        _app.MapLocalApi(_api);
-        // SPA 同端口静态托管（04 §0「SPA 由同端口静态托管」、08 §2 NFR-31）：wwwroot 经
-        // MapStaticAssets 服务（读 staticwebassets.endpoints.json，含 .br/.gz 预压缩直发）；
-        // MapFallbackToFile 兜底 SPA 路由（/wizard、/login 等均回 index.html 由前端路由接管）。
-        // 挂载顺序：API 端点在前，fallback 最后兜底，不遮蔽 /api/*。
-        // 清单随发布产物存在才挂——集成测试宿主（testhost）无清单会抛
-        // InvalidOperationException（MapStaticAssets 按 {宿主程序集}.staticwebassets 解析），跳过仅 API。
-        var spaManifest = Path.Combine(AppContext.BaseDirectory,
-            $"{typeof(ClientRuntime).Assembly.GetName().Name}.staticwebassets.endpoints.json");
-        if (File.Exists(spaManifest))
+        // M8-02 Web 宿主降级（设计 13 §5.2）：构建/启动失败（Kestrel on Android R1、桌面端口占用）
+        // 不拖垮数据面——ERROR 日志 + 页面/WS/API 不可用，隧道/打洞/映射监听照常运行。
+        try
         {
-            _app.MapStaticAssets(spaManifest);
-            _app.MapFallbackToFile("index.html");
+            var builder = WebApplication.CreateBuilder();
+            builder.WebHost.UseUrls($"http://127.0.0.1:{WebPort}"); // TD-12 仅本机回环
+            _app = builder.Build();
+            _app.UseWebSockets();
+            if (_settings.Settings.WebTokenAuth) // M5-12：/api/* 与 /ws/status 校验（07 §14.2）——webTokenAuth=false 免鉴权（可配置化，重启生效）
+                _app.UseWebTokenAuth(_webToken.Value);
+            _app.MapLocalApi(_api);
+            // SPA 同端口静态托管（04 §0「SPA 由同端口静态托管」、08 §2 NFR-31）：wwwroot 经
+            // MapStaticAssets 服务（读 staticwebassets.endpoints.json，含 .br/.gz 预压缩直发）；
+            // MapFallbackToFile 兜底 SPA 路由（/wizard、/login 等均回 index.html 由前端路由接管）。
+            // 挂载顺序：API 端点在前，fallback 最后兜底，不遮蔽 /api/*。
+            // 清单随发布产物存在才挂——集成测试宿主（testhost）无清单会抛
+            // InvalidOperationException（MapStaticAssets 按 {宿主程序集}.staticwebassets 解析），跳过仅 API。
+            var spaManifest = Path.Combine(AppContext.BaseDirectory,
+                $"{typeof(ClientRuntime).Assembly.GetName().Name}.staticwebassets.endpoints.json");
+            if (_options.SpaRootOverride is { } spaDir) // M8-02 物理目录托管（设计 13 §5.1/TD-35）：Android 打包布局不产出 staticwebassets 清单
+            {
+                if (Directory.Exists(spaDir))
+                {
+                    // 无预压缩——设备本地回环加载无意义（设计 13 §5.1）；静态资源不经 token 校验
+                    //（与 MapStaticAssets 路径同口径：保护面=API/WS，07 §14.2）
+                    var spa = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(spaDir);
+                    _app.UseStaticFiles(new StaticFileOptions { FileProvider = spa });
+                    _app.MapFallbackToFile("index.html", new StaticFileOptions { FileProvider = spa });
+                }
+                else Log?.Invoke($"[web] SpaRootOverride 目录不存在（{spaDir}）：SPA 不托管（仅 API），数据面照常");
+            }
+            else if (File.Exists(spaManifest))
+            {
+                _app.MapStaticAssets(spaManifest);
+                _app.MapFallbackToFile("index.html");
+            }
+            await _app.StartAsync(ct);
         }
-        await _app.StartAsync(ct);
+        catch (Exception e)
+        {
+            Log?.Invoke($"[web] 本地 Web 宿主启动失败：{e.Message}——页面/WS/API 不可用，" +
+                        "隧道、打洞与映射监听照常运行（设计 13 §5.2 降级，08 §5.2）");
+            if (_app is not null) { try { await _app.DisposeAsync(); } catch { /* 收尾尽力而为 */ } }
+            _app = null;
+        }
 
         // ④ 分支：未注册 → 向导模式等待；已注册 → 注册后路径（Nic→通道→映射恢复）
         if (!_state.State.IsRegistered)
@@ -283,7 +332,9 @@ public sealed class ClientRuntime : IAsyncDisposable
                 // 监听绑定地址切换（01 §3.2）：向导路径冷启动时 VirtualIp 尚空、引擎初值是 Loopback
                 // 兜底——不切换则注册后映射监听落 127.0.0.1，与本地同端口服务相撞（A-4 场景）。
                 // 先于 Nic 应用：网卡降级不回退绑定（虚拟 IP 已落盘即为本机监听地址）。
-                _engine.UpdateVirtualIp(vip);
+                // M8-01 生效点②（设计 13 §4.1）：无卡模式恒传 Loopback——state.VirtualIp 不篡改，
+                // 本地真相与服务端记录一致；冲突检测随之按生效地址推导（127.0.0.0/24 无误报）。
+                _engine.UpdateVirtualIp(_options.LoopbackMappingMode ? IPAddress.Loopback : vip);
                 try { _subnetConflicts.OnNicApplied((await _nic.EnsureAsync(vip, CancellationToken.None)).AdapterName); }
                 catch (Exception e)
                 {
@@ -293,7 +344,7 @@ public sealed class ClientRuntime : IAsyncDisposable
 
                 // 冲突检测首查（M3-13，05 §1.4/FR-C-204）：Ensure 后主动跑一次（驱动日志+WS 提示）；
                 // 后续外部变化/解除由 /api/system/state 每请求现场重算反映（无本机事件可听）
-                _subnetConflicts.Check(_state.State.VirtualIp, trigger: "注册后路径首查");
+                _subnetConflicts.Check(_engine.EffectiveBindIp.ToString(), trigger: "注册后路径首查");
 
                 // 网卡自愈循环（M2-24，FR-C-202/05 §1.2）：30s 探测存在性与 IP 一致性，异常重建恢复。
                 // 启动 Ensure 失败同样纳入（首探测即重建尝试）；恢复沿立即重试 listen_failed 映射
@@ -302,7 +353,7 @@ public sealed class ClientRuntime : IAsyncDisposable
                 _nicMonitor.Log += m => Log?.Invoke(m);
                 _nicMonitor.Restored += () => _ = Task.Run(async () =>
                 {
-                    _subnetConflicts.Check(_state.State.VirtualIp, trigger: "网卡恢复沿重查"); // 重建=地址/路由重新应用，重查冲突
+                    _subnetConflicts.Check(_engine.EffectiveBindIp.ToString(), trigger: "网卡恢复沿重查"); // 重建=地址/路由重新应用，重查冲突（M8-01 起按生效地址）
                     try { await _engine.RetryListenFailedAsync(); }
                     catch (Exception e) when (e is ObjectDisposedException or OperationCanceledException)
                     { /* 停机竞态：引擎已释放 */ }
@@ -814,11 +865,7 @@ public sealed class ClientRuntime : IAsyncDisposable
         return last >= 0 ? hostPort[..last] : hostPort;
     }
 
-    private static INicManager CreateNic() => OperatingSystem.IsWindows()
-        ? new WintunNicManager()
-        : OperatingSystem.IsLinux()
-            ? new LinuxTunNicManager()
-            : throw new PlatformNotSupportedException("虚拟网卡仅支持 Windows/Linux（05 §1）");
+    private static INicManager CreateNic() => NicManagerFactory.Create(); // M8-01 收敛为调工厂（设计 13 §4.2：消除重复 + Android NoopNicManager 分支）
 
     /// <summary>向导引导（FR-C-101）：Windows 开浏览器；Linux 有 DISPLAY 时 xdg-open，否则仅日志。</summary>
     private static void TryOpenBrowser(string url)
@@ -839,7 +886,7 @@ public sealed class ClientRuntime : IAsyncDisposable
         _control.ServerPush -= OnServerPush;
         try { await _cts.CancelAsync(); } catch { /* 已取消 */ }
         if (_nicMonitor is not null) await _nicMonitor.DisposeAsync(); // 先停自愈循环（其恢复沿会驱动引擎）
-        try { await _app.DisposeAsync(); } catch { /* Kestrel 收尾 */ }
+        if (_app is not null) { try { await _app.DisposeAsync(); } catch { /* Kestrel 收尾（降级态 null=未启） */ } }
         await _api.DisposeAsync();   // Hub 停推
         await _reporter.DisposeAsync(); // 0x64 停机补报（须先于引擎/控制通道：读快照、走连接）
         await _engine.DisposeAsync(); // 拆监听/关 channel

@@ -12,12 +12,13 @@ import { onMounted, onUnmounted, computed, provide, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { Odometer, Search, Share, Connection, Link, Document, User, Setting, Upload, InfoFilled } from "@element-plus/icons-vue";
-import { AdminLayout, useWs, ApiPaths } from "@p2p/ui-shared";
+import { AdminLayout, useWs, ApiPaths, useBreakpoint } from "@p2p/ui-shared";
 import { buildWsUrl } from "./api";
 import { useSystemStore } from "./stores/system";
 import { useAuthStore } from "./stores/auth";
 import { useMappingStore } from "./stores/mappings";
 import { useDeviceStore } from "./stores/devices";
+import { useSimpleThemeClass } from "./theme";
 import SubnetConflictBanner from "./components/SubnetConflictBanner.vue";
 
 // 2026-10-20 评估批次 A/C：登录入口"账号"→"账号登录"（U-6）；菜单配图标（V-4）；
@@ -70,7 +71,10 @@ const { connected } = useWs({
 const alert = computed(() => (connected.value ? undefined : "本地服务不可达"));
 const headerText = computed(() =>
   auth.me?.username
-    ? `${auth.me.username}（${auth.me.mode === "normal" ? "已登录" : "哑节点"}）`
+    ? isMobile.value
+      ? // 小屏顶栏放不下全量文案（真机实测 393px 两行溢出，2026-11-21）——只留用户名
+        auth.me.username
+      : `${auth.me.username}（${auth.me.mode === "normal" ? "已登录" : "哑节点"}）`
     : "未登录",
 );
 
@@ -82,6 +86,11 @@ const bare = computed(() => route.path === "/login" && !auth.me?.username);
 // 断连告警经 provide 传简易版顶栏（ref 直传保持响应式）
 const simpleMode = computed(() => route.path.startsWith("/simple"));
 provide("simpleAlert", alert);
+
+// 科技感主题类集中管理（2026-11-21 移动端走查修复，实现见 theme.ts——真机 WebView 上
+// SimpleLayout 卸载钩子存在清理不生效路径，"黑底白卡"根治）
+useSimpleThemeClass();
+const { isMobile } = useBreakpoint();
 
 // 守卫（单向）：一旦检出未注册一律去向导；反向（注册完成回主界面）由向导页
 // 自主处置——结果展示（远程码/虚拟 IP）须先呈现，用户点"进入控制台"再离开（06 §2）
@@ -132,6 +141,11 @@ onUnmounted(() => {
   font-size: 13px;
   color: var(--el-text-color-secondary);
   margin-right: 12px;
+  /* 小屏顶栏收缩（配合 App.vue 小屏只显示用户名 + AdminLayout .actions min-width:0） */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 .simple-link {
   font-size: 13px;
@@ -140,6 +154,8 @@ onUnmounted(() => {
   border: 1px solid var(--el-color-primary-light-5);
   border-radius: var(--el-border-radius-base);
   padding: 2px 10px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .simple-link:hover { background: var(--el-color-primary-light-9); }
 </style>

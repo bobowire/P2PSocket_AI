@@ -22,7 +22,7 @@ public static class SystemApi
 {
     public static IEndpointRouteBuilder MapSystemApi(this IEndpointRouteBuilder app,
         ControlClient control, StateStore store, LocalApiContext ctx, StatusHub hub,
-        SubnetConflictDetector? subnetConflicts = null)
+        SubnetConflictDetector? subnetConflicts = null, Func<string>? effectiveVirtualIp = null)
     {
         app.MapGet("/api/system/state", () =>
         {
@@ -32,7 +32,9 @@ public static class SystemApi
                 : control.State == ControlClientState.Established ? "running" : "degraded";
             return Api.Ok(new { phase, serverReachable = control.IsReady,
                 protocolVersion = ProtocolVersion.Current,
-                conflict = subnetConflicts?.Check(store.State.VirtualIp, trigger: "api/system/state"),
+                // M8-01 起冲突检测按生效绑定地址推导网段（无卡=127.0.0.0/24 无误报，设计 13 §2.5）
+                conflict = subnetConflicts?.Check(effectiveVirtualIp?.Invoke() ?? store.State.VirtualIp,
+                    trigger: "api/system/state"),
                 version = AppVersion.Version, commit = AppVersion.Commit });
         });
 
@@ -42,7 +44,10 @@ public static class SystemApi
             // 未改名（含存量升级 state.json 无此字段）回落主机名=注册默认名，仅展示；改名后为持久真值（v1.58）
             deviceName = store.State.DeviceName ?? Environment.MachineName,
             remoteCode = store.State.RemoteCode,
-            virtualIp = store.State.VirtualIp,
+            // M8-01 展示归真（设计 13 §4.3）：无卡模式=生效绑定地址（127.0.0.1，真实可达）；
+            // 桌面（缝 null）=state.VirtualIp 现状。/api/devices 列表为服务端他设备记录（远端真相），
+            // 非本机连接地址，不随无卡模式改写
+            virtualIp = effectiveVirtualIp?.Invoke() ?? store.State.VirtualIp,
             username = ctx.LoginUser,
             capability = control.Capability == CapabilityMode.Normal ? "normal" : "passive",
         }));

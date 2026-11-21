@@ -21,8 +21,20 @@ namespace P2P.Client.Registration;
 public sealed record RegistrationOptions
 {
     public string Hostname { get; init; } = Environment.MachineName;
-    public string Os { get; init; } = OperatingSystem.IsWindows() ? "windows" : "linux";
+
+    /// <summary>OS 值域 windows/linux/android（M8-01，设计 13 §4.5）：协议 string 字段，
+    /// 服务端无枚举校验（管理页 os 列原样展示）——android 为无卡端口映射模式新增值。</summary>
+    public string Os { get; init; } = OperatingSystem.IsWindows() ? "windows"
+        : OperatingSystem.IsAndroid() ? "android"
+        : "linux";
+
     public string ClientVersion { get; init; } = "0.1.0";
+
+    /// <summary>机器指纹注入缝（M8-01，设计 13 §4.4/TD-34）：Android 6+ 系统 MAC 全设备统一
+    /// 02:00:00:00:00:00（可通过 IsValidMac 校验）——默认采集生成的 macCode 会全设备同值，
+    /// 覆盖式恢复（OQ-14）按 macCode 判身份将互相顶号；壳注入 ANDROID_ID 派生指纹。
+    /// 默认 null＝平台采集（05 §10 现状，桌面零变化）。</summary>
+    public Func<string?>? MachineFingerprint { get; init; }
 }
 
 /// <summary>注册结果（向导展示：远程码/虚拟 IP/分组）。</summary>
@@ -97,7 +109,9 @@ public sealed class ClientRegistrationService(
         if (client.State != ControlClientState.NeedRegister)
             throw new ControlClientException($"当前状态 {client.State} 不可注册（须为 NeedRegister）");
 
-        var macCode = macCodeOverride ?? MacCodeProvider.Generate();
+        // M8-01 指纹注入（设计 13 §4.4/TD-34）：注入指纹**优先**——Android 枚举 MAC 全设备同值，
+        // 回退位序会被击穿（FromFingerprint 注记）；无注入源=平台采集现状
+        var macCode = macCodeOverride ?? MacCodeProvider.FromFingerprint(_options.MachineFingerprint);
         LastMacCode = macCode;
 
         // 未注册设备首个 Register 不签名（02 §2.2）；staticPubKey 承载 deviceSecret 的 ECIES 下发（OQ-15）

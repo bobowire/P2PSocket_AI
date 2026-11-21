@@ -6,7 +6,7 @@ import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import type { FormInstance, FormRules } from "element-plus";
-import { CodeText, ApiPaths, ApiError } from "@p2p/ui-shared";
+import { CodeText, ApiPaths, ApiError, useBreakpoint } from "@p2p/ui-shared";
 import { INVITE_CODE_MESSAGE, INVITE_CODE_PATTERN, normalizeInviteCode } from "./inviteCodeRule";
 import { api } from "../api";
 import { useSystemStore } from "../stores/system";
@@ -18,6 +18,7 @@ type WizardMode = "default" | "invite" | "account";
 const system = useSystemStore();
 const settings = useSettingsStore();
 const router = useRouter();
+const { isMobile } = useBreakpoint(); // M8-04：小屏表单纵排（设计 13 §7）
 
 const step = ref(0);
 const serverAddr = ref("");
@@ -140,9 +141,12 @@ onMounted(async () => {
 <template>
   <section class="wizard">
     <h2>首启向导</h2>
+    <!-- 小屏 simple 模式（2026-11-21 真机走查：「分组方式」标题在 393px 断行错版）：
+         EP 紧凑单行"1/3"式，桌面完整三步标题不变 -->
     <el-steps
       :active="step"
       finish-status="success"
+      :simple="isMobile"
       data-testid="wizard-steps"
     >
       <el-step title="服务端" />
@@ -159,6 +163,7 @@ onMounted(async () => {
         ref="addrForm"
         :model="{ serverAddr }"
         :rules="addrRules"
+        :label-position="isMobile ? 'top' : undefined"
         label-width="88px"
       >
         <el-form-item
@@ -208,6 +213,7 @@ onMounted(async () => {
         ref="groupForm"
         :model="{ inviteCode, username, password, deviceName }"
         :rules="groupRules"
+        :label-position="isMobile ? 'top' : undefined"
         label-width="88px"
       >
         <el-form-item label="分组方式">

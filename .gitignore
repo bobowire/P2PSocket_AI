@@ -32,3 +32,6 @@ test-results/
 # 本地敏感记录（含服务器凭据，勿入库）
 remote.md
 异常日志/
+
+# 真机验收原始 logcat 抓取（MB 级原始日志留本地不入库；验收报告/截图/手机 FileLog 导出正常入库）
+docs/验收记录/**/logs/logcat-*.txt

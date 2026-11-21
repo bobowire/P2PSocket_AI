@@ -53,3 +53,12 @@
   border-radius: var(--el-border-radius-base);
   padding: 0 6px;
 }
+
+/* 页面基础底色/前景（2026-11-21 移动端走查补固化）：html/body 无显式背景时，暗色浏览器/
+ * WebView 宿主会透出自身暗底，浅色主题页面的默认前景文字（--el-text-color-primary 深灰）
+ * 落在暗底上不可读（IAB 暗色面板实测透底）。simple-tech 深色皮肤对 html.simple-tech body
+ * 的底色声明在此之后加载、特异性更高，正常覆盖不受影响。 */
+body {
+  background-color: var(--el-bg-color);
+  color: var(--el-text-color-primary);
+}

@@ -3,9 +3,11 @@
 // page 1 起、pageSize 200 固定）；级别精确类别过滤（04 §2.6 token：debug/info/warning/
 // error/fatal）；导出=同源新窗口直下（text/plain 附件，服务端已带 content-disposition）。
 import { onMounted, ref, watch } from "vue";
-import { ApiPaths } from "@p2p/ui-shared";
+import { ApiPaths, useBreakpoint } from "@p2p/ui-shared";
 import type { LogPageView } from "@p2p/ui-shared";
 import { api } from "../api";
+
+const { isMobile } = useBreakpoint(); // M8-04：小屏卡片列表（设计 13 §7，桌面 DOM 不变）
 
 const LEVELS = [
   { value: "", label: "全部级别" },
@@ -94,6 +96,7 @@ onMounted(() => void refresh());
     </div>
 
     <el-table
+      v-if="!isMobile"
       :data="data?.items ?? []"
       data-testid="logs-table"
       size="small"
@@ -124,13 +127,41 @@ onMounted(() => void refresh());
       />
     </el-table>
 
+    <!-- M8-04 小屏卡片列表（设计 13 §7） -->
+    <div
+      v-else
+      class="card-list"
+      data-testid="logs-cards"
+    >
+      <div
+        v-for="(row, i) in data?.items ?? []"
+        :key="i"
+        class="log-card"
+      >
+        <div class="log-head">
+          <el-tag
+            :type="LEVEL_TAG[row.level] ?? 'info'"
+            size="small"
+          >
+            {{ row.level }}
+          </el-tag>
+          <span class="log-ts">{{ row.ts }}</span>
+        </div>
+        <div class="log-msg">{{ row.message }}</div>
+      </div>
+      <el-empty
+        v-if="(data?.items ?? []).length === 0"
+        description="暂无日志（或按级别过滤后为空）"
+      />
+    </div>
+
     <el-pagination
       class="pager"
       data-testid="logs-pagination"
       :total="data?.total ?? 0"
       :page-size="200"
       :current-page="page"
-      layout="total, prev, pager, next"
+      :layout="isMobile ? 'prev, pager, next' : 'total, prev, pager, next'"
       @current-change="(p: number) => (page = p)"
     />
   </section>
@@ -140,4 +171,16 @@ onMounted(() => void refresh());
 /* .toolbar 上收 ui-shared/styles/shared.css（2026-10-20 评估批次 B） */
 .level { width: 130px; }
 .pager { margin-top: 12px; justify-content: flex-end; }
+
+/* ── M8-04 小屏卡片列表（设计 13 §7）── */
+.card-list { display: flex; flex-direction: column; gap: 8px; }
+.log-card {
+  padding: 8px 10px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--el-border-radius-base);
+  font-size: 13px;
+}
+.log-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.log-ts { color: var(--el-text-color-secondary); font-size: 12px; }
+.log-msg { word-break: break-all; line-height: 1.6; }
 </style>

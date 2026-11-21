@@ -1,0 +1,124 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    M8-03 Android 客户端壳工程（设计 13 §2.4/§3、TD-31）：
+    - 纯 .NET Android（net10.0-android，工程级覆盖根 props TFM），不用 MAUI——只需 Activity/
+      前台服务/WebView 三个 Android 概念，跨平台抽象在 iOS 非目标前提下是纯负担；
+    - **不进 AI-P2P.sln**：dotnet build AI-P2P.sln 是 build.sh 第一步且 CI 同序，进 sln 即强迫
+      所有构建机装数 GB android workload——独立经 build/package.sh android 构建，build.sh 守卫式
+      探测（无 workload 跳过明示）；
+    - $(Version) → ApplicationDisplayVersion（08 §1 单一事实源延伸，src/Directory.Build.props 注入）；
+    - 前端 wwwroot 单一构建产物两头消费（PC=staticwebassets / APK=AndroidAsset，设计 13 §3.1）：
+      client-app 构建直写 P2P.Client/wwwroot，本工程以 AndroidAsset 打包进 APK，首启 SpaAssets
+      拷至应用数据目录（SpaRootOverride 指向）。
+
+    R2 处置（设计 13 §2.4/§13，dotnet/aspnetcore#35077）——Android 闭包不可携带
+    Microsoft.AspNetCore.App 框架引用（无 android RID 运行时包 → NETSDK1082，官方未支持目标），
+    且 android RID 流入被引 Exe 工程会索要 net10.0/android-* NuGet 资产目标（NETSDK1047）。
+    因此 P2P.Client 以**构建产物 dll 直引**（非 ProjectReference）：
+    ① BuildP2PClient 自举目标：dll 缺失或源码陈旧时先 dotnet build P2P.Client（Inputs/Outputs
+       增量；保证 dotnet build src/P2P.Client.Android -c Release 单命令自洽）；
+    ② bin 全量 dll 直引（p2p-client/P2P.Core/P2P.Nic/Serilog 及包依赖 CopyLocal 副本——
+       链接器零缺引用风险；与 ASP.NET 共享框架程序集同名时 RAR 版本统一取高）；
+    ③ AspNetCore 运行时程序集由本机 dotnet SDK 自带的共享框架目录直供（143 个程序集全集——
+       最小 hosting/Kestrel/最小 API/静态文件/WebSocket 链路整体消费，子集切分不可靠），
+       目录发现按版本取最高（内联代码任务，DOTNET_ROOT/常见安装位探测）。
+    NETSDK1150 随 ①②③ 一并消解（无 Exe 项目引用即无该校验路径）。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-android</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>P2P.Client.Android</RootNamespace>
+    <AssemblyName>p2p-client-android</AssemblyName>
+    <ApplicationId>com.p2psocket.client</ApplicationId>
+    <ApplicationVersion>1</ApplicationVersion> <!-- versionCode：随发布手动递进（08 §1 注记） -->
+    <ApplicationDisplayVersion>$(Version)</ApplicationDisplayVersion>
+    <SupportedOSPlatformVersion>26.0</SupportedOSPlatformVersion> <!-- Android 8.0：ANDROID_ID 签名作用域语义起点（设计 13 §4.4） -->
+    <AndroidManifest>Properties\AndroidManifest.xml</AndroidManifest>
+    <!-- R2 ① 产物路径（P2P.Client Release 构建输出） -->
+    <P2PClientBin>..\P2P.Client\bin\Release\net10.0</P2PClientBin>
+    <P2PClientDll>$(P2PClientBin)\p2p-client.dll</P2PClientDll>
+  </PropertyGroup>
+
+  <!-- R2 ①：自举构建 P2P.Client（源码陈旧即重建；项列表 Exclude 排除 bin/obj——生成物时间戳
+       恒新会造成每建必重入+文件锁）。间接引用 P2P.Core/P2P.Nic 源码一并入 Inputs——仅盯
+       P2P.Client 源码时 Core 改动会被增量检查漏掉（陈旧 dll 进 APK，M8-07 实测隐患 2026-11-21） -->
+  <ItemGroup>
+    <BootstrapP2PClientInput Include="..\P2P.Client\**\*.cs;..\P2P.Client\wwwroot\**\*;..\P2P.Client\P2P.Client.csproj"
+                             Exclude="..\P2P.Client\obj\**;..\P2P.Client\bin\**" />
+    <BootstrapP2PClientInput Include="..\P2P.Core\**\*.cs;..\P2P.Core\P2P.Core.csproj"
+                             Exclude="..\P2P.Core\obj\**;..\P2P.Core\bin\**" />
+    <BootstrapP2PClientInput Include="..\P2P.Nic\**\*.cs;..\P2P.Nic\P2P.Nic.csproj"
+                             Exclude="..\P2P.Nic\obj\**;..\P2P.Nic\bin\**" />
+  </ItemGroup>
+  <Target Name="BuildP2PClient" BeforeTargets="ResolveAssemblyReferences"
+          Inputs="@(BootstrapP2PClientInput)" Outputs="$(P2PClientDll)">
+    <Exec Command="dotnet build ..\P2P.Client\P2P.Client.csproj -c Release --nologo -m:1 -nr:false"
+          WorkingDirectory="$(MSBuildProjectDirectory)" />
+  </Target>
+
+  <!-- R2 ③：共享框架目录发现（DOTNET_ROOT/常见安装位探测，版本取最高；可经 AspNetSharedFxDir 外部覆盖） -->
+  <UsingTask TaskName="DiscoverLatestAspNetSharedFx" TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <BestDir Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System" />
+      <Using Namespace="System.IO" />
+      <Code Type="Fragment" Language="cs">
+        <![CDATA[
+        BestDir = "";
+        var roots = new[]
+        {
+            Environment.GetEnvironmentVariable("DOTNET_ROOT") ?? "",
+            @"C:\Program Files\dotnet",
+            "/usr/share/dotnet",
+            "/usr/lib/dotnet",
+        };
+        Version best = null;
+        foreach (var root in roots)
+        {
+            if (root.Length == 0) continue;
+            var baseDir = Path.Combine(root, "shared", "Microsoft.AspNetCore.App");
+            if (!Directory.Exists(baseDir)) continue;
+            foreach (var dir in Directory.GetDirectories(baseDir))
+                if (Version.TryParse(Path.GetFileName(dir), out var v) && (best == null || v > best))
+                {
+                    best = v;
+                    BestDir = dir;
+                }
+        }
+        ]]>
+      </Code>
+    </Task>
+  </UsingTask>
+
+  <Target Name="ReferenceAspNetSharedFx" BeforeTargets="ResolveAssemblyReferences" AfterTargets="BuildP2PClient">
+    <DiscoverLatestAspNetSharedFx Condition="'$(AspNetSharedFxDir)' == ''">
+      <Output TaskParameter="BestDir" PropertyName="AspNetSharedFxDir" />
+    </DiscoverLatestAspNetSharedFx>
+    <Error Condition="'$(AspNetSharedFxDir)' == '' or !Exists('$(AspNetSharedFxDir)')"
+           Text="未找到 ASP.NET Core 共享框架目录（DOTNET_ROOT/C:\Program Files\dotnet/常见 Linux 安装位均无）——R2 ③运行时程序集直供源缺失：构建机需安装 dotnet SDK 10（自带 AspNetCore 运行时）或经 -p:AspNetSharedFxDir= 显式指定" />
+    <ItemGroup>
+      <!-- 全路径 Include（CandidateAssemblyFiles 最高优先级）——避免按名解析命中 ref 打包目录的
+           仅元数据引用程序集（不复制→AOT 缺件）。排除 aspnetcorev2_inprocess：IIS 本机垫片
+           （非托管 PE，目录内唯一非程序集 dll——MSB3246 源） -->
+      <Reference Include="$(AspNetSharedFxDir)\*.dll" Exclude="$(AspNetSharedFxDir)\aspnetcorev2_inprocess.dll">
+        <Private>true</Private>
+      </Reference>
+    </ItemGroup>
+    <Message Importance="high" Text="R2 ③ AspNetCore 运行时程序集直供：$(AspNetSharedFxDir)" />
+  </Target>
+
+  <!-- R2 ②：P2P.Client 产物 dll 直引（bin 全量 CopyLocal——链接器零缺引用） -->
+  <ItemGroup>
+    <Reference Include="$(P2PClientBin)\*.dll">
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 前端产物（client-app 构建直写）：打包进 APK assets/wwwroot，首启拷出（SpaAssets） -->
+    <AndroidAsset Include="..\P2P.Client\wwwroot\**\*" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

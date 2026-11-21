@@ -30,16 +30,20 @@ public sealed class EcKeyPair : IDisposable
         return p.D!;
     }
 
-    /// <summary>从私钥标量重建密钥对（公钥点自动推导；32B P-256）。</summary>
+    /// <summary>从私钥标量重建密钥对（32B P-256）。Q=d×G 由托管标量乘补齐——Android 的
+    /// ImportParameters 要求 D 与 Q 成对（仅 D 抛 CryptographicException；Windows CNG 才
+    /// 支持仅 D 自动推导，M8-07 真机实测 2026-11-21）。</summary>
     public static EcKeyPair FromPrivateKey(ReadOnlySpan<byte> d32)
     {
         if (d32.Length != 32)
             throw new ArgumentException("私钥须为 32B P-256 标量", nameof(d32));
+        var (qx, qy) = P256.MultiplyGenerator(d32);
         var dh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
         dh.ImportParameters(new ECParameters
         {
             Curve = ECCurve.NamedCurves.nistP256,
             D = d32.ToArray(),
+            Q = new ECPoint { X = qx, Y = qy },
         });
         return new EcKeyPair(dh);
     }

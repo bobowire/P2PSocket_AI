@@ -9,7 +9,7 @@
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
-import { ApiError, CodeText } from "@p2p/ui-shared";
+import { ApiError, CodeText, useBreakpoint } from "@p2p/ui-shared";
 import PassiveBanner from "../components/PassiveBanner.vue";
 import { useDeviceStore, type DeviceItem } from "../stores/devices";
 import { useSystemStore } from "../stores/system";
@@ -17,6 +17,7 @@ import { useSystemStore } from "../stores/system";
 const devices = useDeviceStore();
 const system = useSystemStore();
 const router = useRouter();
+const { isMobile } = useBreakpoint(); // M8-04：小屏卡片列表（设计 13 §7，桌面 DOM 不变）
 
 const groupFilter = ref<string>("");
 
@@ -100,6 +101,7 @@ onMounted(() => void devices.refresh());
       </el-button>
     </div>
     <el-table
+      v-if="!isMobile"
       :data="filtered"
       data-testid="devices-table"
       empty-text="暂无可见设备（需同账号或同分组）"
@@ -242,6 +244,107 @@ onMounted(() => void devices.refresh());
         </template>
       </el-table-column>
     </el-table>
+
+    <!-- M8-04 小屏卡片列表（设计 13 §7：行数据纵排+关键操作保留；桌面 DOM 不变） -->
+    <div
+      v-else
+      class="card-list"
+      data-testid="devices-cards"
+    >
+      <el-card
+        v-for="row in filtered"
+        :key="row.deviceId"
+        class="row-card"
+        shadow="never"
+      >
+        <div class="card-head">
+          <span class="card-title">
+            <span
+              class="dot"
+              :class="{ on: row.online }"
+              role="img"
+              :aria-label="row.online ? '在线' : '离线'"
+            />
+            {{ row.deviceName }}
+          </span>
+          <el-tag
+            v-if="tunnelType(devices.tunnelBearers[row.deviceId])"
+            :type="devices.tunnelBearers[row.deviceId] === 'relay' ? 'warning' : 'success'"
+            size="small"
+          >
+            {{ tunnelType(devices.tunnelBearers[row.deviceId]) }}
+          </el-tag>
+        </div>
+        <div class="card-line">
+          <span class="k">远程码</span>
+          <CodeText
+            :value="row.remoteCode"
+            label="远程码"
+          />
+        </div>
+        <div class="card-line">
+          <span class="k">分组</span>
+          <span>
+            <el-tag
+              v-for="g in row.groups"
+              :key="g"
+              size="small"
+              class="tag"
+            >
+              {{ g }}
+            </el-tag>
+            <span v-if="row.groups.length === 0">—</span>
+          </span>
+        </div>
+        <div class="card-line">
+          <span class="k">开放网段</span>
+          <span v-if="row.lanSegments.length === 0">—</span>
+          <span v-else>
+            <code
+              v-for="s in row.lanSegments"
+              :key="s"
+              class="code-pill"
+            >{{ s }}</code>
+          </span>
+        </div>
+        <div class="card-line">
+          <span class="k">中继回退</span>
+          <el-switch
+            :model-value="devices.peers[row.deviceId]?.relayFallback ?? false"
+            data-testid="devices-relay-fallback"
+            @change="(v: string | number | boolean) => toggleRelay(row, v)"
+          />
+        </div>
+        <div class="card-line">
+          <span class="k">优先打洞模式</span>
+          <el-switch
+            :model-value="(devices.peers[row.deviceId]?.punchMode ?? 'tcp') === 'kcp'"
+            inline-prompt
+            inactive-text="TCP"
+            active-text="KCP"
+            data-testid="devices-punch-mode"
+            @change="(v: string | number | boolean) => togglePunchMode(row, v)"
+          />
+        </div>
+        <div class="card-actions">
+          <el-button
+            size="small"
+            type="primary"
+            plain
+            :disabled="isPassive"
+            title="带入远程码新建映射"
+            data-testid="devices-create-mapping"
+            @click="createMapping(row.remoteCode)"
+          >
+            建映射
+          </el-button>
+        </div>
+      </el-card>
+      <el-empty
+        v-if="filtered.length === 0"
+        description="暂无可见设备（需同账号或同分组）"
+      />
+    </div>
   </section>
 </template>
 
@@ -250,4 +353,13 @@ onMounted(() => void devices.refresh());
    （2026-10-20 评估批次 B：离线色统一灰） */
 .group-filter { width: 180px; }
 .tag { margin-right: 4px; }
+
+/* ── M8-04 小屏卡片列表（设计 13 §7）── */
+.card-list { display: flex; flex-direction: column; gap: 12px; }
+.row-card :deep(.el-card__body) { padding: 12px 14px; }
+.card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.card-title { font-weight: 600; font-size: 15px; display: inline-flex; align-items: center; gap: 6px; }
+.card-line { display: flex; gap: 10px; align-items: center; font-size: 13px; line-height: 2; word-break: break-all; }
+.card-line .k { flex-shrink: 0; color: var(--el-text-color-secondary); }
+.card-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
 </style>

@@ -54,10 +54,17 @@ exports[`AdminLayout > 侧边栏菜单 + 顶栏 + 主区插槽（快照） 1`] =
       data-v-e5e83559=""
     >
       <div
-        class="alert"
+        class="topbar-left"
         data-v-e5e83559=""
-        role="alert"
-      />
+      >
+        <!--v-if-->
+        <!--v-if-->
+        <div
+          class="alert"
+          data-v-e5e83559=""
+          role="alert"
+        />
+      </div>
       <div
         class="actions"
         data-v-e5e83559=""

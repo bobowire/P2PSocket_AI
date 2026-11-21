@@ -33,6 +33,12 @@ public sealed class LocalApiServices : IAsyncDisposable
     public DevicePinger? DevicePinger { get; }
     public Tunnel.TunnelHost? Tunnels { get; }
     public Func<Guid, string?>? PeerLabelLookup { get; }
+
+    /// <summary>生效虚拟 IP 展示缝（M8-01 归真，设计 13 §4.3）：null=读 state.VirtualIp（桌面现状）；
+    /// 无卡模式=引擎 <see cref="MappingEngine"/>.EffectiveBindIp（恒 127.0.0.1）——手机用户看到的
+    /// 「连接地址」即真实可达地址（映射卡/向导预览引导连 127.0.0.1:port）。</summary>
+    public Func<string>? EffectiveVirtualIp { get; }
+
     public LocalApiContext Context { get; }
     public StatusHub Hub { get; }
 
@@ -41,7 +47,7 @@ public sealed class LocalApiServices : IAsyncDisposable
         PunchScheduler scheduler, LanSegmentsStore? lanSegments = null, string? logsDir = null,
         SubnetConflictDetector? subnetConflicts = null, StunTester? stunTester = null,
         DevicePinger? devicePinger = null, Tunnel.TunnelHost? tunnels = null,
-        Func<Guid, string?>? peerLabelLookup = null)
+        Func<Guid, string?>? peerLabelLookup = null, Func<string>? effectiveVirtualIp = null)
     {
         Control = control;
         State = state;
@@ -57,6 +63,7 @@ public sealed class LocalApiServices : IAsyncDisposable
         DevicePinger = devicePinger;
         Tunnels = tunnels;
         PeerLabelLookup = peerLabelLookup;
+        EffectiveVirtualIp = effectiveVirtualIp;
         Context = new LocalApiContext();
         Hub = new StatusHub(mappings.Traffic); // mapping_stats 1s 采样源（04 §2.8）
 
@@ -97,10 +104,11 @@ public static class LocalWebApi
     public static IEndpointRouteBuilder MapLocalApi(this IEndpointRouteBuilder app, LocalApiServices services)
     {
         app.MapSystemApi(services.Control, services.State, services.Context, services.Hub,
-            services.SubnetConflicts); // v1.58：0x13 改名成功 → WS device_list 提示
+            services.SubnetConflicts, services.EffectiveVirtualIp); // v1.58：0x13 改名成功 → WS device_list 提示；M8-01 归真缝
         app.MapSettingsApi(services.Control, services.Settings);
         app.MapAuthApi(services.Control, services.Wizard, services.Context);
-        app.MapWizardApi(services.Control, services.Wizard, services.State, services.Settings, services.Context);
+        app.MapWizardApi(services.Control, services.Wizard, services.State, services.Settings, services.Context,
+            services.EffectiveVirtualIp); // M8-01 归真缝
         app.MapMappingApi(services.Mappings);
         app.MapStatsApi(services.Mappings); // M3-12 流量汇总/导出（FR-C-1002）
         app.MapDeviceApi(services.Control, services.State, services.Hub); // M2-15 加 0x14 重置端点

@@ -248,9 +248,25 @@ onMounted(() => {
 /* 关于项目卡（FR-C-812）：深色字面值（本页只在简易版渲染）；玻璃卡底/描边归 simple-tech.css */
 .about-card { margin-top: 28px; }
 .about-desc { margin: 0; line-height: 1.8; color: #cbd5e1; font-size: 13px; }
-.about-lines { margin-top: 12px; display: flex; align-items: center; gap: 10px; }
-.about-lines .muted { font-size: 13px; color: #8aa0bf; }
+.about-lines { margin-top: 12px; display: flex; align-items: center; gap: 10px; min-width: 0; }
+.about-lines .muted { font-size: 13px; color: #8aa0bf; flex-shrink: 0; }
+/* M8-04 小屏：长仓库 URL 换行收纳（el-link 白名单不换行会顶破 375px 卡片） */
+.about-lines :deep(.el-link) { white-space: normal; word-break: break-all; line-height: 1.5; }
 .about-more { margin: 14px 0 0; font-size: 12px; color: #8aa0bf; }
 .about-link { color: #67e8f9; text-decoration: none; }
 .about-link:hover { text-shadow: 0 0 10px rgba(34, 211, 238, 0.5); }
+
+/* ── 小屏（2026-11-21 真机走查修复）：三卡并排每卡仅 ~110px——「远程码」label 一字一行、
+   设备名/「共 N 条」硬断行、速率大字溢出 → 单列堆叠 + 数字降档 + 值行防断 ── */
+@media (max-width: 767px) {
+  .cards { grid-template-columns: 1fr; gap: 12px; }
+  .device-line { flex-wrap: wrap; }
+  .device-name { word-break: break-all; }
+  .code-line { justify-content: space-between; }
+  .rate-item { font-size: 20px; }
+  .map-total { font-size: 20px; white-space: nowrap; }
+  .map-breakdown { gap: 4px 16px; }
+  .cta { margin-top: 20px; }
+  .about-card { margin-top: 20px; }
+}
 </style>

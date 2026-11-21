@@ -12,7 +12,8 @@
 |---|---|
 | P2P.Server（服务端） | 部署在公网服务器：注册/授权/信令/STUN/中继兜底 + Web 管理后台 |
 | P2P.Client（客户端） | 部署在用户设备：系统服务 + 本地 Web 管理页 |
-| 虚拟网卡 | Windows Wintun / Linux TUN，本机统一监听地址 `100.64.0.2` |
+| P2P.Client.Android（Android 客户端，M8 编码收官/真机验收待配合） | App＋前台服务＋WebView 管理页，**端口映射模式**（映射监听 127.0.0.1、无虚拟网卡、零 VPN 权限）——手机任意 App 连 `127.0.0.1:端口` 直达远端内网；APK 经 `sh build/package.sh android` 产出（签名入 SHA256SUMS） |
+| 虚拟网卡 | Windows Wintun / Linux TUN，本机统一监听地址 `100.64.0.2`（Android 无卡模式不建网卡） |
 | Web 控制台 | 客户端简易/高级双模式 + 服务端管理后台（Vue 3 + Element Plus，SPA 嵌入二进制） |
 
 **设计原则**：控制面集中、数据面 P2P——服务端不做业务流量中转（打洞失败回退中继除外）；全链路不依赖 TLS——隧道 ECDH(P-256)+HKDF+AES-256-GCM 端到端加密，控制通道 HMAC-SHA256 防重放。
@@ -31,12 +32,12 @@
 ### 1.3 仓库结构（单仓库 AI-P2P.sln）
 
 ```
-src/     C# 后端：P2P.Core（协议/隧道/打洞/映射引擎）· P2P.Nic（虚拟网卡）· P2P.Server · P2P.Client
+src/     C# 后端：P2P.Core（协议/隧道/打洞/映射引擎）· P2P.Nic（虚拟网卡）· P2P.Server · P2P.Client · P2P.Client.Android（Android 壳，M8，不进主 sln）
 web/     前端：ui-shared（共享组件与 API 类型）· client-app（客户端 SPA）· server-app（服务端 SPA）
 tests/   xUnit 测试：Core / Server / Client / Nic 四项目 + 集成测试
 docs/    文档：prd（需求）· 技术设计文档 · 开发规范 · deploy（部署手册）· manual（使用手册）· 任务清单
-build/   build.sh 构建全链 · package.sh 打包交付（Windows Setup / Linux tar / 服务端 tar）
-deploy/  部署脚本（Windows 服务 / systemd unit）
+build/   build.sh 构建全链 · package.sh 打包交付（Windows Setup / Linux tar / 服务端 tar / Android APK）
+deploy/  部署脚本（Windows 服务 / systemd unit / Android keystore）
 ```
 
 开发者文档导航：[产品需求](docs/prd/README.md) · [技术设计](docs/技术设计文档/README.md) · [开发规范](docs/开发规范/README.md) · [任务清单](docs/任务清单/README.md)

@@ -26,6 +26,16 @@ jobs:
       - name: dotnet build（08 §2）
         run: dotnet build AI-P2P.sln -c Release
 
+      # android 壳（M8-05，设计 13 §8）：工程不进 sln，独立构建；workload 探测守卫——
+      # runner 未装 android workload 即跳过明示（不新增强制门禁，真机验收 M8-07 人工执行）
+      - name: android 壳构建（守卫式，无 workload 跳过）
+        run: |
+          if dotnet workload list 2>/dev/null | grep -qw android; then
+            dotnet build src/P2P.Client.Android -c Release
+          else
+            echo "android workload 未安装，跳过（本地/专用构建机经 build.sh 同口径构建）"
+          fi
+
       # export-ts：反射导出 API 类型 → ui-shared/types/api.d.ts（06 §5，M1-31 落地生成器）
       - name: export-ts 类型导出（06 §5、M1-31）
         run: dotnet run --project src/Tools/ExportTs -c Release

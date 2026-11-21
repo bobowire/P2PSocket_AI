@@ -102,4 +102,12 @@ import {
 .meta { margin-top: 4px; }
 .ms-title { font-weight: 600; }
 .ms-note { margin: 4px 0 0; font-size: 12px; color: var(--el-text-color-secondary); }
+
+/* ── 小屏（2026-11-21 真机走查修复）：descriptions 标签格被压至一字一行竖排、
+   长 GitHub 链接溢出裁切 → 标签禁换行保持横排、链接允许断行收纳 ── */
+@media (max-width: 767px) {
+  .meta :deep(.el-descriptions__label) { white-space: nowrap; }
+  .meta :deep(.el-descriptions__body) { font-size: 13px; }
+  .meta :deep(.el-link) { white-space: normal; word-break: break-all; line-height: 1.5; }
+}
 </style>

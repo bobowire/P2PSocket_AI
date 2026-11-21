@@ -19,7 +19,8 @@ public static class WizardApi
 
     public static IEndpointRouteBuilder MapWizardApi(this IEndpointRouteBuilder app,
         ControlClient control, ClientRegistrationService registration,
-        StateStore store, SettingsStore settings, LocalApiContext ctx)
+        StateStore store, SettingsStore settings, LocalApiContext ctx,
+        Func<string>? effectiveVirtualIp = null)
     {
         app.MapPost("/api/wizard/server-test", async (ServerTestRequest body, CancellationToken ct) =>
         {
@@ -87,7 +88,7 @@ public static class WizardApi
                         ctx.LoginUser = username;
                     }
                     ctx.LastRegistration = result;
-                    return Api.Ok(ResultView(result));
+                    return Api.Ok(ResultView(result, effectiveVirtualIp));
                 }
                 finally { ctx.WizardInProgress = false; }
             }
@@ -100,7 +101,7 @@ public static class WizardApi
             {
                 var result = ctx.LastRegistration
                     ?? throw new ApiException(ErrorCode.NotFound, "尚无注册结果（未完成向导）");
-                return Api.Ok(ResultView(result));
+                return Api.Ok(ResultView(result, effectiveVirtualIp));
             }
             catch (Exception e) { return Api.Fail(e); }
         });
@@ -108,11 +109,14 @@ public static class WizardApi
         return app;
     }
 
-    private static object ResultView(RegistrationResult r) => new
+    /// <summary>M8-01 展示归真（设计 13 §4.3）：注册成功预览的「连接地址」在无卡模式下归真为
+    /// 127.0.0.1（引擎生效绑定地址，注册完成即位——LoopbackMappingMode 生效点②由注册完成事件
+    /// 驱动）；桌面（缝 null）=服务端下发虚拟 IP 现状。</summary>
+    private static object ResultView(RegistrationResult r, Func<string>? effectiveVirtualIp) => new
     {
         deviceId = r.DeviceId,
         remoteCode = r.RemoteCode,
-        virtualIp = r.VirtualIp,
+        virtualIp = effectiveVirtualIp?.Invoke() ?? r.VirtualIp,
         groups = r.Groups.Select(g => new { groupId = g.GroupId, groupName = g.GroupName }),
     };
 

@@ -9,7 +9,7 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import type { FormInstance, FormRules } from "element-plus";
-import { ApiError, CodeText, type GroupRequestView } from "@p2p/ui-shared";
+import { ApiError, CodeText, dialogWidth, useBreakpoint, type GroupRequestView } from "@p2p/ui-shared";
 import PassiveBanner from "../components/PassiveBanner.vue";
 import { INVITE_CODE_MESSAGE, INVITE_CODE_PATTERN, normalizeInviteCode } from "./inviteCodeRule";
 import { useGroupStore, type GroupFormInput } from "../stores/groups";
@@ -21,6 +21,7 @@ const devices = useDeviceStore();
 const system = useSystemStore();
 
 const isPassive = computed(() => system.device?.capability === "passive");
+const { isMobile } = useBreakpoint(); // 2026-11-21：小屏卡片列表（表格 860px 定宽手机横向溢出，对齐 Devices 模式）
 
 const nameRules: FormRules = {
   name: [
@@ -328,6 +329,7 @@ onMounted(() => {
     </div>
 
     <el-table
+      v-if="!isMobile"
       :data="groups.items"
       data-testid="groups-table"
       empty-text="暂未加入任何分组（凭码入组或新建）"
@@ -373,6 +375,7 @@ onMounted(() => {
         </template>
       </el-table-column>
       <el-table-column
+        v-if="!isMobile"
         label="操作"
         width="350"
         fixed="right"
@@ -437,11 +440,109 @@ onMounted(() => {
       </el-table-column>
     </el-table>
 
+    <!-- 2026-11-21 小屏卡片列表（表格五列合计 860px 手机必横向溢出；行数据纵排+操作保留） -->
+    <div
+      v-else
+      class="card-list"
+      data-testid="groups-cards"
+    >
+      <el-card
+        v-for="row in groups.items"
+        :key="row.groupId"
+        class="row-card"
+        shadow="never"
+      >
+        <div class="card-head">
+          <span class="card-title">{{ row.groupName }}</span>
+          <el-tag
+            :type="row.isOwner ? 'primary' : 'info'"
+            size="small"
+          >
+            {{ row.isOwner ? "所有者" : "成员" }}
+          </el-tag>
+        </div>
+        <div class="card-line">
+          <span class="k">准入策略</span>
+          <el-tag
+            :type="row.policy === 'approval' ? 'warning' : 'success'"
+            size="small"
+          >
+            {{ row.policy === "approval" ? "需审批" : "自由加入" }}
+          </el-tag>
+        </div>
+        <div class="card-line">
+          <span class="k">成员数</span>
+          <span>{{ row.memberCount }}{{ row.isOwner ? `（待审：${pendingOf(row.groupId)}）` : "" }}</span>
+        </div>
+        <div class="card-actions">
+          <template v-if="row.isOwner">
+            <el-button
+              size="small"
+              :disabled="isPassive"
+              data-testid="groups-approve-entry"
+              @click="openApprove(row.groupId)"
+            >
+              审批
+            </el-button>
+            <el-button
+              size="small"
+              :disabled="isPassive"
+              data-testid="groups-invite"
+              @click="openInvite(row.groupId)"
+            >
+              邀请码
+            </el-button>
+            <el-button
+              size="small"
+              :disabled="isPassive"
+              data-testid="groups-members"
+              @click="openMembers(row.groupId)"
+            >
+              成员
+            </el-button>
+            <el-button
+              size="small"
+              :disabled="isPassive"
+              data-testid="groups-edit"
+              @click="openEdit(row.groupId)"
+            >
+              编辑
+            </el-button>
+            <el-button
+              size="small"
+              type="danger"
+              plain
+              :disabled="isPassive"
+              data-testid="groups-dissolve"
+              @click="dissolve(row.groupId, row.groupName)"
+            >
+              解散
+            </el-button>
+          </template>
+          <el-button
+            v-else
+            size="small"
+            type="warning"
+            plain
+            :disabled="isPassive"
+            data-testid="groups-leave"
+            @click="leave(row.groupId, row.groupName)"
+          >
+            退组
+          </el-button>
+        </div>
+      </el-card>
+      <el-empty
+        v-if="groups.items.length === 0"
+        description="暂未加入任何分组（凭码入组或新建）"
+      />
+    </div>
+
     <!-- 凭码入组 -->
     <el-dialog
       v-model="joinVisible"
       title="凭码入组"
-      width="380px"
+      :width="dialogWidth('380px')"
       data-testid="groups-join-dialog"
     >
       <el-form
@@ -480,7 +581,7 @@ onMounted(() => {
     <el-dialog
       v-model="createVisible"
       title="新建分组"
-      width="380px"
+      :width="dialogWidth('380px')"
       data-testid="groups-create-dialog"
     >
       <el-form
@@ -529,7 +630,7 @@ onMounted(() => {
     <el-dialog
       v-model="editVisible"
       title="编辑分组"
-      width="380px"
+      :width="dialogWidth('380px')"
       data-testid="groups-edit-dialog"
     >
       <el-form
@@ -575,7 +676,7 @@ onMounted(() => {
     <el-dialog
       v-model="inviteVisible"
       :title="`邀请码 · ${invite.groupName}`"
-      width="400px"
+      :width="dialogWidth('400px')"
       data-testid="groups-invite-dialog"
     >
       <div
@@ -622,7 +723,7 @@ onMounted(() => {
     <el-dialog
       v-model="approveVisible"
       :title="`审批 · ${approve.groupName}`"
-      width="560px"
+      :width="dialogWidth('560px')"
       data-testid="groups-approve-dialog"
     >
       <template v-if="approveItems.length > 0">
@@ -693,7 +794,7 @@ onMounted(() => {
     <el-dialog
       v-model="membersVisible"
       :title="`成员管理 · ${members.groupName}`"
-      width="520px"
+      :width="dialogWidth('520px')"
       data-testid="groups-members-dialog"
     >
       <el-table
@@ -747,4 +848,13 @@ onMounted(() => {
 /* .toolbar / .muted / .dot 上收 ui-shared/styles/shared.css（2026-10-20 评估批次 B） */
 .row { display: flex; gap: 8px; margin-top: 8px; }
 .pager { display: flex; justify-content: flex-end; margin-top: 8px; }
+
+/* ── 2026-11-21 小屏卡片列表（对齐 Devices 模式）── */
+.card-list { display: flex; flex-direction: column; gap: 12px; }
+.row-card :deep(.el-card__body) { padding: 12px 14px; }
+.card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.card-title { font-weight: 600; font-size: 15px; word-break: break-all; }
+.card-line { display: flex; gap: 10px; align-items: center; font-size: 13px; line-height: 2; word-break: break-all; }
+.card-line .k { flex-shrink: 0; color: var(--el-text-color-secondary); }
+.card-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
 </style>

@@ -63,9 +63,20 @@ public static class MacCodeProvider
                 ni.GetIPProperties().GatewayAddresses.Count > 0,
                 ni.NetworkInterfaceType is NetworkInterfaceType.Tunnel or NetworkInterfaceType.Loopback));
 
-    /// <summary>指纹 → 12 位 hex 充当 MAC（05 §10 ②回退）。</summary>
-    internal static string FingerprintHex(string fingerprint)
+    /// <summary>指纹 → 12 位 hex 充当 MAC（05 §10 ②回退；M8-01 起公开——Android 壳
+    /// ANDROID_ID 派生指纹复用同一纯函数，设计 13 §4.4）。</summary>
+    public static string FingerprintHex(string fingerprint)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(fingerprint)))[..12];
+
+    /// <summary>注入指纹优先生成 macCode（M8-01，设计 13 §4.4/TD-34）：注入源取到值=指纹派生
+    ///（SHA-256 前 12 位，与机器指纹回退同构）；无注入源或取值 null=平台采集（05 §10 现状）。
+    /// 优先而非回退：Android 6+ 枚举 MAC 全设备统一 02:00:00:00:00:00（可通过 IsValidMac 校验，
+    /// 非全零）——回退位序下注入永不生效，macCode 全设备同值、覆盖式恢复（OQ-14）互相顶号。</summary>
+    public static string FromFingerprint(Func<string?>? fingerprint)
+    {
+        var fp = fingerprint?.Invoke();
+        return fp is null ? Generate() : "P2P-" + FingerprintHex(fp);
+    }
 
     /// <summary>平台机器指纹：Windows 注册表 MachineGuid；Linux /etc/machine-id。</summary>
     private static string? ReadMachineFingerprint()

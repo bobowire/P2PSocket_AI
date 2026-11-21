@@ -102,4 +102,20 @@ public sealed class MacCodeProviderTests
     [Fact]
     public void 真机生成_格式合法()
         => Assert.Matches(new Regex(@"^P2P-[0-9A-F]{12}$"), MacCodeProvider.Generate());
+
+    [Fact]
+    public void 注入指纹_优先生效_非回退位序()
+    {
+        // M8-01（设计 13 §4.4/TD-34）：注入取到值=派生（本机存在合法网卡也不被枚举 MAC 击穿——
+        // Android 枚举 MAC 全设备同值 02:00:00:00:00:00 恰可通过 IsValidMac，回退位序下注入永不生效）
+        var macCode = MacCodeProvider.FromFingerprint(() => "android-id-123");
+        Assert.Equal("P2P-" + MacCodeProvider.FingerprintHex("android-id-123"), macCode);
+    }
+
+    [Fact]
+    public void 注入源缺失或取值null_回落平台采集()
+    {
+        Assert.Equal(MacCodeProvider.Generate(), MacCodeProvider.FromFingerprint(null));
+        Assert.Equal(MacCodeProvider.Generate(), MacCodeProvider.FromFingerprint(() => null));
+    }
 }

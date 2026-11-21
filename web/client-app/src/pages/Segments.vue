@@ -157,4 +157,11 @@ onMounted(() => void segments.refresh());
 .hint { margin-bottom: 12px; }
 .add-form { margin-bottom: 12px; }
 .cidr-input { width: 320px; }
+
+/* ── 小屏（2026-11-21 走查）：320px 定宽输入+按钮超出 393px 视口 → 输入收满宽自然换行 ── */
+@media (max-width: 767px) {
+  .cidr-input { width: 100%; }
+  .add-form :deep(.el-form-item) { margin-right: 0; width: 100%; }
+  .add-form :deep(.el-form-item .el-form-item__content) { width: 100%; }
+}
 </style>

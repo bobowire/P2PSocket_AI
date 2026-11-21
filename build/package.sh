@@ -1,9 +1,11 @@
 #!/bin/sh
 # 打包脚本（08 §2⑤，M4-01）：前端构建 → dotnet publish 单文件自包含 → out/ 产物目录（+Linux tar.gz 归档）。
-# 用法：sh build/package.sh [client-win|client-linux|server|all]   缺省 all
+# 用法：sh build/package.sh [client-win|client-linux|server|android|all]   缺省 all
 # 依赖：dotnet SDK 10、node ≥20、pnpm（corepack enable pnpm）。
 # Windows 客户端另需 Wintun.dll（官方 0.14.1 amd64，wintun.net；放 out/wintun/Wintun.dll，
 #   脚本自动拷入产物；未放置则警告提示手工分发——08 §3.1 Wintun 走程序目录分发不内嵌）。
+# android 目标（M8-05，设计 13 §8）另需 android workload（dotnet workload install android）
+#   + keytool（JDK/JRE 随 workload 依赖装）；签名 keystore=deploy/client-android/p2pclient.keystore。
 # publish 参数=部署文档验证过的口径（PublishSingleFile+SelfContained；M1-37/M3-18 实机轮沿用）。
 set -e
 cd "$(dirname "$0")/.."
@@ -48,7 +50,7 @@ sha256_manifest() { # $1=分发件路径（out/ 下）
 # 全产物汇总 SHA256SUMS（同格式多行）：按本次在位分发件全量重建（幂等；单目标运行不重复登记）
 write_sums() {
   : > out/SHA256SUMS
-  for f in out/P2PSocket-*.tar.gz out/P2PSocket-Client-Setup-*.exe; do
+  for f in out/P2PSocket-*.tar.gz out/P2PSocket-Client-Setup-*.exe out/P2PSocket-Client-Android-*.apk; do
     [ -f "$f" ] || continue
     [ -f "$f.sha256" ] || sha256_manifest "$f"
     cat "$f.sha256" >> out/SHA256SUMS
@@ -85,6 +87,35 @@ run_server() {
   archive server
   STATUS="$STATUS server(v$VERSION)"
 }
+run_android() { # M8-05（设计 13 §8）：Android APK——workload/keystore 守卫 + 自签发布件
+  if ! dotnet workload list 2>/dev/null | grep -qw android; then
+    echo "警告：android workload 未安装（dotnet workload install android）——跳过 android 打包"
+    STATUS="$STATUS android(跳过：workload 未装)"
+    return
+  fi
+  local keystore="deploy/client-android/p2pclient.keystore"
+  if [ ! -f "$keystore" ]; then
+    echo "警告：$keystore 不存在（M8-05 keytool 生成件）——跳过 android 打包"
+    STATUS="$STATUS android(跳过：keystore 缺失)"
+    return
+  fi
+  web_build --filter @p2p/client-app # wwwroot 先行（APK 以 AndroidAsset 打包之，设计 13 §3.1）
+  echo "==> publish src/P2P.Client.Android → out/client-android"
+  rm -rf out/client-android
+  dotnet publish src/P2P.Client.Android -c Release -o out/client-android \
+    -p:AndroidKeyStore=true \
+    -p:AndroidSigningKeyStore="$PWD/$keystore" \
+    -p:AndroidSigningKeyAlias=p2pclient \
+    -p:AndroidSigningKeyPass=p2psocket-android-2026 \
+    -p:AndroidSigningStorePass=p2psocket-android-2026
+  local apk
+  apk=$(ls out/client-android/*-Signed.apk 2>/dev/null | head -1)
+  [ -n "$apk" ] || { echo "产物校验失败：out/client-android 无签名 APK"; exit 1; }
+  echo "==> 发布件 $apk → out/P2PSocket-Client-Android-v$VERSION.apk"
+  mv "$apk" "out/P2PSocket-Client-Android-v$VERSION.apk"
+  sha256_manifest "out/P2PSocket-Client-Android-v$VERSION.apk"
+  STATUS="$STATUS android(v$VERSION)"
+}
 run_win_setup() { # M4-02：Inno Setup 安装包（依赖 client-win 产物；ISCC 缺失=环境依赖如实标注）
   run_client_win
   ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
@@ -112,9 +143,10 @@ case "$TARGET" in
   client-win) run_client_win ;;
   client-linux) run_client_linux ;;
   server) run_server ;;
+  android) run_android ;;
   win-setup) run_win_setup ;;
-  all) run_client_win; run_client_linux; run_server ;;
-  *) echo "未知目标：$TARGET（支持 client-win|client-linux|server|win-setup|all）"; exit 1 ;;
+  all) run_client_win; run_client_linux; run_server; run_android ;;
+  *) echo "未知目标：$TARGET（支持 client-win|client-linux|server|android|win-setup|all）"; exit 1 ;;
 esac
 
 write_sums # M5-14：分发件 .sha256 齐备后汇总（无分发件目标=空文件不报）

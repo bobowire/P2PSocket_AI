@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- M8-03 Android 清单（设计 13 §6）：
+     权限四枚（INTERNET/FOREGROUND_SERVICE(+SPECIAL_USE)/POST_NOTIFICATIONS/RECEIVE_BOOT_COMPLETED）；
+     specialUse 前台服务（Android 14+ 须声明类型；dataSync 正被收紧、connectedDevice 语义不符）；
+     WebView 明文 HTTP 仅放行 loopback（networkSecurityConfig，设计 13 §5.3——D11 口径在 Android 的
+     等价落地：本地 Web 全 HTTP，API 28+ 默认全局禁明文）。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+  <application android:label="@string/app_name"
+               android:networkSecurityConfig="@xml/network_security_config"
+               android:allowBackup="true">
+    <activity android:name="com.p2psocket.client.MainActivity"
+              android:exported="true"
+              android:launchMode="singleTask"
+              android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
+              android:theme="@android:style/Theme.Material.Light.NoActionBar">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
+
+    <service android:name="com.p2psocket.client.P2pForegroundService"
+             android:exported="false"
+             android:foregroundServiceType="specialUse">
+      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="P2P tunnel port-mapping keep-alive" />
+    </service>
+
+    <receiver android:name="com.p2psocket.client.BootReceiver" android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+      </intent-filter>
+    </receiver>
+  </application>
+</manifest>

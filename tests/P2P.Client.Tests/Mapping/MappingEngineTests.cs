@@ -243,6 +243,18 @@ public sealed class MappingEngineTests
     }
 
     [Fact]
+    public async Task EffectiveBindIp_初值构造后随UpdateVirtualIp联动()
+    {
+        // M8-01 展示归真口径（设计 13 §4.3/§10.1）：生效绑定地址=引擎当前绑定值的只读投影，
+        // 桌面模式注册后 UpdateVirtualIp 切至虚拟 IP、无卡模式恒 Loopback（联动由运行时两生效点驱动）
+        await using var topo = new Topology();
+        Assert.Equal(IPAddress.Loopback, topo.EngineA.EffectiveBindIp); // 构造初值（Topology 注入 Loopback）
+        var vip = IPAddress.Parse("100.64.0.2");
+        topo.EngineA.UpdateVirtualIp(vip);
+        Assert.Equal(vip, topo.EngineA.EffectiveBindIp); // 联动：展示随 UpdateVirtualIp 跟随
+    }
+
+    [Fact]
     public async Task invalid后重新enable_拆旧重建_重新排队打洞()
     {
         // 残留缺陷回归（P3 补恢复链，2026-10-11 实机发现）：MarkInvalid 拆毁运行时但不摘表、

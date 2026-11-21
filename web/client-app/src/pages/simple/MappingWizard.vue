@@ -8,7 +8,7 @@
 // create/enable 失败均在确认步内联呈现（enable 失败不回滚——映射已建为停用态，可列表启用）。
 import { computed, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
-import { ApiError } from "@p2p/ui-shared";
+import { ApiError, dialogWidth } from "@p2p/ui-shared";
 import { useDeviceStore } from "../../stores/devices";
 import { useSystemStore } from "../../stores/system";
 import { useMappingStore, type MappingFormInput } from "../../stores/mappings";
@@ -163,7 +163,7 @@ async function finish() {
   <el-dialog
     v-model="open"
     title="新建映射"
-    width="560px"
+    :width="dialogWidth('560px')"
     :close-on-click-modal="false"
     data-testid="simple-wizard"
   >

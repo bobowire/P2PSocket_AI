@@ -13,7 +13,7 @@
 //（05 §2.3 M2-21 预留收口：发起方 Ok/响应方 NotInitiator/未完 Busy/失败 Failed 三态反馈）。
 import { computed, onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
-import { ApiPaths, ApiError } from "@p2p/ui-shared";
+import { ApiPaths, ApiError, useBreakpoint } from "@p2p/ui-shared";
 import type { StunTestView, PingDeviceView, ServerTestView, TunnelView, TunnelListView, RekeyResultView, KcpBearerStatsSnapshot } from "@p2p/ui-shared";
 import { api } from "../api";
 import { useSettingsStore } from "../stores/settings";
@@ -21,6 +21,7 @@ import { useSystemStore } from "../stores/system";
 
 const settings = useSettingsStore();
 const system = useSystemStore();
+const { isMobile } = useBreakpoint(); // M8-04：小屏表单纵排（140px 定档标签小屏放不下，设计 13 §7）
 
 const addrs = ref<string[]>([]);
 const punchConcurrency = ref(3);
@@ -268,7 +269,10 @@ async function triggerRekey(t: TunnelView) {
   <section class="settings">
     <h2>设置</h2>
 
-    <el-form label-width="140px">
+    <el-form
+      :label-position="isMobile ? 'top' : undefined"
+      label-width="140px"
+    >
       <!-- 设备名（v1.58，FR-S-107）：注册后可改；PUT /api/device → 0x13 即时同步 -->
       <el-form-item label="设备名">
         <div
@@ -755,8 +759,13 @@ async function triggerRekey(t: TunnelView) {
 .rename-block { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; width: 100%; }
 .rename-block .el-input { width: 280px; }
 .rename-block .hint { flex-basis: 100%; }
-.addr-row { display: flex; gap: 8px; align-items: center; }
+.addr-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .addr-row .el-input { width: 280px; }
+/* M8-04 小屏（设计 13 §7）：280px 定宽输入+按钮组在 375px 视窗放不下——输入收满宽、按钮组随行换行 */
+@media (max-width: 767px) {
+  .addr-row .el-input { width: 100%; }
+  .rename-block .el-input { width: 100%; }
+}
 .addr-row .el-input.invalid :deep(input) { border-color: var(--el-color-danger); }
 .slider-block { width: 100%; }
 .hint { font-size: 12px; color: var(--el-text-color-secondary); margin-top: 4px; }

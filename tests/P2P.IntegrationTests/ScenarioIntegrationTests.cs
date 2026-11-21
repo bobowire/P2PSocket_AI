@@ -207,11 +207,15 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
     /// 「跨 NAT 不可直达」的必败前提（M2-18/22/32/37）；同网段用例显式开启驱动候选路径；
     /// latePunch：0x78 晚探测流程默认**关**（§5.2⑥ 测试缝——既有 A-3~A-5 断言旧流程行为，
     /// STUN 替身无交换语义）；S78 用例显式开启（TcpStunStub 交换语义 + 真实 0x78 服务端）；
-    /// logSink：M7-04 日志断言缝——四型/B 侧结果线 proto= 标注的收集器（缺省仅进测试产物）。</summary>
+    /// logSink：M7-04 日志断言缝——四型/B 侧结果线 proto= 标注的收集器（缺省仅进测试产物）；
+    /// loopbackMode：M8-01 无卡端口映射模式（设计 13 §4.1）——true=映射监听退绑 127.0.0.1 +
+    /// NoopNicManager（Android 壳同款装配）；machineFingerprint：M8-01 指纹注入缝（设计 13 §4.4）；
+    /// spaRoot：M8-02 SPA 物理目录托管缝（设计 13 §5.1）。</summary>
     private async Task<HttpClient> StartRuntimeAsync(SeededClient c, TimeSpan? relayRetryInterval = null,
         TimeSpan? statsInterval = null, SubnetConflictDetector.SurveySource? subnetSurvey = null,
         bool localCandidates = false, bool latePunch = false, bool kcpBearer = true,
-        System.Collections.Concurrent.ConcurrentQueue<string>? logSink = null)
+        System.Collections.Concurrent.ConcurrentQueue<string>? logSink = null,
+        bool loopbackMode = false, Func<string?>? machineFingerprint = null, string? spaRoot = null)
     {
         // 每运行时独立网卡替身：共享单例时后启动客户端的 Ensure 覆盖共享 BoundIp，先启动者健康探测
         // 即 IpMismatch → 双端 30s 周期互相重建乒乓（Restored 沿重绑映射监听，杀死在途传输——
@@ -219,7 +223,7 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
         var runtime = new ClientRuntime(new ClientRuntimeOptions
         {
             BaseDir = c.Dir,
-            NicOverride = new StubNicManager(),
+            NicOverride = loopbackMode ? new NoopNicManager() : new StubNicManager(), // M8-01 无卡模式产品级网卡
             PunchBindOverride = c.Ip,
             RelayRetryIntervalOverride = relayRetryInterval,
             StatsIntervalOverride = statsInterval,
@@ -227,6 +231,9 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
             LocalIpEnumeratorOverride = localCandidates ? null : EmptyLocalCandidates,
             DisableLatePunch = !latePunch,
             DisableKcpBearer = !kcpBearer, // M6-05 两态回归缝（默认 true=KCP 承载协商开）
+            LoopbackMappingMode = loopbackMode,
+            MachineFingerprintOverride = machineFingerprint,
+            SpaRootOverride = spaRoot,
         });
         runtime.Log += m =>
         {
@@ -2046,5 +2053,245 @@ public sealed class ScenarioIntegrationTests : IAsyncLifetime
             _ws.Dispose();
             try { await _loop; } catch { /* 收环随连接终止 */ }
         }
+    }
+
+    // ── M8 无卡端口映射模式 + Web 托管缝（设计 13 §10.2；任务清单 M8-01/M8-02）──────────
+
+    [Fact]
+    public async Task M8_01_无卡模式整跑_监听归真127_打洞直连_splice数据通()
+    {
+        // A=Android 壳同款装配（LoopbackMappingMode + NoopNicManager）；B=桌面现状对照组
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.RestrictedCone));
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("m8a-a", IPAddress.Parse("127.0.0.4"), group); // state.VirtualIp=回环别名（服务端记录形态）
+        var b = await SeedClientAsync("m8a-b", IPAddress.Parse("127.0.0.5"), group);
+        var httpA = await StartRuntimeAsync(a, loopbackMode: true);
+        var httpB = await StartRuntimeAsync(b);
+        await WaitPhaseAsync(httpA, "running");
+        await WaitPhaseAsync(httpB, "running");
+
+        // 展示归真（设计 13 §4.3 生效点② 经 API 面观察）：无卡=127.0.0.1（引擎生效绑定地址）、
+        // 桌面 B=state 值现状；state.VirtualIp 不篡改（本地真相与服务端记录一致）
+        var deviceA = await GetAsync(httpA, "/api/device");
+        Assert.Equal("127.0.0.1", deviceA.GetProperty("data").GetProperty("virtualIp").GetString());
+        var deviceB = await GetAsync(httpB, "/api/device");
+        Assert.Equal("127.0.0.5", deviceB.GetProperty("data").GetProperty("virtualIp").GetString());
+        var stateA = new StateStore(a.Dir);
+        stateA.Load();
+        Assert.Equal("127.0.0.4", stateA.State.VirtualIp);
+
+        // 冲突检测按生效地址推导：127.0.0.0/24 无冲突项（设计 13 §2.5）
+        var sys = await GetAsync(httpA, "/api/system/state");
+        Assert.True(sys.GetProperty("data").TryGetProperty("conflict", out var conflict) is false
+                    || conflict.ValueKind == JsonValueKind.Null);
+
+        var echoPort = FreePort();
+        StartEcho(echoPort);
+        var localPort = FreePort();
+        await CreateAndEnableMappingAsync(httpA, (ushort)localPort, b.RemoteCode, (ushort)echoPort);
+        Assert.Equal("direct", await WaitMappingStateAsync(httpA, "direct"));
+
+        // 核心语义：映射监听落 127.0.0.1（本机任意应用真实可连）——回环即入口（A-20 手机访问形态）
+        await AssertEchoRoundtripAsync(IPAddress.Loopback, localPort, RandomGenerator.Bytes(40 * 1024));
+        await AssertEchoRoundtripAsync(IPAddress.Loopback, localPort, RandomGenerator.Bytes(3 * 1024));
+    }
+
+    [Fact]
+    public async Task M8_01_注册链指纹注入_macCode为指纹派生_向导与设备页归真_桌面回归()
+    {
+        // 无卡模式全新注册（A1 同法）：向导注册 → 0x10 macCode=注入指纹派生（防全设备同 MAC 顶号，TD-34）
+        var dir = Path.Combine(_rootDir, "m8-reg");
+        Directory.CreateDirectory(dir);
+        var settings = new SettingsStore(dir);
+        await settings.SaveAsync(new ClientSettings { ServerAddrs = [], LocalWebPort = FreePort() });
+        var fingerprint = $"m8-android-{Guid.NewGuid():N}";
+
+        var runtime = new ClientRuntime(new ClientRuntimeOptions
+        {
+            BaseDir = dir,
+            NicOverride = new NoopNicManager(),
+            LoopbackMappingMode = true,
+            MachineFingerprintOverride = () => fingerprint,
+        });
+        _runtimes.Add(runtime);
+        await runtime.StartAsync();
+        using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{runtime.WebPort}") };
+        _https.Add(http);
+
+        var registered = await PostAsync(http, "/api/wizard/register", new
+        {
+            serverAddr = $"127.0.0.1:{_port}",
+            mode = "default",
+            deviceName = "m8-dev",
+        });
+        Assert.Equal(0, registered.GetProperty("code").GetInt32());
+        // 向导结果与结果缓存均归真（连接地址=127.0.0.1，非服务端下发 100.64.0.2）
+        Assert.Equal("127.0.0.1", registered.GetProperty("data").GetProperty("virtualIp").GetString());
+        var result = await GetAsync(http, "/api/wizard/result");
+        Assert.Equal("127.0.0.1", result.GetProperty("data").GetProperty("virtualIp").GetString());
+
+        await WaitPhaseAsync(http, "running");
+        // state 不篡改 + 设备页归真
+        var state = new StateStore(dir);
+        state.Load();
+        Assert.Equal("100.64.0.2", state.State.VirtualIp);
+        var device = await GetAsync(http, "/api/device");
+        Assert.Equal("127.0.0.1", device.GetProperty("data").GetProperty("virtualIp").GetString());
+
+        // macCode=指纹派生（ANDROID_ID 派生同构：FingerprintHex 纯函数）；Os=宿主平台值（string 值域）
+        await using var db = _factory.CreateDbContext();
+        var row = db.Devices.Single(d => d.DeviceName == "m8-dev");
+        Assert.Equal("P2P-" + P2P.Client.Registration.MacCodeProvider.FingerprintHex(fingerprint), row.MacCode);
+        Assert.Equal(OperatingSystem.IsWindows() ? "windows" : "linux", row.Os);
+
+        // 桌面回归（LoopbackMappingMode=false）：向导结果=服务端下发虚拟 IP 现状
+        var dir2 = Path.Combine(_rootDir, "m8-reg-desktop");
+        Directory.CreateDirectory(dir2);
+        var settings2 = new SettingsStore(dir2);
+        await settings2.SaveAsync(new ClientSettings { ServerAddrs = [], LocalWebPort = FreePort() });
+        var runtime2 = new ClientRuntime(new ClientRuntimeOptions { BaseDir = dir2, NicOverride = new NoopNicManager() });
+        _runtimes.Add(runtime2);
+        await runtime2.StartAsync();
+        using var http2 = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{runtime2.WebPort}") };
+        _https.Add(http2);
+        var registered2 = await PostAsync(http2, "/api/wizard/register", new
+        {
+            serverAddr = $"127.0.0.1:{_port}",
+            mode = "default",
+            deviceName = "m8-dev2",
+        });
+        Assert.Equal(0, registered2.GetProperty("code").GetInt32());
+        Assert.Equal("100.64.0.2", registered2.GetProperty("data").GetProperty("virtualIp").GetString());
+    }
+
+    [Fact]
+    public async Task M8_02_SpaRootOverride物理目录托管_入口与fallback生效_null回归()
+    {
+        // 物理目录（Android 壳 SpaAssets 拷出 <appData>/spa/<version>/ 形态，设计 13 §5.1）
+        var spaDir = Path.Combine(_rootDir, "m8-spa");
+        Directory.CreateDirectory(spaDir);
+        var marker = Guid.NewGuid().ToString("N");
+        await File.WriteAllTextAsync(Path.Combine(spaDir, "index.html"), $"<html>m8-spa-{marker}</html>");
+        await File.WriteAllTextAsync(Path.Combine(spaDir, "asset.txt"), $"asset-{marker}");
+
+        var dir = Path.Combine(_rootDir, "m8-spa-rt");
+        Directory.CreateDirectory(dir);
+        var settings = new SettingsStore(dir);
+        await settings.SaveAsync(new ClientSettings { ServerAddrs = [], LocalWebPort = FreePort() });
+        var runtime = new ClientRuntime(new ClientRuntimeOptions
+        {
+            BaseDir = dir,
+            NicOverride = new NoopNicManager(),
+            SpaRootOverride = spaDir,
+        });
+        _runtimes.Add(runtime);
+        await runtime.StartAsync();
+        using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{runtime.WebPort}") };
+        _https.Add(http);
+
+        // 入口 + SPA 路由 fallback（/wizard 回 index.html 由前端路由接管）+ 静态资产
+        Assert.Contains(marker, await http.GetStringAsync("/"));
+        Assert.Contains(marker, await http.GetStringAsync("/wizard"));
+        Assert.Contains(marker, await http.GetStringAsync("/asset.txt"));
+        // API 不被静态托管遮蔽
+        Assert.Equal("unregistered", await GetPhaseAsync(http));
+
+        // null=现状回归：testhost 无 staticwebassets 清单 → 无 SPA 端点（GET / 404）
+        var dir2 = Path.Combine(_rootDir, "m8-spa-null");
+        Directory.CreateDirectory(dir2);
+        var settings2 = new SettingsStore(dir2);
+        await settings2.SaveAsync(new ClientSettings { ServerAddrs = [], LocalWebPort = FreePort() });
+        var runtime2 = new ClientRuntime(new ClientRuntimeOptions { BaseDir = dir2, NicOverride = new NoopNicManager() });
+        _runtimes.Add(runtime2);
+        await runtime2.StartAsync();
+        using var http2 = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{runtime2.WebPort}") };
+        _https.Add(http2);
+        using var resp = await http2.GetAsync("/");
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task M8_02_Web宿主端口占用_启动降级不抛_映射隧道照常_API不可达如实呈现()
+    {
+        // Web 挂≠隧道挂（设计 13 §5.2）：A 的 Web 端口被占 → Kestrel 启动失败降级（ERROR 日志），
+        // 冷启动恢复的启用映射照常打洞直达——数据面以 127.0.0.1:localPort 事实可用为证
+        await StartSimulatorAsync(
+            (IPAddress.Parse("127.0.0.4"), UdpNatMode.FullCone),
+            (IPAddress.Parse("127.0.0.5"), UdpNatMode.RestrictedCone));
+        var group = await CreateGroupAsync();
+        var a = await SeedClientAsync("m8w-a", IPAddress.Parse("127.0.0.4"), group);
+        var b = await SeedClientAsync("m8w-b", IPAddress.Parse("127.0.0.5"), group);
+
+        // 服务端映射行 + 客户端启用中 state（ClientRuntimeIntegrationTests 重启恢复口径）
+        var echoPort = FreePort();
+        var localPort = FreePort();
+        var mappingId = Guid.NewGuid();
+        await using (var db = _factory.CreateDbContext())
+        {
+            db.Mappings.Add(new Mapping
+            {
+                Id = mappingId,
+                OwnerDeviceId = a.DeviceId,
+                Name = "m8w",
+                LocalPort = (ushort)localPort,
+                Proto = "tcp",
+                TargetDeviceId = b.DeviceId,
+                TargetAddr = "self",
+                TargetPort = (ushort)echoPort,
+                Enabled = true,
+                CreatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+        var stateA = new StateStore(a.Dir);
+        stateA.Load();
+        stateA.State.Mappings.Add(new StoredMapping(mappingId, "m8w", (ushort)localPort, "tcp",
+            b.RemoteCode, "self", (ushort)echoPort, Enabled: true));
+        await stateA.SaveAsync();
+
+        // 占住 A 的 Web 端口（accept 即关——API 请求得到「连接被关闭」而非挂起）
+        var settingsA = new SettingsStore(a.Dir);
+        settingsA.Load();
+        var webPort = settingsA.Settings.LocalWebPort;
+        var squatter = new TcpListener(IPAddress.Loopback, webPort);
+        squatter.Start();
+        using var squatterCts = new CancellationTokenSource();
+        var squatterLoop = Task.Run(async () =>
+        {
+            while (!squatterCts.IsCancellationRequested)
+            {
+                TcpClient client;
+                try { client = await squatter.AcceptTcpClientAsync(squatterCts.Token); }
+                catch (Exception e) when (e is OperationCanceledException or SocketException or ObjectDisposedException) { break; }
+                client.Close();
+            }
+        });
+
+        var logs = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        var httpB = await StartRuntimeAsync(b);
+        var httpA = await StartRuntimeAsync(a, logSink: logs, loopbackMode: true); // 降级不抛——StartAsync 正常返回
+        await WaitPhaseAsync(httpB, "running");
+
+        // 降级日志如实呈现（设计 13 §5.2：ERROR 级语义入 [web] 行）
+        Assert.Contains(logs, m => m.Contains("[web]") && m.Contains("本地 Web 宿主启动失败"));
+
+        // API 不可达如实呈现（端口被占：连接即被关闭）
+        await Assert.ThrowsAnyAsync<HttpRequestException>(() => httpA.GetAsync("/api/system/state"));
+
+        // 数据面照常：冷启动恢复启用映射 → 打洞直达 → 回环 splice 通（Web 死活与隧道无关）
+        StartEcho(echoPort);
+        var payload = RandomGenerator.Bytes(40 * 1024);
+        var deadline = Environment.TickCount64 + 30_000;
+        while (true)
+        {
+            try { await AssertEchoRoundtripAsync(IPAddress.Loopback, localPort, payload); break; }
+            catch (Exception) when (Environment.TickCount64 < deadline) { await Task.Delay(200); }
+        }
+
+        squatterCts.Cancel();
+        squatter.Stop();
+        try { await squatterLoop; } catch { /* 停机关闭 */ }
     }
 }

@@ -10,6 +10,10 @@
     </PackageReference>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- M8-06 串行化配置（跨类串扰治理，详见文件头注释于 git 提交说明） -->
+    <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
     <PackageReference Include="xunit.runner.visualstudio" Version="4.0.0">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>

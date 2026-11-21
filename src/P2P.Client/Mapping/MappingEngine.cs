@@ -147,6 +147,11 @@ public sealed class MappingEngine : ITunnelChannelHandler, IAsyncDisposable
     /// 该时点客户端必然无已启用映射（未注册期间无映射可启），故无既有监听迁移需求。</summary>
     public void UpdateVirtualIp(IPAddress virtualIp) => _virtualIp = virtualIp;
 
+    /// <summary>生效监听绑定地址（M8-01 展示归真，设计 13 §4.3）：引擎当前绑定值——桌面模式＝
+    /// 虚拟 IP（注册前 Loopback 兜底），无卡模式恒 127.0.0.1（LoopbackMappingMode 两处生效点）。
+    /// 只读投影；变更仅经 <see cref="UpdateVirtualIp"/>。state.VirtualIp 保持服务端下发真值不篡改。</summary>
+    public IPAddress EffectiveBindIp => _virtualIp;
+
     private sealed class Runtime
     {
         public required MappingConfig Config;

@@ -6,6 +6,8 @@ export type { DeviceCardModel } from "./components/DeviceCard.vue";
 export { default as AdminLayout } from "./layouts/AdminLayout.vue";
 export type { LayoutMenuItem } from "./layouts/AdminLayout.vue";
 export { useApi, createApiClient, ApiError, ERROR_TEXT, apiPath } from "./composables/useApi";
+// M8-04 小屏断点基础设施（设计 13 §7）：全站首个媒体断点（V-2 欠账补齐）
+export { useBreakpoint, dialogWidth, MOBILE_BREAKPOINT } from "./composables/useBreakpoint";
 export {
   useWs,
   RESYNC_RESOURCES,

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- M8-03 明文策略（设计 13 §5.3）：API 28+ 默认全局禁 cleartext——本地 Web 全 HTTP
+     （含 WebSocket ws://127.0.0.1），仅对 loopback 域放行，不开放其它明文目标。 -->
+<network-security-config>
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="false">127.0.0.1</domain>
+    <domain includeSubdomains="false">localhost</domain>
+  </domain-config>
+</network-security-config>

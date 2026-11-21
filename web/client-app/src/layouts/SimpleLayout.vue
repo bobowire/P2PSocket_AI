@@ -7,9 +7,10 @@
 // 科技感主题（用户指令 2026-10-20）：挂载期给 <html> 加 dark（EP 官方暗色变量，全局
 // 生效含 teleport 弹层）+ simple-tech（simple-tech.css 皮肤），卸载期摘除——高级版/
 // 登录页/向导页保持浅色出厂态，切换即还原。
-import { computed, inject, onBeforeUnmount, onMounted, type Ref } from "vue";
+import { computed, inject, type Ref } from "vue";
 import { useSystemStore } from "../stores/system";
 import { useAuthStore } from "../stores/auth";
+import { useBreakpoint } from "@p2p/ui-shared";
 import SubnetConflictBanner from "../components/SubnetConflictBanner.vue";
 import "./simple-tech.css";
 
@@ -22,6 +23,7 @@ const TABS = [
 const system = useSystemStore();
 const auth = useAuthStore();
 const wsAlert = inject<Ref<string | undefined> | undefined>("simpleAlert", undefined);
+const { isMobile } = useBreakpoint(); // M8-04：小屏 tab 溢出滚动 + 身份文本让位（设计 13 §7）
 
 const online = computed(() => system.state?.serverReachable ?? false);
 const headerText = computed(() =>
@@ -30,12 +32,16 @@ const headerText = computed(() =>
     : "未登录",
 );
 
-onMounted(() => document.documentElement.classList.add("dark", "simple-tech"));
-onBeforeUnmount(() => document.documentElement.classList.remove("dark", "simple-tech"));
+// 主题类（html.dark+simple-tech）挂/摘已上收 App.vue 路由级集中管理（2026-11-21 移动端
+// 走查：卸载钩子在真机 WebView 存在清理不生效路径致"黑底白卡"，集中式幂等切换根治）——
+// 此处不再操作 <html>，仅保留 simple-tech.css 样式引入。
 </script>
 
 <template>
-  <div class="simple-layout">
+  <div
+    class="simple-layout"
+    :class="{ mobile: isMobile }"
+  >
     <header class="simple-header">
       <div class="header-inner">
         <RouterLink
@@ -193,4 +199,13 @@ onBeforeUnmount(() => document.documentElement.classList.remove("dark", "simple-
   padding: 20px 16px 40px;
   box-sizing: border-box;
 }
+
+/* ── M8-04 小屏（设计 13 §7）：tab 溢出横向滚动、身份文本让位、内边距收窄 ── */
+.mobile .header-inner { gap: 10px; padding: 0 10px; }
+.mobile .tabs { overflow-x: auto; scrollbar-width: none; }
+.mobile .tabs::-webkit-scrollbar { display: none; }
+.mobile .tab { padding: 6px 10px; white-space: nowrap; }
+.mobile .who { display: none; }
+.mobile .header-right { gap: 6px; }
+.mobile .simple-main { padding: 14px 10px 32px; }
 </style>

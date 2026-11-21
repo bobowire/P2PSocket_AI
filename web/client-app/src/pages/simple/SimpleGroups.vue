@@ -5,7 +5,7 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import type { FormInstance } from "element-plus";
-import { ApiError } from "@p2p/ui-shared";
+import { ApiError, dialogWidth } from "@p2p/ui-shared";
 import PassiveBanner from "../../components/PassiveBanner.vue";
 import { useGroupStore } from "../../stores/groups";
 import { useSystemStore } from "../../stores/system";
@@ -133,7 +133,7 @@ onMounted(() => {
     <el-dialog
       v-model="joinVisible"
       title="凭码入组"
-      width="420px"
+      :width="dialogWidth('420px')"
       data-testid="simple-join-dialog"
     >
       <el-form

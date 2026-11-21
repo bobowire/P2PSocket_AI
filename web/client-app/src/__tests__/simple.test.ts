@@ -11,11 +11,18 @@ import { RouterView } from "vue-router";
 import { routes } from "../router";
 import { createDefaultState } from "../mocks/handlers";
 import { useMappingStore } from "../stores/mappings";
+import { useSimpleThemeClass } from "../theme";
 import { server, live, mountPage, clickMessageBox } from "./harness";
 
-// 挂载根=纯 <RouterView/>（模拟 App.vue 渲染链）：手动直挂 SimpleLayout 会让其内层
-// RouterView 缺 depth 注入而把布局自身再渲染一层（实测 6 tab 重复）。
-const Root = defineComponent({ render: () => h(RouterView) });
+// 挂载根=<RouterView/>+主题类 composable（模拟 App.vue 渲染链）：手动直挂 SimpleLayout
+// 会让其内层 RouterView 缺 depth 注入而把布局自身再渲染一层（实测 6 tab 重复）。
+// 主题类管理 2026-11-21 上收 useSimpleThemeClass（App.vue 同款接线），Root 同走生产实现。
+const Root = defineComponent({
+  setup() {
+    useSimpleThemeClass();
+    return () => h(RouterView);
+  },
+});
 
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
 afterEach(() => {
