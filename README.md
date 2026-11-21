@@ -100,6 +100,7 @@ deploy/  部署脚本（Windows 服务 / systemd unit / Android keystore）
 1. [服务端部署手册](docs/deploy/服务端部署手册.md)——公网服务器安装 P2P.Server、放行端口、初始化管理员
 2. [Windows 客户端部署手册](docs/deploy/Windows客户端部署手册.md)——安装包部署，注册为系统服务
 3. [Linux 客户端部署手册](docs/deploy/Linux客户端部署手册.md)——systemd 部署
+4. [Android 客户端部署手册](docs/deploy/Android客户端部署手册.md)——构建签名 APK、sideload 装机、厂商权限与升级（M8）
 
 **第二步：日常使用**（详见 [用户使用手册](docs/manual/用户使用手册.md)）
 
@@ -115,6 +116,7 @@ deploy/  部署脚本（Windows 服务 / systemd unit / Android keystore）
 ```bash
 sh build/build.sh            # 一条命令全链：dotnet build → API 类型导出 → 前端构建 → dotnet test
 sh build/package.sh all      # 打包交付物：Windows Setup / Linux tar / 服务端 tar
+sh build/package.sh android  # Android 签名 APK（需 android workload，见 docs/deploy/Android客户端部署手册.md）
 ```
 
 ## 6. 项目里程碑时间
