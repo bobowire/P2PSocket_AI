@@ -1054,6 +1054,30 @@ public sealed class LocalWebApiIntegrationTests : IAsyncLifetime
         Assert.Equal(ErrorCode.ForbiddenPassive, (await GetAsync(stackA, "/api/groups")).code);
     }
 
+    [Fact]
+    public async Task 分组列表_同账号第二设备_含自有未加入组()
+    {
+        // 2026-11-22 口径扩展（0x42）：已登录 = 账号自有分组 ∪ 本设备已加入分组——
+        // 同账号第二台设备（未入组）也能看到账号创建的分组并可管理（isOwner=true）
+        var a = await SeedDeviceAsync("grp-owner2");
+        var b = await SeedDeviceAsync("grp-second");
+        await using var stackA = await StartStackAsync(a);
+        await using var stackB = await StartStackAsync(b);
+
+        var created = await PostAsync(stackA, "/api/groups", new { name = "账号自有组", joinPolicy = "free" });
+        Assert.Equal(ErrorCode.Ok, created.code);
+        var groupId = created.data!.Value.GetProperty("groupId").GetGuid();
+
+        // B（同账号、未加入）视角：自有组在列、isOwner=true、成员数仅创建设备
+        var viewB = await GetAsync(stackB, "/api/groups");
+        Assert.Equal(ErrorCode.Ok, viewB.code);
+        var item = viewB.data!.Value.GetProperty("items").EnumerateArray()
+            .Single(i => i.GetProperty("groupId").GetGuid() == groupId);
+        Assert.True(item.GetProperty("isOwner").GetBoolean());
+        Assert.Equal("free", item.GetProperty("policy").GetString());
+        Assert.Equal(1u, item.GetProperty("memberCount").GetUInt32());
+    }
+
     // ── ⑩ lan-segments CRUD（M2-27，04 §2.5：0x63 转发 + 镜像收口 + passive 允许）──
 
     [Fact]

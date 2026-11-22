@@ -202,7 +202,8 @@ public sealed record DeviceListUpdate(
 // ── 0x42 分组列表（M2-27 定案：本地 /api/groups 的协议侧缺口——0x40 列表项仅回组名无
 //    groupId/owner，分组页离开/编辑/解散/审批等 0x52~0x57 操作均需 groupId；加法演进 02 §7）──
 
-/// <summary>0x42 C→S：请求本设备已加入分组全量（无附加载荷；主动类——passive 拒 2002）。</summary>
+/// <summary>0x42 C→S：请求分组列表——本设备已加入 ∪（已登录）账号自有分组（2026-11-22
+/// 口径扩展，PRD 05 §1 v0.20；无附加载荷；主动类——passive 拒 2002）。</summary>
 [MessagePackObject]
 public sealed record GroupListRequest(
     [property: Key(0)] uint Seq,

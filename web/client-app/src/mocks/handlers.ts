@@ -63,7 +63,7 @@ export interface MockState {
     lanSegments: string[];
   }[];
   mappings: MockMapping[];
-  groups: MockGroup[]; // M2-27：已加入分组（04 §2.4 /api/groups）
+  groups: MockGroup[]; // M2-27：分组列表=已加入∪自有（04 §2.4 /api/groups；2026-11-22 服务端口径扩展，mock 形状不变）
   joinRequests: MockJoinRequest[]; // 待审批申请（所有者侧聚合）
   lanSegments: MockLanSegment[]; // M2-27：开放内网段白名单（04 §2.5）
   peers: Record<string, { relayFallback: boolean; punchMode: string }>; // M2-23+M7-01：deviceId → 设备级配置双字段
@@ -622,7 +622,7 @@ export function createHandlers(state: MockState = createDefaultState()) {
     http.post("*/api/groups/:id/leave", ({ params }) => {
       const i = state.groups.findIndex((x) => x.groupId === params.id);
       if (i < 0 || state.groups[i].memberCount <= 0) return fail(1001, "not_member");
-      state.groups.splice(i, 1); // 退组后不再出现在 0x42 已加入列表（04 §2.4 语义）
+      state.groups.splice(i, 1); // 退组后从列表移除（mock 简化——自有组真实口径仍列，2026-11-22 服务端扩展）
       return ok(null);
     }),
     http.put("*/api/groups/:id", async ({ request, params }) => {

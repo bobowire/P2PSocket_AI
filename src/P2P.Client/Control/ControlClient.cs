@@ -618,7 +618,7 @@ public sealed class ControlClient : IAsyncDisposable
         MsgType.UserChangePassword => PcpCodec.Decode<UserChangePasswordAck>(msgpack), // 0x23 同族（M2-27 /api/auth/password）
         MsgType.DeviceList => PcpCodec.Decode<DeviceListResponse>(msgpack),
         MsgType.DeviceListUpdate => PcpCodec.Decode<DeviceListUpdate>(msgpack), // 0x41 提示帧（M2-15 → WS device_list）
-        MsgType.GroupList => PcpCodec.Decode<GroupListResponse>(msgpack),      // 0x42 已加入分组（M2-27 /api/groups）
+        MsgType.GroupList => PcpCodec.Decode<GroupListResponse>(msgpack),      // 0x42 分组列表（M2-27 /api/groups，2026-11-22 扩展）
         MsgType.LanSegmentsUpsert => PcpCodec.Decode<LanSegmentsUpsertAck>(msgpack), // 0x63 同族（上报接线 M2-27）
         MsgType.GroupCreate => PcpCodec.Decode<GroupCreateAck>(msgpack),
         MsgType.GroupJoin => PcpCodec.Decode<GroupJoinAck>(msgpack),           // 0x51 凭码入组（M2-27 /api/groups join）

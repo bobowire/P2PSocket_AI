@@ -49,7 +49,7 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/devices` | 可见设备列表（账号 ∪ 分组），字段：deviceId/deviceName/remoteCode/virtualIp/online/groups[]/lanSegments[]；groups[] 按查看者视角（v1.90/PRD 05 §2 v0.19）——本账号设备全量、跨账号设备仅与查看设备共同分组 |
-| GET | `/api/groups` | 已加入分组 + 待审批申请（若为所有者） |
+| GET | `/api/groups` | 分组列表（本设备已加入 ∪[已登录]账号自有分组，v1.91——同账号第二台设备可见账号创建的分组）+ 待审批申请（若为所有者） |
 | POST | `/api/groups` | `{ name, joinPolicy }` 建组（FR-C-805） |
 | POST | `/api/groups/join` | `{ inviteCode }` 凭码入组 |
 | POST | `/api/groups/{id}/leave` | 退出（触发 0x75 联动清理授权） |

@@ -11,7 +11,7 @@ namespace P2P.Server.Services;
 /// M2-09 挂载分组全量 0x51/0x52/0x53/0x54/0x57（凭码入组/自退/审批/邀请码/移出）；
 /// M2-11 挂载白名单 0x63 LanSegmentsUpsert（passive 允许，本机管理类）；
 /// M2-12 挂载 0x14 RemoteCodeReset（远程码重置；passive 允许，本机管理类）；
-/// M2-27 挂载 0x42 GroupList（已加入分组列表，本地 /api/groups 数据源）与 0x23 改密（FR-S-205）。
+/// M2-27 挂载 0x42 GroupList（分组列表=已加入∪自有，本地 /api/groups 数据源）与 0x23 改密（FR-S-205）。
 /// </summary>
 public sealed class ControlMessageRouter
 {
@@ -107,7 +107,7 @@ public sealed class ControlMessageRouter
             case DeviceListRequest deviceList:
                 await _group.HandleDeviceListAsync(session, deviceList);
                 break;
-            case GroupListRequest groupList: // 0x42 已加入分组列表（M2-27，FR-C-805 / 本地 /api/groups）
+            case GroupListRequest groupList: // 0x42 分组列表（M2-27/2026-11-22 扩展，FR-C-805 / 本地 /api/groups）
                 await _group.HandleGroupListAsync(session, groupList);
                 break;
             case PunchRequest punchRequest:

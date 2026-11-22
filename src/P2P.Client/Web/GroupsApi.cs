@@ -1,5 +1,6 @@
 // M2-27 分组管理端点（04 §2.4，转发 0x42/0x50~0x57）：
-// - GET /api/groups = 0x42 已加入分组 + 逐自有组 0x53 List 聚合待审批（组量级小，不改 0x53 语义）；
+// - GET /api/groups = 0x42 分组列表（本设备已加入 ∪[已登录]账号自有分组——2026-11-22 口径
+//   扩展，同账号第二台设备可见账号创建的分组）+ 逐自有组 0x53 List 聚合待审批（组量级小，不改 0x53 语义）；
 // - 建/入/退/编辑/解散/移出/邀请码/审批全为薄转发；主动类消息 passive 由 ControlClient 本地拒发 2002；
 // - 成员资格变更后 hub 发 device_list 提示（0x40 摘要含 groups[]；服务端侧 0x41 推送由 M2-10 联动）；
 // - 建组空名服务端回 GroupId=Empty（诚实 Ack 不误报）：本地前置校验 + Empty 判重防线。
@@ -15,7 +16,7 @@ public static class GroupsApi
     public static IEndpointRouteBuilder MapGroupsApi(this IEndpointRouteBuilder app,
         ControlClient control, StatusHub hub)
     {
-        // 已加入分组 + 待审批申请（04 §2.4：requests 仅所有者侧，聚合到自有组）
+        // 分组列表（已加入 ∪ 自有）+ 待审批申请（04 §2.4：requests 仅所有者侧，聚合到自有组）
         app.MapGet("/api/groups", async (CancellationToken ct) =>
         {
             try

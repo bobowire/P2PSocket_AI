@@ -13,7 +13,8 @@ namespace P2P.Server.Tests;
 /// 分组与设备列表测试（02 §2.4 0x50~0x57/0x40）。
 /// M1-16：分页边界（空/恰满/越界 offset）、0x50/0x55/0x56 权限与生命周期、解散后可见性回收。
 /// M2-09：凭码入组（free/approval 双策略）、审批队列、邀请码生成/撤销/唯一性、退组/移出可见性回收。
-/// M2-27：0x42 已加入分组列表（isOwner/memberCount/policy，本地 /api/groups 数据源）。
+/// M2-27：0x42 已加入分组列表（isOwner/memberCount/policy，本地 /api/groups 数据源）；
+/// 2026-11-22 口径扩展：已登录会话并入账号自有分组（同账号第二台设备可见）。
 /// </summary>
 public sealed class GroupTests : IAsyncLifetime
 {
@@ -774,6 +775,32 @@ public sealed class GroupTests : IAsyncLifetime
 
         _ = ownerId;
         _ = joinerId;
+    }
+
+    [Fact]
+    public async Task GroupList_LoginIncludesOwnedUnjoined()
+    {
+        // 2026-11-22 口径扩展：同账号第二台设备（登录但未加入）也能看到账号自有分组——
+        // 此前 0x42 仅查本设备成员行，账号创建的分组对第二台设备不可见，管理入口缺席
+        var (owner, _) = await ConnectLoggedInAsync("owner"); // 设备 A（admin）：建组即首成员
+        await owner.SendAsync(new GroupCreate(owner.NextSeq(), owner.Now(), MsgType.GroupCreate,
+            "账号自有组", JoinPolicy.Approval));
+        var owned = await owner.ReceiveAsync<GroupCreateAck>();
+        var ownedId = owned!.GroupId;
+
+        var (second, _) = await ConnectLoggedInAsync("second"); // 设备 B：同账号，未加入该组
+        var list = await GroupListAsync(second);
+        var item = list.Items.Single(i => i.GroupId == ownedId);
+        Assert.True(item.IsOwner);                              // 分组属于账号（PRD 05 决策 D8）
+        Assert.Equal(JoinPolicy.Approval, item.Policy);
+        Assert.Equal(1u, item.MemberCount);                     // 仅创建设备在组，B 未加入不计入
+        Assert.Contains(list.Items, i => i.GroupName == DbInitializer.DefaultGroupName); // 成员行不受影响
+
+        // 未登录设备：自有组分支恒假，行为与扩展前一致（仅成员行）
+        var (anon, _) = await ConnectRegisteredAsync("anon");
+        var anonList = await GroupListAsync(anon);
+        Assert.DoesNotContain(anonList.Items, i => i.GroupId == ownedId);
+        Assert.Contains(anonList.Items, i => i.GroupName == DbInitializer.DefaultGroupName);
     }
 
     [Fact]
